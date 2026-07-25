@@ -34,13 +34,23 @@ export function indexEntryFromProfile(
 
   const ua = String(nav.user_agent ?? "");
   const platform = String(nav.platform ?? "");
+  // UA-CH. Checked FIRST because it is the only source present on some real inputs: converted
+  // chrome-fingerprints records carry `uadata.platform` while leaving `user_agent` and
+  // `platform` null (the converter deliberately drops the browser version). Reading only the UA
+  // string silently skipped every one of those — 10,000 usable profiles classified as garbage.
+  const uadata = (nav.uadata ?? {}) as Record<string, unknown>;
+  const chPlatform = String(
+    uadata.platform ?? ((uadata.high_entropy as Record<string, unknown> | undefined)?.platform ?? ""),
+  );
+  const chMobile = Boolean(
+    uadata.mobile ?? (uadata.high_entropy as Record<string, unknown> | undefined)?.mobile,
+  );
 
-  // OS family from navigator.platform first (stable across UA reduction), UA as a fallback.
   let os: string;
-  if (/win/i.test(platform) || /Windows/i.test(ua)) os = "windows";
-  else if (/mac/i.test(platform) || /Mac OS X/i.test(ua)) os = "macos";
-  else if (/linux|x11/i.test(platform) || /Linux/i.test(ua)) os = "linux";
-  else if (/android/i.test(ua)) os = "android";
+  if (chMobile || /android/i.test(chPlatform) || /android/i.test(ua)) os = "android";
+  else if (/windows|win/i.test(chPlatform) || /win/i.test(platform) || /Windows/i.test(ua)) os = "windows";
+  else if (/macos|mac/i.test(chPlatform) || /mac/i.test(platform) || /Mac OS X/i.test(ua)) os = "macos";
+  else if (/linux|chrome ?os|x11/i.test(chPlatform) || /linux|x11/i.test(platform) || /Linux/i.test(ua)) os = "linux";
   else return null; // unclassifiable: better to skip than to mislabel and mis-serve it
 
   // Version is OPTIONAL by design. Hardware-only imports (e.g. converted chrome-fingerprints
@@ -101,6 +111,9 @@ export function importDirectory(dir: string): ImportResult {
       continue;
     }
     // A clearcote-profile always has navigator; without it this is some other kind of file.
+    // NOTE the check is on the SECTION, not on any field inside it — a converted
+    // chrome-fingerprints record has `navigator` with null user_agent/platform and is perfectly
+    // usable via uadata.
     if (!parsed || typeof parsed !== "object" || !parsed.navigator) {
       skipped.push({ file: f, reason: "not a clearcote-profile (no navigator)" });
       continue;

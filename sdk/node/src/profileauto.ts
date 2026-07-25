@@ -19,6 +19,7 @@ import { PROFILE_DIR } from "./profile.js";
 import { importDirectory, loadImportedProfile } from "./profileimport.js";
 import { selectProfile, type HostFacts, type ProfileIndexEntry, type Selection } from "./profilelib.js";
 import { fetchIndex, fetchProfile, type ProfileSourceOptions } from "./profilesource.js";
+import { ensureLocalProfiles, hasLocalProfiles } from "./profilefetch.js";
 
 /** Where an imported (e.g. converted chrome-fingerprints) directory is looked for by default. */
 export const DEFAULT_LOCAL_DIR =
@@ -26,11 +27,38 @@ export const DEFAULT_LOCAL_DIR =
 
 export type ProfileOrigin = "service" | "local";
 
+/**
+ * First engine major that implements `--fingerprint-profile`.
+ *
+ * BACKWARDS COMPATIBILITY, AND WHY THIS IS A HARD GATE. The free 149 build ships a 15-patch
+ * stack with no persona-profile patch at all, so it does not merely apply the profile badly —
+ * it ignores the switch entirely. Chromium discards unknown switches silently, so a 149 user
+ * who asked for a profile would launch with NO persona while believing they had one. That is
+ * strictly worse than the seed farbling 149 does support, because the failure is invisible.
+ *
+ * So a profile is never sent to an engine that cannot read it. Callers on such an engine fall
+ * back to the seed path, which is what 149 was built for.
+ */
+export const MIN_PROFILE_ENGINE_MAJOR = 150;
+
+/** Whether this engine can actually apply an imported profile. */
+export function engineSupportsProfiles(browserMajor: number): boolean {
+  return Number.isFinite(browserMajor) && browserMajor >= MIN_PROFILE_ENGINE_MAJOR;
+}
+
 export interface AutoOptions extends ProfileSourceOptions {
   /** Directory of clearcote-profile JSON used when the service is unavailable. */
   localDir?: string;
   /** Skip the service entirely and use the local directory. */
   preferLocal?: boolean;
+  /** Set `false` to never bootstrap a local library on the fallback path. Default: allowed. */
+  autoDownload?: boolean;
+  /** How many profiles the first-run bootstrap converts (default 500). */
+  autoDownloadCount?: number;
+  /** Path to convert_dataset.py, for the bootstrap. Defaults to this checkout's copy, if any. */
+  converter?: string;
+  /** Python executable used by the bootstrap. */
+  python?: string;
   quiet?: boolean;
 }
 
@@ -161,6 +189,20 @@ ${localSetupHint(opts.localDir ?? DEFAULT_LOCAL_DIR)}`);
     return { profile, selection, source: "service" };
   } catch (serviceErr) {
     const reason = String(serviceErr instanceof Error ? serviceErr.message : serviceErr).slice(0, 200);
+    // First-run bootstrap: if there is no local library yet, try to build one before giving up.
+    // Only on the fallback path — a working service must never pay for this. Never throws: a
+    // bootstrap failure has to degrade to "no local backup", not take down the launch.
+    if (opts.autoDownload !== false) {
+      const dir = opts.localDir ?? DEFAULT_LOCAL_DIR;
+      if (!hasLocalProfiles(dir)) {
+        await ensureLocalProfiles(dir, join(PROFILE_DIR, "library"), {
+          quiet: opts.quiet,
+          count: opts.autoDownloadCount,
+          converter: opts.converter,
+          python: opts.python,
+        }).catch(() => false);
+      }
+    }
     try {
       const r = resolveLocal(host, opts);
       // Both halves of the story: what failed, and what is being used instead.

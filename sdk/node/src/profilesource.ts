@@ -113,9 +113,21 @@ interface ProbeResult {
   device_memory?: number;
 }
 
-/** Read the host's real GPU/display by rendering in the engine itself, with no persona applied. */
+/**
+ * Read the host's real GPU/display by rendering in the engine itself, with no persona applied.
+ *
+ * `browserMajor` is a FALLBACK only. The major is read from the running browser when possible,
+ * because that is the only authoritative source: the caller may have pinned `version: "149"`,
+ * set CLEARCOTE_BROWSER_VERSION, or supplied their own `executablePath`, and in all of those the
+ * SDK's pinned RELEASE version describes a different binary than the one about to run. Filtering
+ * profiles against the wrong major would silently produce a persona that contradicts the engine.
+ */
 export async function measureHost(
-  launchFn: (opts: Record<string, unknown>) => Promise<{ newContext: () => Promise<{ newPage: () => Promise<unknown> }>; close: () => Promise<void> }>,
+  launchFn: (opts: Record<string, unknown>) => Promise<{
+    newContext: () => Promise<{ newPage: () => Promise<unknown> }>;
+    version?: () => string;
+    close: () => Promise<void>;
+  }>,
   exe: string,
   browserMajor: number,
 ): Promise<HostFacts> {
@@ -136,9 +148,19 @@ export async function measureHost(
     // it here would mean adding the DOM lib to a Node-only SDK's tsconfig just to describe code
     // that never executes in Node.
     const facts = await page.evaluate(PROBE_EXPR);
+    // The engine's OWN version wins over the caller's guess. Playwright reports it as
+    // "150.0.7871.114"; fall back to the passed-in major if the shape is unexpected.
+    let major = browserMajor;
+    try {
+      const v = typeof browser.version === "function" ? browser.version() : "";
+      const m = String(v).match(/(\d+)\./);
+      if (m) major = Number(m[1]);
+    } catch {
+      /* keep the fallback */
+    }
     const out: HostFacts = {
       os_family: hostOsFamily(),
-      browser_major: browserMajor,
+      browser_major: major,
       gpu_vendor: gpuVendorClass(facts.renderer),
       screen_width: facts.screen_width,
       screen_height: facts.screen_height,

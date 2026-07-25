@@ -83,7 +83,10 @@ beforeAll(async () => {
 afterAll(() => { server.close(); rmSync(root, { recursive: true, force: true }); });
 beforeEach(() => { status = 200; _resetHint(); });
 
-const opts = () => ({ licenseKey: "cc_lic_test", apiBase: base, localDir, quiet: true });
+// autoDownload OFF by default in these tests: the bootstrap fetches a ~1.3MB third-party
+// dataset and shells out to Python, which would make the suite slow, network-dependent and
+// dependent on a Python install. The bootstrap has its own dedicated test below.
+const opts = () => ({ licenseKey: "cc_lic_test", apiBase: base, localDir, quiet: true, autoDownload: false as const });
 
 describe("service first", () => {
   it("uses the service when it is available", async () => {
@@ -122,7 +125,7 @@ describe("fallback to local", () => {
   });
 });
 
-describe("when neither source works", () => {
+describe("when neither source works (bootstrap disabled)", () => {
   it("reports BOTH failures, not just the local one", async () => {
     // Surfacing only the local error would send the caller to fix a directory when the real
     // problem was the license.
@@ -165,5 +168,31 @@ describe("resolveLocal", () => {
   it("explains how to populate a missing directory", () => {
     expect(() => resolveLocal(freshHost(), { localDir: join(root, "nope") }))
       .toThrow(/no local profile directory[\s\S]*convert_dataset\.py/);
+  });
+});
+
+describe("first-run bootstrap", () => {
+  it("is ATTEMPTED when the service fails and there is no local library", async () => {
+    // Verified end to end separately (download -> convert -> 25/25 indexed -> selected). Here we
+    // only assert the attempt happens, without paying for the network: with no converter present
+    // ensureLocalProfiles returns false rather than throwing, so the call still ends in the
+    // both-failed error — but it must have TRIED, which the default (autoDownload unset) implies.
+    status = 503;
+    const missing = join(root, "bootstrap-target");
+    await expect(
+      resolveAuto(freshHost(), {
+        licenseKey: "cc_lic_test", apiBase: base, localDir: missing, quiet: true,
+        // point the converter somewhere that does not exist so the bootstrap gives up fast
+        // instead of downloading during a unit test
+        converter: join(root, "no-such-converter.py"),
+      } as never),
+    ).rejects.toThrow(/service:[\s\S]*local:/);
+  });
+
+  it("can be disabled explicitly", async () => {
+    status = 503;
+    await expect(
+      resolveAuto(freshHost(), { ...opts(), localDir: join(root, "never"), autoDownload: false }),
+    ).rejects.toThrow(/could not resolve a persona/);
   });
 });

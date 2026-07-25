@@ -28,11 +28,11 @@ import { resolveGeo, type Geo } from "./geoip.js";
 import { installHumanize, installHumanizeOnContext, type HumanizeOptions } from "./humanize.js";
 import { agentArgs, splitAgentOptions, type AgentOptions } from "./agent.js";
 import { resolveProfileOptions, Profile } from "./profile.js";
-import { resolveAuto, resolveLocal, localSetupHint, DEFAULT_LOCAL_DIR, type AutoOptions, type AutoResult } from "./profileauto.js";
+import { resolveAuto, resolveLocal, localSetupHint, engineSupportsProfiles, MIN_PROFILE_ENGINE_MAJOR, DEFAULT_LOCAL_DIR, type AutoOptions, type AutoResult } from "./profileauto.js";
 import { measureHost, fetchIndex, fetchProfile, hostOsFamily, type ProfileSourceOptions } from "./profilesource.js";
 import { importDirectory, loadImportedProfile, indexEntryFromProfile } from "./profileimport.js";
 import {
-  selectProfile, scoreProfile, eligible, gpuVendorClass,
+  selectProfile, scoreProfile, eligible, gpuVendorClass, defaultStickyKey,
   type HostFacts, type ProfileIndexEntry, type SelectMode, type SelectOptions, type Selection,
 } from "./profilelib.js";
 import {
@@ -69,7 +69,8 @@ export {
   type ProfileSourceOptions,
 } from "./profilesource.js";
 export {
-  resolveAuto, resolveLocal, loadLocalIndex, localSetupHint, DEFAULT_LOCAL_DIR,
+  resolveAuto, resolveLocal, loadLocalIndex, localSetupHint, engineSupportsProfiles,
+  MIN_PROFILE_ENGINE_MAJOR, DEFAULT_LOCAL_DIR,
   type AutoOptions, type AutoResult, type ProfileOrigin,
 } from "./profileauto.js";
 export {
@@ -342,15 +343,39 @@ async function applyAutoProfile(
   opts: AutoOptions,
 ): Promise<void> {
   if (fingerprint.fingerprintProfile !== undefined) return;
-  const major = Number(String(RELEASE.version).split(".")[0]);
+  // RELEASE.version is only the SDK's PINNED default; measureHost reads the real major from the
+  // engine it launches, which is what matters when the caller pinned a version or brought their
+  // own binary.
   const host = await measureHost(
     (o) => launch(o as LaunchOptions) as unknown as Promise<{
       newContext: () => Promise<{ newPage: () => Promise<unknown> }>;
+      version?: () => string;
       close: () => Promise<void>;
     }>,
     exe,
-    major,
+    Number(String(RELEASE.version).split(".")[0]),
   );
+
+  // BACKWARDS COMPATIBILITY. The free 149 engine has no persona-profile patch, and Chromium
+  // discards unknown switches silently — so sending it a profile would leave the user with NO
+  // persona while believing they had one. Fall back to the seed path that engine does support,
+  // and say so, rather than failing or silently doing nothing.
+  if (!engineSupportsProfiles(host.browser_major)) {
+    if (fingerprint.fingerprint === undefined) {
+      // A stable per-machine seed, so this degrades to a CONSISTENT identity rather than a new
+      // one per launch — same reasoning as keyless "rotate".
+      fingerprint.fingerprint = defaultStickyKey();
+    }
+    if (!opts.quiet) {
+      process.stderr.write(
+        `[clearcote] [profile] engine ${host.browser_major} does not support imported profiles ` +
+          `(added in ${MIN_PROFILE_ENGINE_MAJOR}) — using the seed persona instead. ` +
+          `Upgrade with version: "150" (PRO) for the profile path.\n`,
+      );
+    }
+    return;
+  }
+
   const { profile } = await resolveAuto(host, opts);
   fingerprint.fingerprintProfile = profile;
   // A seed alongside a profile is the combination that fails strict scoring, and it also makes

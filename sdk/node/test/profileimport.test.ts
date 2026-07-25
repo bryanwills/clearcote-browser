@@ -135,3 +135,55 @@ describe("end to end", () => {
     expect(() => loadImportedProfile(dir, "nope")).toThrow(/not found/);
   });
 });
+
+describe("converted chrome-fingerprints records", () => {
+  // REGRESSION. The converter deliberately leaves `user_agent` and `platform` null (it drops the
+  // browser version so the persona inherits the engine's) and carries the platform in `uadata`
+  // instead. An importer that reads only the UA string skips every one of those records — 25/25
+  // in the first end-to-end run — and the failure looks like "the dataset is broken".
+  const converted = {
+    meta: { schema_version: 1, source: "chrome-fingerprints", captured_at: null, chrome_version: null },
+    navigator: {
+      user_agent: null,
+      platform: null,
+      uadata: {
+        platform: "Windows",
+        mobile: false,
+        high_entropy: { platform: "Windows", platformVersion: "15.0.0", architecture: "x86", bitness: "64" },
+      },
+    },
+    screen: { width: 1536, height: 864, device_pixel_ratio: 1.25 },
+    webgl: { webgl1: { debug: { UNMASKED_RENDERER_WEBGL: "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)" } } },
+    hardware_concurrency: 12,
+    device_memory: 8,
+  };
+
+  it("classifies the OS from uadata when the UA string is null", () => {
+    const e = indexEntryFromProfile("conv", converted)!;
+    expect(e).not.toBeNull();
+    expect(e.os_family).toBe("windows");
+    expect(e.gpu_vendor).toBe("intel");
+    expect(e.screen_width).toBe(1536);
+  });
+
+  it("records no browser_major, so the record stays engine-agnostic", () => {
+    expect(indexEntryFromProfile("conv", converted)!.browser_major).toBeNull();
+  });
+
+  it("classifies macOS and Android from uadata too", () => {
+    const mac = { ...converted, navigator: { user_agent: null, platform: null, uadata: { platform: "macOS", mobile: false } } };
+    expect(indexEntryFromProfile("m", mac)!.os_family).toBe("macos");
+    const android = { ...converted, navigator: { user_agent: null, platform: null, uadata: { platform: "Android", mobile: true } } };
+    expect(indexEntryFromProfile("a", android)!.os_family).toBe("android");
+  });
+
+  it("treats uadata.mobile as android even when the platform string is odd", () => {
+    const m = { ...converted, navigator: { user_agent: null, platform: null, uadata: { platform: "", mobile: true } } };
+    expect(indexEntryFromProfile("x", m)!.os_family).toBe("android");
+  });
+
+  it("still skips a record with no usable platform signal at all", () => {
+    const blank = { ...converted, navigator: { user_agent: null, platform: null, uadata: {} } };
+    expect(indexEntryFromProfile("blank", blank)).toBeNull();
+  });
+});
