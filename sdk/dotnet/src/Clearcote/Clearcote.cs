@@ -89,6 +89,54 @@ public static class Clearcote
         return browser;
     }
 
+    /// <summary>
+    /// Launch on a throwaway profile directory that is deleted when the context closes, and return
+    /// a Playwright <see cref="IBrowserContext"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// PREFER THIS OVER <see cref="LaunchAsync"/>. Incognito cannot load a component-updated CDM,
+    /// so <c>requestMediaKeySystemAccess('com.widevine.alpha')</c> rejects and the EME surface is a
+    /// no-Widevine tell on a build branded Google Chrome (measured against the live audit on
+    /// 150-r10). A profile-backed launch can carry the CDM; incognito cannot, at all.
+    /// </para>
+    /// <para>
+    /// The Python and Node SDKs made this the behaviour of <c>launch()</c> itself in 0.23.0. C#
+    /// cannot: <see cref="IBrowser"/> and <see cref="IBrowserContext"/> are distinct interfaces
+    /// with no shared base, and there is no monkeypatching to paper over the difference, so
+    /// changing <see cref="LaunchAsync"/> would be a COMPILE break for every caller rather than a
+    /// behaviour change. A separate method keeps existing builds working and makes the choice
+    /// explicit. Both expose <c>NewPageAsync()</c>, so most call sites port by changing one word.
+    /// </para>
+    /// <para>
+    /// The directory is removed on close and again on process exit. The retry is not defensive
+    /// padding: on Windows the browser holds handles under the profile for a short window after
+    /// close, so a single removal silently fails and the directory leaks.
+    /// </para>
+    /// </remarks>
+    public static async Task<IBrowserContext> LaunchEphemeralProfileAsync(LaunchOptions? options = null)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "clearcote-run-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(dir);
+        var context = await LaunchPersistentContextAsync(dir, options).ConfigureAwait(false);
+
+        var done = false;
+        void Remove()
+        {
+            if (done) return;
+            for (var attempt = 0; attempt < 6; attempt++)
+            {
+                try { Directory.Delete(dir, recursive: true); done = true; return; }
+                catch (DirectoryNotFoundException) { done = true; return; }
+                catch (IOException) { Thread.Sleep(250 * (attempt + 1)); }
+                catch (UnauthorizedAccessException) { Thread.Sleep(250 * (attempt + 1)); }
+            }
+        }
+        context.Close += (_, _) => Remove();
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => Remove();
+        return context;
+    }
+
     /// Launch a persistent context (a saved profile dir) and return a Playwright <see cref="IBrowserContext"/>.
     public static async Task<IBrowserContext> LaunchPersistentContextAsync(string userDataDir, LaunchOptions? options = null)
     {
@@ -209,7 +257,15 @@ public static class Clearcote
         baseList.AddRange(extArgs);
         baseList.AddRange(proxyArgs);
         baseList.AddRange(LaunchOpts.QuicArgs(proxyForQuic));
-        if (disablePrivacySandbox != false) baseList.AddRange(LaunchOpts.PrivacySandboxArgs());
+        // DEFAULT FLIPPED IN 0.23.0 — opt IN to disabling, rather than opt out.
+        //
+        // Disabling Topics/FLEDGE/Shared Storage/Fenced Frames is coherent for a de-Googled
+        // persona and incoherent for the default one: Brand "chrome" claims Google Chrome, which
+        // ships all of them. Measured on the live audit against 150-r10, "a build claiming Chrome
+        // carries the Privacy Sandbox surface Chrome ships" failed as an implausible value — the
+        // same defect class as the WebUSB split fixed in r7. Set DisablePrivacySandbox = true when
+        // the persona genuinely is de-Googled Chromium.
+        if (disablePrivacySandbox == true) baseList.AddRange(LaunchOpts.PrivacySandboxArgs());
         baseList.AddRange(LaunchOpts.WebrtcDefaultDenyArgs(baseList.Concat(userArgs), webrtcIp));
         return LaunchOpts.MergeFeatureFlags(baseList.Concat(userArgs));
     }

@@ -35,7 +35,10 @@ public class LaunchOptions : FingerprintOptions
     public IReadOnlyList<string>? Args { get; set; }
     /// Unpacked extension dirs (--load-extension + --disable-extensions-except).
     public IReadOnlyList<string>? Extensions { get; set; }
-    /// Set false to KEEP the Privacy-Sandbox features (by default the SDK disables them, like a stock profile).
+    /// Set true to DISABLE the Privacy-Sandbox features (Topics/FLEDGE/Shared Storage/Fenced Frames).
+    /// Default false since 0.23.0: real Google Chrome ships all of them, and the default persona
+    /// claims to be Google Chrome, so disabling them was a coherence tell rather than a privacy win.
+    /// Set true only when the persona genuinely is de-Googled Chromium.
     public bool? DisablePrivacySandbox { get; set; }
     /// Environment variables for the browser process (the SDK adds CLEARCOTE_RUN_TOKEN when licensed).
     public IDictionary<string, string>? Env { get; set; }

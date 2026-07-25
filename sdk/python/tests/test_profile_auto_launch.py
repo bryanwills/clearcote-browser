@@ -108,3 +108,63 @@ class TestPrepareRouting:
             raise
         except Exception:
             pass  # any non-AssertionError failure is downstream of the routing decision
+
+
+class TestNestedProbeLaunchIsLicensed:
+    """The host probe launches the SAME binary the session will use.
+
+    On PRO that is the gated build, so a probe launched without a run-token is killed by the
+    engine gate and surfaces as `TargetClosedError: Target page, context or browser has been
+    closed` — a message naming neither licensing nor any call the caller wrote. It worked only
+    when the key happened to be in CLEARCOTE_LICENSE_KEY; passing license_key= as a kwarg, the
+    documented way, failed. Reproduced live against 150-r10 before the fix.
+    """
+
+    def test_probe_launch_receives_the_license(self, stubbed, monkeypatch):
+        seen = {}
+
+        def fake_measure(launch_fn, exe, major):
+            # Call it the way _profilesource.measure_host does, and record what reaches launch().
+            launch_fn(executable_path=exe, headless=True, quiet=True)
+            return HOST
+
+        def fake_launch(**kw):
+            seen.update(kw)
+            raise RuntimeError("stop here — the kwargs are the assertion")
+
+        monkeypatch.setattr(clearcote, "measure_host", fake_measure)
+        monkeypatch.setattr(clearcote, "launch", fake_launch)
+
+        with pytest.raises(RuntimeError):
+            clearcote._apply_auto_profile({}, "/path/chrome", {}, quiet=True,
+                                          pro=("cc_lic_probe", "https://api.example"))
+
+        assert seen["license_key"] == "cc_lic_probe", "the gated probe launch must carry the key"
+        assert seen["license_api_base"] == "https://api.example"
+        # The probe reads GPU/display off about:blank and needs no profile: it must not pay for a
+        # throwaway profile directory on every "auto" resolution.
+        assert seen["ephemeral_profile"] is False
+
+
+class TestPrivacySandboxDefault:
+    """Default flipped in 0.23.0: Privacy Sandbox stays ON unless explicitly disabled.
+
+    The default persona is brand="chrome", and real Google Chrome ships Topics/FLEDGE/Shared
+    Storage/Fenced Frames. Disabling them by default presented a browser calling itself Google
+    Chrome while missing an API surface Google Chrome always has — which the live audit scores as
+    an implausible value, not as a privacy win.
+    """
+
+    SANDBOX = "BrowsingTopics"
+
+    def _args(self, monkeypatch, **kwargs):
+        monkeypatch.setattr(clearcote, "_resolve_binary", lambda *a, **k: "/path/chrome")
+        _exe, args, *_rest = clearcote._prepare(dict(kwargs))
+        return args
+
+    def test_privacy_sandbox_is_not_disabled_by_default(self, monkeypatch):
+        assert not any(self.SANDBOX in a for a in self._args(monkeypatch))
+
+    def test_opt_in_still_disables_it(self, monkeypatch):
+        args = self._args(monkeypatch, disable_privacy_sandbox=True)
+        assert any(self.SANDBOX in a for a in args)

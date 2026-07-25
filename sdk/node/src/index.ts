@@ -123,13 +123,27 @@ interface ProfileOption {
 interface ExtensionsOption {
   /** Unpacked-extension directory paths. */
   extensions?: string[];
-  /** Disable Privacy Sandbox APIs (Topics/FLEDGE/Shared Storage/…). Default `true` — a
-   * de-Googled build shouldn't expose them. Set `false` to keep them. */
+  /** Disable Privacy Sandbox APIs (Topics/FLEDGE/Shared Storage/Fenced Frames).
+   *
+   * Default `false` since 0.23.0 — real Google Chrome ships all of them, and the default persona
+   * (`brand: "chrome"`) claims to be Google Chrome, so disabling them was a coherence tell rather
+   * than a privacy win. Set `true` when the persona genuinely is de-Googled Chromium. */
   disablePrivacySandbox?: boolean;
 }
 
+/** Profile-directory control for {@link launch}. */
+interface EphemeralProfileOption {
+  /** Launch on a throwaway persistent profile that is deleted on close. Default `true` since
+   * 0.23.0 — incognito cannot load the Widevine CDM, which is itself a tell. Set `false` for the
+   * pre-0.23 incognito launch. */
+  ephemeralProfile?: boolean;
+  /** Keep a profile at this path instead of a throwaway one (delegates to
+   * {@link launchPersistentContext}; the directory is NOT deleted). */
+  userDataDir?: string;
+}
+
 /** Options for {@link launch}: Playwright launch options + Clearcote fingerprint + agent + download options. */
-export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, ExtensionsOption, HumanizeOptions, DownloadOptions, LicenseOptions {}
+export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, ExtensionsOption, EphemeralProfileOption, HumanizeOptions, DownloadOptions, LicenseOptions {}
 
 /** Options for {@link launchPersistentContext}. */
 export interface PersistentContextOptions
@@ -254,7 +268,15 @@ function assembleArgs(
   proxyForQuic?: PwProxy
 ): string[] {
   const base = [...fpArgs, ...agArgs, ...extArgs, ...proxyArgs, ...quicArgs(proxyForQuic)];
-  if (disablePrivacySandbox !== false) base.push(...privacySandboxArgs());
+  // DEFAULT FLIPPED IN 0.23.0 — opt IN to disabling, rather than opt out.
+  //
+  // Disabling Topics/FLEDGE/Shared Storage/Fenced Frames is coherent for a de-Googled persona, and
+  // incoherent for the default one: `brand: "chrome"` claims Google Chrome, which ships all of
+  // them. Measured on the live audit against 150-r10, "a build claiming Chrome carries the Privacy
+  // Sandbox surface Chrome ships" failed as an implausible value — the same defect class as the
+  // WebUSB split fixed in r7. Pass disablePrivacySandbox: true when the persona really is
+  // de-Googled Chromium.
+  if (disablePrivacySandbox === true) base.push(...privacySandboxArgs());
   base.push(...webrtcDefaultDenyArgs([...base, ...userArgs], webrtcIp));
   return mergeFeatureFlags([...base, ...userArgs]);
 }
@@ -346,8 +368,24 @@ async function applyAutoProfile(
   // RELEASE.version is only the SDK's PINNED default; measureHost reads the real major from the
   // engine it launches, which is what matters when the caller pinned a version or brought their
   // own binary.
+  // THE NESTED LAUNCH NEEDS THE LICENSE TOO, and used to be given it only by accident.
+  //
+  // measureHost launches the SAME binary the real session will use. On PRO that is the gated
+  // build: with no run-token the engine gate kills it at startup and Playwright surfaces
+  // `TargetClosedError: Target page, context or browser has been closed` — which names neither
+  // licensing nor a call the caller wrote. It only worked when the key happened to be in
+  // CLEARCOTE_LICENSE_KEY, because launch() resolves that itself; passing licenseKey as an
+  // option — the documented way — failed. opts.licenseKey is already resolved by the caller.
+  //
+  // ephemeralProfile: false — the probe reads GPU/display off about:blank and needs no profile,
+  // so it skips the create+delete a persistent launch would otherwise pay on every resolution.
   const host = await measureHost(
-    (o) => launch(o as LaunchOptions) as unknown as Promise<{
+    (o) => launch({
+      ...(o as LaunchOptions),
+      licenseKey: opts.licenseKey,
+      licenseApiBase: opts.apiBase,
+      ephemeralProfile: false,
+    }) as unknown as Promise<{
       newContext: () => Promise<{ newPage: () => Promise<unknown> }>;
       version?: () => string;
       close: () => Promise<void>;
@@ -390,8 +428,91 @@ async function applyAutoProfile(
   }
 }
 
-/** Launch Clearcote and return a standard Playwright {@link Browser}. */
+/**
+ * Delete a throwaway profile directory once its context closes.
+ *
+ * THE RETRY IS NOT DEFENSIVE PADDING — a single attempt measurably does not work. On Windows the
+ * browser still holds handles under the profile directory for a short window after `close()`
+ * resolves, so the first removal throws EBUSY/EPERM. Measured on the first build of this change
+ * (Python port): the directory survived a close plus a 1.5s wait and leaked silently.
+ *
+ * Two triggers, because neither alone is enough: `close` covers an orderly shutdown, and the
+ * process-exit hook covers a script that throws or is interrupted with the browser still open.
+ * Both funnel through one idempotent remove.
+ */
+function installEphemeralProfileCleanup(context: BrowserContext, userDataDir: string): void {
+  let done = false;
+  const remove = async () => {
+    if (done) return;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      try {
+        rmSync(userDataDir, { recursive: true, force: true });
+        done = true;
+        return;
+      } catch {
+        await new Promise((r) => setTimeout(r, 250 * (attempt + 1))); // 0.25→1.5s, ~5s total
+      }
+    }
+  };
+  context.on("close", () => { void remove(); });
+  // Synchronous: an exit handler cannot await, and an unresolved promise at exit removes nothing.
+  process.once("exit", () => {
+    if (done) return;
+    try { rmSync(userDataDir, { recursive: true, force: true }); } catch { /* temp sweeper gets it */ }
+  });
+}
+
+/**
+ * Make a persistent BrowserContext satisfy code written against launch()'s Browser.
+ *
+ * `newContext()` returns THE PERSISTENT CONTEXT ITSELF rather than a fresh incognito one. That is
+ * deliberate: a real incognito context would silently leave the profile behind — taking the
+ * Widevine CDM and the component-updated state with it — handing back exactly the browser this
+ * change exists to stop producing. Two calls returning the same context is a visible, documented
+ * compromise; quietly returning a profile-less browser is not.
+ */
+function asBrowserLike(context: BrowserContext): Browser {
+  const c = context as BrowserContext & { newContext?: unknown; contexts?: unknown };
+  if (c.newContext === undefined) c.newContext = async () => context;
+  if (c.contexts === undefined) c.contexts = () => [context];
+  return context as unknown as Browser;
+}
+
+/**
+ * Launch Clearcote and return a Playwright browser handle backed by a REAL Chrome profile.
+ *
+ * PROFILE-BACKED BY DEFAULT (changed in 0.23.0). This used to be `chromium.launch()` — incognito,
+ * no profile directory. Incognito cannot load a component-updated CDM, so
+ * `requestMediaKeySystemAccess('com.widevine.alpha')` rejected and the EME surface was a
+ * no-Widevine tell on a build branded Google Chrome (measured against the live audit on 150-r10).
+ * It now launches a persistent context on a throwaway directory, so `widevine: true` works here.
+ *
+ * The directory is deleted when the context closes AND on process exit, so nothing is left behind
+ * and no state survives to the next launch — the incognito-like isolation callers relied on is
+ * preserved. Pass `userDataDir` to keep a profile, or `ephemeralProfile: false` to opt back out.
+ */
 export async function launch(options: LaunchOptions = {}): Promise<Browser> {
+  // ephemeralProfile: false restores the pre-0.23 incognito launch. Kept because the persistent
+  // path costs a directory create+delete per launch, which a caller spawning hundreds of
+  // short-lived browsers may reasonably not want to pay for a CDM they never touch.
+  const { ephemeralProfile, userDataDir, ...restOpts } = options as LaunchOptions & {
+    ephemeralProfile?: boolean;
+    userDataDir?: string;
+  };
+  if (userDataDir !== undefined) {
+    return asBrowserLike(await launchPersistentContext(userDataDir, restOpts as PersistentContextOptions));
+  }
+  if (ephemeralProfile !== false) {
+    const dir = mkdtempSync(join(tmpdir(), "clearcote-run-"));
+    const context = await launchPersistentContext(dir, restOpts as PersistentContextOptions);
+    installEphemeralProfileCleanup(context, dir);
+    return asBrowserLike(context);
+  }
+  return launchIncognito(restOpts as LaunchOptions);
+}
+
+/** The pre-0.23 incognito launch, reached via `ephemeralProfile: false`. */
+async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   // profile="auto" is NOT a saved option-set — it resolves a real captured fingerprint later,
   // once the executable (and therefore the engine's Chromium major) is known.
   const isAutoProfile = options.profile === "auto";

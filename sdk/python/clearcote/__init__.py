@@ -7,10 +7,15 @@
     page.goto("https://abrahamjuliot.github.io/creepjs/")
     browser.close()
 
-launch() returns a standard Playwright sync ``Browser`` backed by the verified Clearcote
-binary (auto-downloaded + SHA-256 checked on first use, then cached). Every Playwright launch
-option (headless, proxy, args, timeout, ...) passes through; the fingerprint kwargs map to the
-engine switches.
+launch() returns a Playwright browser handle backed by the verified Clearcote binary
+(auto-downloaded + SHA-256 checked on first use, then cached). Every Playwright launch option
+(headless, proxy, args, timeout, ...) passes through; the fingerprint kwargs map to the engine
+switches.
+
+Since 0.23.0 it launches on a throwaway PROFILE directory rather than incognito, because
+incognito cannot load the Widevine CDM and its absence is itself a fingerprint on a build
+branded Google Chrome. The directory is deleted on close and on interpreter exit, so no state
+survives the run. ``ephemeral_profile=False`` restores the old incognito launch.
 """
 
 import atexit
@@ -100,7 +105,7 @@ __all__ = [
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.22.1"
+__version__ = "0.23.0"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -228,9 +233,28 @@ def _apply_auto_profile(fp, exe, select, quiet=False, pro=None):
     if fp.get("fingerprint_profile") is not None:
         return
     major = int(str(RELEASE["version"]).split(".")[0])
-    host = measure_host(lambda **kw: launch(**kw), exe, major)
     license_key = pro[0] if pro else None
     api_base = pro[1] if pro else None
+    # THE NESTED LAUNCH NEEDS THE LICENSE TOO, and used to be given it only by accident.
+    #
+    # measure_host launches the SAME binary that will run the real session. On PRO that binary is
+    # the gated build: with no run-token the engine gate kills it on startup and Playwright reports
+    # `TargetClosedError: Target page, context or browser has been closed` — a message that says
+    # nothing about licensing, from a call the caller never wrote. It only worked when the key
+    # happened to be in CLEARCOTE_LICENSE_KEY (or ~/.clearcote/license.key), because launch()
+    # resolves those itself; passing license_key= as a kwarg — the documented way — failed.
+    #
+    # `pro` is unpacked ABOVE the call for that reason. Do not move it back down.
+    # ephemeral_profile=False: the host probe reads GPU + display off about:blank and needs no
+    # profile, so it takes the cheap incognito path rather than creating and deleting a directory
+    # on every "auto" resolution.
+    host = measure_host(
+        lambda **kw: launch(
+            license_key=license_key, license_api_base=api_base, ephemeral_profile=False, **kw
+        ),
+        exe,
+        major,
+    )
     result = resolve_auto(host, license_key=license_key, api_base=api_base, quiet=quiet, **select)
     fp["fingerprint_profile"] = result["profile"]
     # A seed alongside a profile is the combination that fails strict scoring, and it also makes
@@ -270,9 +294,23 @@ def _prepare(kwargs):
     _cc_pro = kwargs.pop("_cc_pro", None)  # (license_key, api_base) or None -> pick PRO vs free binary
     extra_args = kwargs.pop("args", None)
     extensions = kwargs.pop("extensions", None)
-    # de-Googled-coherence default: disable Privacy Sandbox APIs (Topics/FLEDGE/Shared Storage/
-    # etc). Pass disable_privacy_sandbox=False to keep them.
-    disable_privacy_sandbox = kwargs.pop("disable_privacy_sandbox", True)
+    # DEFAULT FLIPPED TO FALSE — Privacy Sandbox now stays ON unless the caller asks otherwise.
+    #
+    # The old default disabled Topics/FLEDGE/Shared Storage/Fenced Frames, reasoning that a build
+    # claiming to be de-Googled should not answer document.browsingTopics(). That reasoning was
+    # sound for a de-Googled PERSONA — but the default persona is `brand="chrome"`, and real Google
+    # Chrome ships every one of these. So the shipped default presented a browser that called
+    # itself Google Chrome while missing an API surface Google Chrome always has.
+    #
+    # Measured on the live audit against 150-r10: the row "a build claiming Chrome carries the
+    # Privacy Sandbox surface Chrome ships" failed as an implausible value. It is the same defect
+    # class as the WebUSB split fixed in r7 — a subtractive privacy default that is coherent only
+    # against a persona nobody selects by default, and a hard tell against the one they do.
+    #
+    # Pass disable_privacy_sandbox=True to restore the old behaviour. It is the right choice when
+    # the persona genuinely is de-Googled Chromium (brand="chromium"), and the wrong one under a
+    # Chrome brand — which is why it is now a decision rather than a default.
+    disable_privacy_sandbox = kwargs.pop("disable_privacy_sandbox", False)
     cache_dir = kwargs.pop("cache_dir", None)
     quiet = kwargs.pop("quiet", False)
     auto_update = kwargs.pop("auto_update", None)
@@ -362,6 +400,83 @@ def _install_headed_viewport(browser):
     browser.new_page, browser.new_context = new_page, new_context
 
 
+def _install_ephemeral_profile_cleanup(context, user_data_dir):
+    """Delete the throwaway profile directory once the context closes.
+
+    THE DIRECTORY IS THE COST OF THE PERSISTENT DEFAULT, so it has to be paid back reliably.
+    A Chromium profile is 5-50MB and this session's audit found 570 leaked browser directories
+    on one developer machine from earlier tooling — the failure mode is silent until a disk
+    fills, which is exactly when it is most expensive.
+
+    Two triggers, because neither alone is enough:
+      * ``close`` fires on an orderly ``context.close()``;
+      * the atexit hook covers the interpreter exiting with the context still open, which is what
+        a crashing script or a KeyboardInterrupt actually does.
+    Both funnel through one idempotent remove, so running twice is harmless.
+
+    THE RETRY IS NOT DEFENSIVE PADDING — a single attempt measurably does not work. On Windows the
+    browser process still holds handles under the profile directory for a short window after
+    ``close()`` returns, so the first rmtree hits "being used by another process" and, with
+    ignore_errors=True, fails SILENTLY. Measured on the first build of this change: the directory
+    survived a close plus a 1.5s wait, reported clean, and leaked.
+
+    So: retry with a short backoff, and only swallow the error once the attempts are spent. A
+    failed cleanup must never raise into the caller's teardown — the directory is disposable,
+    their traceback is not — but it must not be swallowed on the first try either, which is how
+    570 directories accumulate without anyone noticing.
+    """
+    import atexit
+    import shutil
+    import time
+
+    done = {"v": False}
+
+    def cleanup(*_a):
+        if done["v"]:
+            return
+        for attempt in range(6):
+            try:
+                shutil.rmtree(user_data_dir)
+                done["v"] = True
+                return
+            except FileNotFoundError:
+                done["v"] = True  # already gone: someone else won the race, which is success
+                return
+            except OSError:
+                if attempt == 5:
+                    break
+                time.sleep(0.25 * (attempt + 1))  # 0.25→1.5s, ~5s total
+        # Out of attempts. Leave it for the atexit pass (the browser is usually gone by then);
+        # if that fails too the OS temp sweeper reclaims it, and `done` stays False so the
+        # atexit hook genuinely retries rather than short-circuiting.
+        shutil.rmtree(user_data_dir, ignore_errors=True)
+
+    context.on("close", cleanup)
+    atexit.register(cleanup)
+    return cleanup
+
+
+def _install_persistent_as_browser(context):
+    """Make a persistent BrowserContext satisfy the code written against ``launch()``'s Browser.
+
+    launch() has always returned a Playwright ``Browser`` and is documented as a drop-in, so the
+    persistent default cannot simply hand back a ``BrowserContext``: ``browser.new_context()`` is
+    ordinary Playwright and would break at the call site.
+
+    ``new_context()`` therefore returns THE PERSISTENT CONTEXT ITSELF rather than a fresh incognito
+    one. That is the deliberate part: a real incognito context would silently leave the profile
+    behind and take the Widevine CDM, the component-updated state and the cookies with it — the
+    caller would get back exactly the browser this change exists to stop handing them. Two calls
+    returning the same context is a visible, documented compromise; quietly returning a browser
+    without a profile is not.
+    """
+    if not hasattr(context, "new_context"):
+        context.new_context = lambda **_kw: context
+    if not hasattr(context, "contexts"):
+        context.contexts = [context]
+    return context
+
+
 def _is_win_launch_race(exc):
     m = str(exc).lower()
     return "spawn unknown" in m or "side-by-side" in m or "side by side" in m
@@ -421,15 +536,42 @@ def _acquire_lease_from_kwargs(kwargs):
 
 
 def launch(**kwargs):
-    """Launch Clearcote and return a standard Playwright sync ``Browser``.
+    """Launch Clearcote and return a Playwright browser handle backed by a REAL Chrome profile.
 
     Fingerprint kwargs: fingerprint, platform, platform_version, brand, brand_version,
     gpu_vendor, gpu_renderer, hardware_concurrency, location, timezone, accept_language,
     webrtc_ip, disable_gpu_fingerprint. Pass geoip=True to resolve the proxy's exit-IP geo and
     auto-fill any unset timezone/accept_language/location. Pass license_key=... (or set
     CLEARCOTE_LICENSE_KEY) to check out a concurrency slot for the PRO engine. All other kwargs
-    (headless, proxy, args, timeout, ...) pass through to Playwright's chromium.launch().
+    (headless, proxy, args, timeout, ...) pass through to Playwright.
+
+    PROFILE-BACKED BY DEFAULT (changed in 0.23.0). This used to be ``chromium.launch()`` —
+    incognito, no profile directory. Incognito cannot load a component-updated CDM, so
+    ``requestMediaKeySystemAccess('com.widevine.alpha')`` rejected and the EME surface was a
+    no-Widevine tell on a build branded Google Chrome (measured against the live audit on
+    150-r10). It now launches a persistent context on a throwaway directory, so ``widevine=True``
+    works here and the profile-shaped surface matches a real Chrome.
+
+    The directory is deleted when the context closes AND on interpreter exit — nothing is left
+    behind, and no state survives to the next launch, so the incognito-like isolation callers
+    relied on is preserved. Pass ``user_data_dir=`` to keep a profile instead (or call
+    ``launch_persistent_context`` directly), and ``ephemeral_profile=False`` to opt back out.
     """
+    # ephemeral_profile=False restores the pre-0.23 incognito launch. Kept because the persistent
+    # path costs a directory create+delete per launch, which a caller spawning hundreds of
+    # short-lived browsers may reasonably not want to pay for a CDM they never touch.
+    ephemeral = kwargs.pop("ephemeral_profile", True)
+    explicit_dir = kwargs.pop("user_data_dir", None)
+    if explicit_dir is not None:
+        return launch_persistent_context(explicit_dir, **kwargs)
+    if ephemeral:
+        import tempfile
+
+        udd = tempfile.mkdtemp(prefix="clearcote-run-")
+        context = launch_persistent_context(udd, **kwargs)
+        _install_ephemeral_profile_cleanup(context, udd)
+        return _install_persistent_as_browser(context)
+
     lease = _acquire_lease_from_kwargs(kwargs)  # opt-in; None in free mode
     # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
     exe, args, pw_kwargs, humanize, show_cursor, seed = _prepare(kwargs)
