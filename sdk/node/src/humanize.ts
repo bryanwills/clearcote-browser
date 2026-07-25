@@ -287,8 +287,10 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
   // Locator.dragTo patch (which can't see this closure) via the page object.
   (page as any)._clearcoteHeldGlide = async (x: number, y: number) => { await glide(x, y, { settle: true }); };
 
-  // DEFAULT under humanize (no longer opt-in): fire a short ambient burst on every load.
-  (page as any)._clearcoteAutoAmbient = true;
+  // OPT-IN: no ambient burst on load by default (it interleaves with caller-driven input,
+  // e.g. a slider drag). Call page.ambientMotion(ms) explicitly, or set
+  // page._clearcoteAutoAmbient = true to restore the per-load burst.
+  (page as any)._clearcoteAutoAmbient = false;
   page.on("load", () => {
     if ((page as any)._clearcoteAutoAmbient) {
       Promise.resolve((page as any).ambientMotion(rand(450, 950))).catch(() => {});

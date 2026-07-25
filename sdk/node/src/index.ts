@@ -28,6 +28,13 @@ import { resolveGeo, type Geo } from "./geoip.js";
 import { installHumanize, installHumanizeOnContext, type HumanizeOptions } from "./humanize.js";
 import { agentArgs, splitAgentOptions, type AgentOptions } from "./agent.js";
 import { resolveProfileOptions, Profile } from "./profile.js";
+import { resolveAuto, resolveLocal, localSetupHint, DEFAULT_LOCAL_DIR, type AutoOptions, type AutoResult } from "./profileauto.js";
+import { measureHost, fetchIndex, fetchProfile, hostOsFamily, type ProfileSourceOptions } from "./profilesource.js";
+import { importDirectory, loadImportedProfile, indexEntryFromProfile } from "./profileimport.js";
+import {
+  selectProfile, scoreProfile, eligible, gpuVendorClass,
+  type HostFacts, type ProfileIndexEntry, type SelectMode, type SelectOptions, type Selection,
+} from "./profilelib.js";
 import {
   extensionArgs,
   resolveProxy,
@@ -49,6 +56,22 @@ export { proEnsureBinary, type ProDownloadOptions } from "./download.js";
 export { resolveGeo, type Geo } from "./geoip.js";
 export type { HumanizeOptions } from "./humanize.js";
 export { Profile, listProfiles, loadProfile, PROFILE_DIR, type ProfileOptions } from "./profile.js";
+// Profile library: real captured personas, selected for coherence with THIS host.
+export {
+  selectProfile, scoreProfile, eligible, gpuVendorClass, defaultStickyKey, DEFAULT_MAX_ENCODED,
+  type HostFacts, type ProfileIndexEntry, type SelectMode, type SelectOptions, type Selection,
+} from "./profilelib.js";
+export {
+  importDirectory, loadImportedProfile, indexEntryFromProfile, type ImportResult,
+} from "./profileimport.js";
+export {
+  fetchIndex, fetchProfile, measureHost, hostOsFamily, resolveAutoProfile,
+  type ProfileSourceOptions,
+} from "./profilesource.js";
+export {
+  resolveAuto, resolveLocal, loadLocalIndex, localSetupHint, DEFAULT_LOCAL_DIR,
+  type AutoOptions, type AutoResult, type ProfileOrigin,
+} from "./profileauto.js";
 export {
   runAgentTask,
   agentArgs,
@@ -79,9 +102,20 @@ interface GeoipOption {
 
 /** When set, launch a saved persona ({@link Profile}) — by name (under `CLEARCOTE_PROFILE_DIR`),
  * by path, or a `Profile` instance. Its saved options form the base; any options passed alongside
- * here override them. */
+ * here override them.
+ *
+ * `"auto"` is special: instead of a saved option-set, it resolves a REAL CAPTURED FINGERPRINT
+ * for this machine — the licensed profile service first, a local imported directory as backup —
+ * and applies it as `fingerprintProfile` with NO seed. That distinction matters: with no
+ * `--fingerprint`, the farbling machinery never engages and canvas/WebGL/audio readbacks are
+ * byte-identical to an unmodified browser, which is why the profile path survives strict
+ * anti-bot scoring where a synthetic seed does not.
+ *
+ * Tune it with {@link AutoProfileOptions.profileSelect}. */
 interface ProfileOption {
-  profile?: string | Profile;
+  profile?: string | Profile | "auto";
+  /** Selection + source options for `profile: "auto"`. */
+  profileSelect?: AutoOptions;
 }
 
 /** Load unpacked extensions (emits --load-extension + --disable-extensions-except). */
@@ -292,11 +326,56 @@ function sweepRecoverDirs(keepMs = 60_000): void {
   }
 }
 
+/**
+ * Resolve `profile: "auto"` into a `fingerprintProfile`, in place.
+ *
+ * Host GPU/display can only be read by rendering, so this may launch the engine once with NO
+ * persona and cache the result (keyed by binary, 30 days). The nested launch passes no `profile`,
+ * so it cannot recurse.
+ *
+ * An explicit `fingerprintProfile` always wins — if the caller already named a profile, "auto"
+ * has nothing to decide and must not silently replace it.
+ */
+async function applyAutoProfile(
+  fingerprint: FingerprintOptions,
+  exe: string,
+  opts: AutoOptions,
+): Promise<void> {
+  if (fingerprint.fingerprintProfile !== undefined) return;
+  const major = Number(String(RELEASE.version).split(".")[0]);
+  const host = await measureHost(
+    (o) => launch(o as LaunchOptions) as unknown as Promise<{
+      newContext: () => Promise<{ newPage: () => Promise<unknown> }>;
+      close: () => Promise<void>;
+    }>,
+    exe,
+    major,
+  );
+  const { profile } = await resolveAuto(host, opts);
+  fingerprint.fingerprintProfile = profile;
+  // A seed alongside a profile is the combination that fails strict scoring, and it also makes
+  // profile fields apply only partially. "auto" therefore never sets one — and says so if the
+  // caller supplied one, rather than silently doing something different from what was asked.
+  if (fingerprint.fingerprint !== undefined && !opts.quiet) {
+    process.stderr.write(
+      "[clearcote] [profile] warning: profile:\"auto\" with an explicit fingerprint seed — the " +
+        "seed engages farbling, which strict anti-bots score as tampering and which makes " +
+        "profile fields apply only partially. Drop `fingerprint` for the coherent path.\n",
+    );
+  }
+}
+
 /** Launch Clearcote and return a standard Playwright {@link Browser}. */
 export async function launch(options: LaunchOptions = {}): Promise<Browser> {
+  // profile="auto" is NOT a saved option-set — it resolves a real captured fingerprint later,
+  // once the executable (and therefore the engine's Chromium major) is known.
+  const isAutoProfile = options.profile === "auto";
   // profile= a saved persona: its options are the base, explicit options override.
-  const merged = options.profile ? { ...resolveProfileOptions(options.profile), ...options } : options;
-  const { profile: _profile, extensions, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, ...rest } = merged;
+  const merged =
+    options.profile && !isAutoProfile
+      ? { ...resolveProfileOptions(options.profile as string | Profile), ...options }
+      : options;
+  const { profile: _profile, profileSelect: _profileSelect, extensions, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
@@ -311,6 +390,21 @@ export async function launch(options: LaunchOptions = {}): Promise<Browser> {
   // A license key selects the PRO (gated) binary; no key -> the free binary (unchanged path).
   const exe = await executablePath({ executablePath: exeOption, version, autoUpdate, cacheDir, quiet, pro: proSelector(licenseKey, licenseApiBase) });
   ensureRunnableHere(exe);
+  // profile:"auto" -> resolve a REAL captured fingerprint for this host and apply it as
+  // fingerprintProfile. Deliberately does NOT set a seed: with no --fingerprint the farbling
+  // machinery stays off, which is the whole reason this path survives strict scoring.
+  // Resolved here, after `exe` is known, because both the engine's Chromium major and the host
+  // GPU measurement depend on the binary that will actually run.
+  if (isAutoProfile) {
+    await applyAutoProfile(fingerprint, exe, {
+      quiet,
+      licenseKey: resolveLicenseKey(licenseKey),
+      // The profile service lives on the same backend as licensing, so a caller who overrode
+      // one has overridden both; profilesource still prefers CLEARCOTE_PROFILE_API when set.
+      apiBase: licenseApiBase,
+      ...(options.profileSelect ?? {}),
+    });
+  }
   const headed = (pwOptions as PlaywrightLaunchOptions).headless === false;
   // License (opt-in): check out a concurrency slot and inject CLEARCOTE_RUN_TOKEN so the PRO
   // engine gate lets the browser launch. Inert (null) in free mode / when no key is set.

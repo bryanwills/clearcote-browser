@@ -31,6 +31,16 @@ from ._launchopts import (
     webrtc_default_deny_args,
 )
 from ._profile import Profile, list_profiles, load_profile, resolve_profile_options
+# Profile library: real captured personas, selected for coherence with THIS host.
+from ._profilelib import (
+    DEFAULT_MAX_ENCODED, default_sticky_key, eligible, gpu_vendor_class,
+    score_profile, select_profile,
+)
+from ._profileimport import import_directory, index_entry_from_profile, load_imported_profile
+from ._profilesource import fetch_index, fetch_profile, host_os_family, measure_host
+from ._profileauto import (
+    DEFAULT_LOCAL_DIR, load_local_index, local_setup_hint, resolve_auto, resolve_local,
+)
 from ._render import check_render_coherence
 from ._warnings import emit_coherence_warnings
 from ._widevine import apply_widevine_launch, fetch_widevine, seed_widevine
@@ -59,6 +69,24 @@ __all__ = [
     "resolve_geo",
     "Profile",
     "list_profiles",
+    "select_profile",
+    "score_profile",
+    "eligible",
+    "gpu_vendor_class",
+    "default_sticky_key",
+    "DEFAULT_MAX_ENCODED",
+    "import_directory",
+    "index_entry_from_profile",
+    "load_imported_profile",
+    "fetch_index",
+    "fetch_profile",
+    "host_os_family",
+    "measure_host",
+    "resolve_auto",
+    "resolve_local",
+    "load_local_index",
+    "local_setup_hint",
+    "DEFAULT_LOCAL_DIR",
     "load_profile",
     "check_render_coherence",
     "fetch_widevine",
@@ -72,7 +100,7 @@ __all__ = [
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.21.0"
+__version__ = "0.22.0"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -187,11 +215,47 @@ def _guard(exe):
         )
 
 
+def _apply_auto_profile(fp, exe, select, quiet=False, pro=None):
+    """Resolve ``profile="auto"`` into ``fingerprint_profile``, in place.
+
+    Host GPU/display can only be read by rendering, so this may launch the engine once with NO
+    persona and cache the result (keyed by binary, 30 days). The nested launch passes no
+    ``profile``, so it cannot recurse.
+
+    An explicit ``fingerprint_profile`` always wins — if the caller already named a profile,
+    "auto" has nothing to decide and must not silently replace it.
+    """
+    if fp.get("fingerprint_profile") is not None:
+        return
+    major = int(str(RELEASE["version"]).split(".")[0])
+    host = measure_host(lambda **kw: launch(**kw), exe, major)
+    license_key = pro[0] if pro else None
+    api_base = pro[1] if pro else None
+    result = resolve_auto(host, license_key=license_key, api_base=api_base, quiet=quiet, **select)
+    fp["fingerprint_profile"] = result["profile"]
+    # A seed alongside a profile is the combination that fails strict scoring, and it also makes
+    # profile fields apply only partially. "auto" therefore never sets one — and says so if the
+    # caller supplied one, rather than silently doing something other than what was asked.
+    if fp.get("fingerprint") is not None and not quiet:
+        sys.stderr.write(
+            '[clearcote] [profile] warning: profile="auto" with an explicit fingerprint seed — '
+            "the seed engages farbling, which strict anti-bots score as tampering and which "
+            "makes profile fields apply only partially. Drop `fingerprint` for the coherent "
+            "path.\n"
+        )
+
+
 def _prepare(kwargs):
+    # profile="auto" is NOT a saved option-set — it resolves a real captured fingerprint later,
+    # once the executable (and therefore the engine's Chromium major) is known. See
+    # _apply_auto_profile.
+    profile = kwargs.pop("profile", None)
+    is_auto = profile == "auto"
+    kwargs["_cc_auto_profile"] = kwargs.pop("profile_select", None) if is_auto else None
+    kwargs["_cc_is_auto"] = is_auto
     # profile= a saved persona (name, path, or Profile): its options are the base layer;
     # explicit kwargs passed to launch() override them.
-    profile = kwargs.pop("profile", None)
-    if profile is not None:
+    if profile is not None and not is_auto:
         for key, value in resolve_profile_options(profile).items():
             kwargs.setdefault(key, value)
     geoip = kwargs.pop("geoip", False)
@@ -227,6 +291,16 @@ def _prepare(kwargs):
                 fp["webrtc_ip"] = geo["ip"]
     exe = _resolve_binary(exe_path, cache_dir, quiet, auto_update, pro=_cc_pro, version=version)
     _guard(exe)
+    # profile="auto" -> resolve a REAL captured fingerprint for this host and apply it as
+    # fingerprint_profile. Deliberately does NOT set a seed: with no --fingerprint the farbling
+    # machinery stays off, which is the whole reason this path survives strict scoring.
+    # Done here, after `exe` is known, because both the engine's Chromium major and the host GPU
+    # measurement depend on the binary that will actually run.
+    if kwargs.pop("_cc_is_auto", False):
+        _apply_auto_profile(fp, exe, kwargs.pop("_cc_auto_profile", None) or {},
+                            quiet=quiet, pro=_cc_pro)
+    else:
+        kwargs.pop("_cc_auto_profile", None)
     # SOCKS5-with-credentials must go through --proxy-server (Playwright rejects creds in its SOCKS
     # proxy descriptor); resolve_proxy returns proxy=None for that case so we drop it from Playwright.
     proxy_args, proxy = resolve_proxy(kwargs.get("proxy"))

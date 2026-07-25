@@ -178,8 +178,10 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
 
     page.ambient_motion = hambient
 
-    # DEFAULT under humanize (no longer opt-in): fire a short ambient burst on every load.
-    page._clearcote_auto_ambient = True
+    # OPT-IN: no ambient burst on load by default (it interleaves with caller-driven input,
+    # e.g. a slider drag). Call page.ambient_motion(ms) explicitly, or set
+    # page._clearcote_auto_ambient = True to restore the per-load burst.
+    page._clearcote_auto_ambient = False
 
     async def _auto_ambient():
         if getattr(page, "_clearcote_auto_ambient", False):

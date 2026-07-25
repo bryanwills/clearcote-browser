@@ -1,4 +1,4 @@
-// Detector-emulator — extracts the feature vector a behavioral collector (DataDome/PerimeterX-class)
+// Detector-emulator — extracts the feature vector a commercial behavioral collector
 // would compute from a pointer stream and scores how human it looks. This is a VALIDATION tool: it
 // lets us prove, offline and deterministically, that the motion core (motion.ts) improves the features
 // that matter, instead of eyeballing trajectories or burning scarce clean-IP end-to-end runs.

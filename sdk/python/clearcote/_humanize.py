@@ -277,11 +277,13 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
 
     page.ambient_motion = hambient
 
-    # DEFAULT under humanize (no longer opt-in): every page load fires a short burst
-    # of ambient pointer entropy automatically, so a behavioral collector sees human
-    # mouse activity on the page before the first goal action. Disable per-page with
-    # page._clearcote_auto_ambient = False.
-    page._clearcote_auto_ambient = True
+    # OPT-IN: ambient pointer entropy on page load is OFF by default. A burst that fires
+    # on every load (including iframe loads mid-challenge) interleaves with whatever the
+    # caller is driving and corrupts precise input like a slider drag; it is also motion
+    # no real user necessarily produces at that instant. Callers that want pre-challenge
+    # entropy either call page.ambient_motion(ms) explicitly at the moment they want it,
+    # or re-enable the per-load burst with page._clearcote_auto_ambient = True.
+    page._clearcote_auto_ambient = False
 
     def _auto_ambient(_=None):
         if getattr(page, "_clearcote_auto_ambient", False):
