@@ -97,7 +97,8 @@ public static class Humanize
     /// <summary>
     /// The REAL viewport, in CSS px — NOT <c>page.ViewportSize</c>.
     ///
-    /// Clearcote.cs sets <c>ViewportSize = ViewportSize.NoViewport</c> for every headed launch, so
+    /// Clearcote.cs sets <c>ViewportSize = ViewportSize.NoViewport</c> on every headed context launch
+    /// (and on headless ones where the engine's persona owns the screen), so
     /// that innerWidth tracks the real OS window instead of Playwright's emulated 1280x720 (an
     /// emulated viewport on a headed window is itself a tell). With NoViewport, page.ViewportSize is
     /// null for the life of the page, so a <c>?? 1280 / ?? 800</c> fallback was taken on EVERY headed

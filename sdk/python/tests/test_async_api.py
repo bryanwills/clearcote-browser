@@ -166,7 +166,12 @@ async def test_async_launch_unpacks_prepare_sixtuple_and_threads_seed(monkeypatc
     captured = {}
 
     class _FakeBrowserObj:
-        pass
+        # new_page/new_context exist because the headless geometry default wraps them.
+        async def new_page(self, **kw):
+            return kw
+
+        async def new_context(self, **kw):
+            return kw
 
     def fake_prepare(kwargs):
         # exe, args, pw_kwargs, humanize, show_cursor, seed

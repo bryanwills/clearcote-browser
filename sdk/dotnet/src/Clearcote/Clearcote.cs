@@ -15,7 +15,7 @@ namespace Clearcote;
 public static class Clearcote
 {
     /// This SDK's version (kept in lockstep with the npm/PyPI SDKs).
-    public const string Version = "0.23.0";
+    public const string Version = "0.24.0";
 
     private static readonly SemaphoreSlim PwLock = new(1, 1);
     private static IPlaywright? _pw;
@@ -54,6 +54,20 @@ public static class Clearcote
         => Download.EnsureBinaryAsync(options);
 
     /// Launch Clearcote and return a standard Playwright <see cref="IBrowser"/>.
+    /// <remarks>
+    /// GEOMETRY CAVEAT. The headless geometry defaults (see <see cref="Geometry"/>) cannot be applied
+    /// here: they are CONTEXT options, and this returns an <see cref="IBrowser"/> whose
+    /// <c>NewPageAsync</c>/<c>NewContextAsync</c> the caller invokes directly — C# has no
+    /// monkeypatching, so there is nothing for the SDK to hook. A page created from this browser
+    /// therefore keeps Playwright's emulated 1280x720 viewport, which in headless makes the window
+    /// report <c>outer &gt; screen</c> — an impossible geometry. Prefer
+    /// <see cref="LaunchEphemeralProfileAsync"/> (which is the recommended path anyway, for the CDM),
+    /// or pass the values yourself:
+    /// <code>
+    /// var (screen, viewport) = Geometry.HeadlessGeometry(options.Fingerprint);
+    /// var page = await browser.NewPageAsync(new() { ScreenSize = screen, ViewportSize = viewport });
+    /// </code>
+    /// </remarks>
     public static async Task<IBrowser> LaunchAsync(LaunchOptions? options = null)
     {
         options ??= new LaunchOptions();
@@ -156,6 +170,10 @@ public static class Clearcote
             () => Download.ResolvedEngineVersionAsync(licVersion, licKey is not null)).ConfigureAwait(false);
         var env = lease is not null ? License.WithRunToken(lease.Token, options.Env) : options.Env;
 
+        var geometry = Geometry.Resolve(
+            options.Headless, options.Fingerprint, args,
+            callerSetGeometry: options.ViewportSize is not null || options.ScreenSize is not null);
+
         var pw = await PlaywrightAsync().ConfigureAwait(false);
         var context = await WinLaunch.WinAvRetryAsync(exePath => pw.Chromium.LaunchPersistentContextAsync(userDataDir,
             new BrowserTypeLaunchPersistentContextOptions
@@ -169,10 +187,29 @@ public static class Clearcote
                 Env = env,
                 Proxy = ToPwProxy(proxy),
                 // Headed with no explicit viewport -> real window size (matches launch()).
-                ViewportSize = options.Headless == false ? ViewportSize.NoViewport : null,
+                // Headless -> either the persona owns screen/avail and only the window needs fitting
+                // (regime 1), or the SDK overrides screen itself (regime 2). See Geometry.
+                ViewportSize = options.ViewportSize
+                    ?? (options.Headless == false || geometry.Mode == Geometry.Mode.Persona
+                        ? ViewportSize.NoViewport
+                        : geometry.Viewport),
+                ScreenSize = options.ScreenSize ?? geometry.Screen,
             }), exe).ConfigureAwait(false);
 
         if (lease is not null) context.Close += (_, _) => { _ = lease.StopAsync(); };
+        // Regime 2 needs its screen override issued by hand: Playwright .NET drops ScreenSize on a
+        // persistent context (see InstallScreenOverrideAsync). Python/Node get it from the context
+        // option and need nothing here.
+        if (geometry.Mode == Geometry.Mode.Profile && geometry.Screen is not null && geometry.Viewport is not null)
+            await Geometry.InstallScreenOverrideAsync(context, geometry.Screen, geometry.Viewport)
+                .ConfigureAwait(false);
+        // Regime 1: maximize into the persona's own work area. Regime 2: move the window to the
+        // origin so it stops overhanging the spoofed screen edge. Both are one CDP round-trip and
+        // neither throws, so a launch cannot fail on them. Both run while the context is still on
+        // about:blank, so the caller's page never observes a resize.
+        if (geometry.Mode != Geometry.Mode.None)
+            await Geometry.InstallWindowFixupAsync(
+                context, args, geometry.Mode == Geometry.Mode.Persona).ConfigureAwait(false);
         return context;
     }
 

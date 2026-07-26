@@ -26,7 +26,13 @@ import shutil
 import sys
 import tempfile
 
-from . import _headed_no_viewport, _prepare, _acquire_lease_from_kwargs, _is_win_launch_race  # shared sync helpers
+from . import (  # shared sync helpers
+    _headed_no_viewport, _headless_geometry_kwargs, _prepare, _acquire_lease_from_kwargs,
+    _is_win_launch_race,
+)
+from ._geometry import (
+    apply_headless_geometry, fit_window_to_persona_async, move_window_to_origin_async,
+)
 from ._license import inject_run_token
 from ._fonts import apply_font_env
 from ._humanize_async import install_humanize, install_humanize_on_context
@@ -102,6 +108,63 @@ def _install_headed_viewport(browser):
     browser.new_page, browser.new_context = new_page, new_context
 
 
+async def _install_window_fixup(container, args, persona):
+    """Async mirror of the sync ``_install_window_fixup``: fit the window to the persona's work area
+    (persona regime) or move it to the origin (profile regime), once, on the first page."""
+    done = []
+
+    async def fit(page):
+        if done:
+            return page
+        done.append(True)
+        if persona:
+            await fit_window_to_persona_async(page, args)
+        else:
+            await move_window_to_origin_async(page, args)
+        return page
+
+    pages = getattr(container, "pages", None)
+    if pages:
+        await fit(pages[0])
+        return
+    orig_new_page = container.new_page
+
+    async def new_page(**kw):
+        return await fit(await orig_new_page(**kw))
+
+    container.new_page = new_page
+
+
+def _install_headless_geometry(browser, geom, args=None):
+    """Default a headless browser's new pages/contexts to ``geom`` (async mirror of the sync
+    installer): in persona mode ``no_viewport`` + a window fit per new window, otherwise the
+    screen+viewport override. Any per-call geometry option keeps the caller in control."""
+    persona = geom.get("mode") == "persona"
+    defaults = {"no_viewport": True} if persona else {
+        k: v for k, v in geom.items() if k in ("screen", "viewport")}
+    orig_new_page, orig_new_context = browser.new_page, browser.new_context
+
+    def _merge(kw):
+        if not any(k in kw for k in ("viewport", "no_viewport", "screen")):
+            kw.update(defaults)
+        return kw
+
+    async def new_page(**kw):
+        page = await orig_new_page(**_merge(kw))
+        if persona:
+            await fit_window_to_persona_async(page, args)
+        else:
+            await move_window_to_origin_async(page, args)
+        return page
+
+    async def new_context(**kw):
+        context = await orig_new_context(**_merge(kw))
+        await _install_window_fixup(context, args, persona)
+        return context
+
+    browser.new_page, browser.new_context = new_page, new_context
+
+
 async def _start_driver():
     from playwright.async_api import async_playwright
     return await async_playwright().start()
@@ -145,6 +208,8 @@ async def launch(**kwargs):
         inject_run_token(pw_kwargs, lease.token)
     await asyncio.to_thread(apply_font_env, exe, pw_kwargs)  # Linux: bundled font clones (mirror sync)
     headed = _headed_no_viewport(pw_kwargs)  # launch() takes no viewport kwarg -> wrap new_page/context
+    # Headless: screen.* rides on new_page/new_context with the viewport (see _geometry).
+    geom = None if headed else _headless_geometry_kwargs(pw_kwargs, seed, args)
     pw = await _start_driver()
     try:
         browser = await _win_av_retry_async(
@@ -159,6 +224,8 @@ async def launch(**kwargs):
         browser.on("disconnected", lambda _b=None: lease.stop())
     if headed:
         _install_headed_viewport(browser)
+    elif geom:
+        _install_headless_geometry(browser, geom, args)
     await install_humanize(browser, humanize, show_cursor, seed=seed)
     return browser
 
@@ -180,8 +247,11 @@ async def launch_persistent_context(user_data_dir, **kwargs):
     if lease:  # inject CLEARCOTE_RUN_TOKEN so the PRO engine gate lets the browser launch
         inject_run_token(pw_kwargs, lease.token)
     await asyncio.to_thread(apply_font_env, exe, pw_kwargs)  # Linux: bundled font clones (mirror sync)
+    geom = None
     if _headed_no_viewport(pw_kwargs):  # no_viewport IS a valid persistent-context option
         pw_kwargs["no_viewport"] = True
+    else:  # headless: persona owns screen -> fit the window; no persona -> override screen
+        geom = apply_headless_geometry(pw_kwargs, seed, args)
     pw = await _start_driver()
     try:
         context = await _win_av_retry_async(
@@ -195,6 +265,8 @@ async def launch_persistent_context(user_data_dir, **kwargs):
     _bind_driver(context, pw)
     if lease:  # release the concurrency slot when the context closes
         context.on("close", lambda _c=None: lease.stop())
+    if geom:
+        await _install_window_fixup(context, args, geom.get("mode") == "persona")
     await install_humanize_on_context(context, humanize, show_cursor, seed=seed)
     return context
 

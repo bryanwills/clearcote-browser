@@ -21,6 +21,7 @@ import type {
   BrowserContext,
   BrowserContextOptions,
   LaunchOptions as PlaywrightLaunchOptions,
+  Page,
 } from "playwright-core";
 import { ensureBinary, ensureVersion, proEnsureBinary, resolvedEngineVersion, warmFiles, type DownloadOptions } from "./download.js";
 import { fingerprintArgs, splitFingerprintOptions, type FingerprintOptions } from "./fingerprint.js";
@@ -48,6 +49,10 @@ import { RELEASE, platformRelease } from "./release.js";
 import { fetchWidevine, seedWidevine, widevineArgs } from "./widevine.js";
 import { emitCoherenceWarnings } from "./warnings.js";
 import { fontLaunchEnv } from "./fonts.js";
+import {
+  applyHeadlessGeometry, fitWindowToPersona, installWindowFixup, moveWindowToOrigin,
+  type AppliedGeometry,
+} from "./geometry.js";
 import { acquireLease, resolveLicenseKey, withRunToken, type LicenseOptions, type LeaseSession } from "./license.js";
 
 export type { FingerprintOptions } from "./fingerprint.js";
@@ -239,6 +244,40 @@ export async function download(
 ): Promise<string> {
   const { version, licenseKey, licenseApiBase, ...dl } = options;
   return executablePath({ version, pro: proSelector(licenseKey, licenseApiBase), ...dl });
+}
+
+/** Headless: the geometry defaults are CONTEXT options and `chromium.launch()` takes none, so they
+ * ride on newPage/newContext instead — persona regime gets `viewport: null` plus a window fit, no-
+ * persona regime gets the screen + viewport override. See ./geometry.ts for why each is needed. */
+function installHeadlessGeometry(
+  browser: Browser,
+  geom: AppliedGeometry,
+  args?: readonly string[] | null,
+): void {
+  // chromium.launch() accepts no context options, so the headless geometry default has to ride on
+  // newPage/newContext — the same shape as installHeadedViewport. In persona mode each new context
+  // is a new window, so each also gets the window fit. Any per-call geometry option wins.
+  const persona = geom.mode === "persona";
+  const defaults: Record<string, unknown> = persona
+    ? { viewport: null }
+    : { screen: geom.screen, viewport: geom.viewport };
+  const merge = (o: Record<string, unknown> = {}) =>
+    "viewport" in o || "screen" in o ? o : { ...o, ...defaults };
+  const origNewPage = browser.newPage.bind(browser);
+  const origNewContext = browser.newContext.bind(browser);
+  (browser as unknown as { newPage: (o?: Record<string, unknown>) => Promise<Page> }).newPage =
+    async (o = {}) => {
+      const page = await origNewPage(merge(o) as Parameters<typeof origNewPage>[0]);
+      if (persona) await fitWindowToPersona(page, args);
+      else await moveWindowToOrigin(page, args);
+      return page;
+    };
+  (browser as unknown as { newContext: (o?: Record<string, unknown>) => Promise<BrowserContext> }).newContext =
+    async (o = {}) => {
+      const context = await origNewContext(merge(o) as Parameters<typeof origNewContext>[0]);
+      await installWindowFixup(context, args, persona);
+      return context;
+    };
 }
 
 /** A headed launch with Playwright's default emulated viewport (1280x720) on the real OS window
@@ -562,6 +601,13 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   // On Linux, point FONTCONFIG_FILE at the bundled metric-compatible clones (Segoe UI, Arial, …).
   const launchEnv = fontLaunchEnv(exe, (pwOptions as PlaywrightLaunchOptions).env);
   const runtimeEnv = lease ? withRunToken(lease.token, launchEnv) : launchEnv;
+  const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions), proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? [], proxyOpt as PwProxy | undefined);
+  // Headless: screen.* has to be handled alongside the viewport or the window reports a geometry no
+  // real browser can (see ./geometry.ts). Probe a copy — viewport/screen are context options, which
+  // chromium.launch() does not take — and carry the result to newPage/newContext.
+  const geom = headed
+    ? null
+    : applyHeadlessGeometry({ ...(pwOptions as Record<string, unknown>) }, fingerprint.fingerprint, engineArgs);
   const browser = await winAvRetry((exePath) => chromium.launch({
     // Drop Playwright's default --enable-automation so the engine's AutomationControlled feature
     // stays off (it flips webdriver-adjacent tells). Caller can override via ignoreDefaultArgs.
@@ -569,11 +615,12 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
     ...(pwOptions as PlaywrightLaunchOptions),
     executablePath: exePath,
     ...(runtimeEnv ? { env: runtimeEnv } : {}),
-    args: assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions), proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? [], proxyOpt as PwProxy | undefined),
+    args: engineArgs,
   }), exe);
   // Release the concurrency slot when the browser closes.
   if (lease) browser.on("disconnected", () => { void lease.stop(); });
   if (headed) installHeadedViewport(browser); // launch() takes no viewport option -> wrap newPage/newContext
+  else if (geom) installHeadlessGeometry(browser, geom, engineArgs);
   installHumanize(browser, { humanize, showCursor, seed: fingerprint.fingerprint }); // seed => stable motor persona
   return browser;
 }
@@ -635,14 +682,21 @@ export async function launchPersistentContext(
   });
   const ctxEnv = fontLaunchEnv(exe, (opts as PlaywrightLaunchOptions).env);
   const runtimeEnv = lease ? withRunToken(lease.token, ctxEnv) : ctxEnv;
+  const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions), proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs, proxyOpt as PwProxy | undefined);
+  // headless: the persona owns screen when it is running, so only the window needs fitting; with no
+  // persona the SDK overrides screen itself (see ./geometry.ts). Headed already set viewport: null.
+  const geom = opts.headless === false
+    ? null
+    : applyHeadlessGeometry(opts as unknown as Record<string, unknown>, fingerprint.fingerprint, engineArgs);
   const context = await winAvRetry((exePath) => chromium.launchPersistentContext(userDataDir, {
     ...opts,
     ignoreDefaultArgs,  // keep AutomationControlled off (+ component updater on when widevine)
     executablePath: exePath,
     ...(runtimeEnv ? { env: runtimeEnv } : {}),
-    args: assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions), proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs, proxyOpt as PwProxy | undefined),
+    args: engineArgs,
   }), exe);
   if (lease) context.on("close", () => { void lease.stop(); });
+  if (geom) await installWindowFixup(context, engineArgs, geom.mode === "persona");
   installHumanizeOnContext(context, { humanize, showCursor, seed: fingerprint.fingerprint }); // seed => stable motor persona
   return context;
 }

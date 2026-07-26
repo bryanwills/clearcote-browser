@@ -272,6 +272,12 @@ All optional. Anything not listed here is passed straight through to Playwright
 | `extensions` | `--load-extension` + `--disable-extensions-except` | Unpacked-extension directory paths to load (Chromium forces headed when extensions are present). |
 
 > **Headed launches** default to `viewport: null` (no emulated viewport) so `window.innerWidth` tracks the real OS window — an emulated `1280×720` on a real window is an impossible-window tell. Pass an explicit `viewport` to override.
+
+> **Headless launches** (0.24.0+) get a coherent window geometry by default, so `screen`, `availWidth/Height`,
+> `innerWidth/Height` and `outerWidth/Height` agree with each other the way a real window's do. With a
+> `fingerprint` seed the engine's own screen and work area are used and the window is sized to them; without a
+> seed the SDK applies a screen size drawn from real captured desktops and fits the viewport to it. It is
+> applied at launch, before your first navigation. Pass an explicit `viewport` or `screen` to opt out entirely.
 >
 > **Proxies:** a `socks5://user:pass@host:port` proxy is routed via `--proxy-server` (Playwright rejects credentials in its SOCKS descriptor). Chromium can't authenticate SOCKS5, so the credentials are dropped with a warning — put the auth on a local relay.
 

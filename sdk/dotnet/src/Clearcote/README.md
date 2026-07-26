@@ -151,6 +151,25 @@ var path = await Clearcote.Clearcote.DownloadAsync();
 | `StorageQuota` | `navigator.storage.estimate().quota` in MB |
 | `CanvasBridge` | forward canvas/WebGL readback to a remote real-GPU host |
 | `Proxy`, `Args`, `Extensions`, `Headless`, `Channel`, `Env` | Playwright pass-through + SDK arg handling |
+| `ViewportSize`, `ScreenSize` | override the context geometry (opts out of the headless default below) |
+
+## Window geometry
+
+`LaunchPersistentContextAsync` / `LaunchEphemeralProfileAsync` give a headless context a coherent
+window geometry by default (0.24.0+), so `screen`, `availWidth/Height`, `innerWidth/Height` and
+`outerWidth/Height` agree with each other the way a real window's do. With a `Fingerprint` seed the
+engine's own screen and work area are used and the window is sized to them; without a seed the SDK
+applies a screen size drawn from real captured desktops and fits the viewport to it. It is applied at
+launch, before your first navigation. Set `ViewportSize` or `ScreenSize` to opt out.
+
+`LaunchAsync` cannot do this — it returns an `IBrowser` whose `NewPageAsync`/`NewContextAsync` you call
+yourself, and those take the context options. Prefer `LaunchEphemeralProfileAsync` (also recommended for
+DRM/CDM reasons), or pass the values through yourself:
+
+```csharp
+var (screen, viewport) = Geometry.HeadlessGeometry(options.Fingerprint);
+var page = await browser.NewPageAsync(new() { ScreenSize = screen, ViewportSize = viewport });
+```
 
 ## Environment variables
 

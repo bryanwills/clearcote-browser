@@ -349,6 +349,13 @@ All optional. Anything not listed here is passed straight through to Playwright
 | `show_cursor` | _(directive)_ | `True` → inject a red cursor dot that follows the real mouse (handy for watching a headed run). |
 
 > **Headed launches** default to `no_viewport=True` so `window.innerWidth` tracks the real OS window — an emulated `1280×720` on a real window is an impossible-window tell. Pass an explicit `viewport` to override.
+
+> **Headless launches** (0.24.0+) get a coherent window geometry by default, so `screen`, `availWidth/Height`,
+> `innerWidth/Height` and `outerWidth/Height` agree with each other the way a real window's do. With a
+> `fingerprint` seed the engine's own screen and work area are used and the window is sized to them; without a
+> seed the SDK applies a screen size drawn from real captured desktops and fits the viewport to it. It is
+> applied at launch, before your first navigation. Pass an explicit `viewport`, `screen` or `no_viewport` to
+> opt out entirely.
 >
 > **Proxies:** a `socks5://user:pass@host:port` proxy is routed via `--proxy-server` (Playwright rejects credentials in its SOCKS descriptor). Chromium can't authenticate SOCKS5, so the credentials are dropped with a warning — put the auth on a local relay.
 

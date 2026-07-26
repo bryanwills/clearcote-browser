@@ -1,3 +1,5 @@
+using Microsoft.Playwright;
+
 namespace Clearcote;
 
 /// Options for <see cref="Clearcote.LaunchAsync"/> / <see cref="Clearcote.LaunchPersistentContextAsync"/>.
@@ -48,6 +50,14 @@ public class LaunchOptions : FingerprintOptions
     public float? SlowMo { get; set; }
     /// Override the default `--enable-automation` strip (Playwright ignoreDefaultArgs).
     public IReadOnlyList<string>? IgnoreDefaultArgs { get; set; }
+    /// Emulated viewport for the context. Leave unset to take the SDK's default: NoViewport when
+    /// headed or when a persona owns the screen, otherwise a screen-fitted viewport (see
+    /// <see cref="Geometry"/>). Setting either this or <see cref="ScreenSize"/> turns the default off
+    /// entirely and passes both through as given.
+    public ViewportSize? ViewportSize { get; set; }
+    /// Emulated screen size (CDP screenWidth/screenHeight) for the context. See
+    /// <see cref="ViewportSize"/> for how it interacts with the SDK default.
+    public ScreenSize? ScreenSize { get; set; }
 }
 
 /// Options for <see cref="Clearcote.ServeAsync"/> — a standing, stealthy CDP endpoint.
