@@ -28,3 +28,13 @@ patches-private/
 
 # PRO-tier held patches (never publish)
 pro-patches/
+
+# Secrets - never commit. Nothing has leaked (history is clean), but there was no rule
+# stopping the next one: the SDKs and tools read credentials from the environment only.
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+id_rsa*
+*credentials*.json
