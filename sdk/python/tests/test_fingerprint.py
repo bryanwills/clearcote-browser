@@ -147,6 +147,36 @@ def test_noise_disabled_only_when_false():
     assert "--disable-fingerprint-noise" not in fingerprint_args({})
 
 
+def test_independent_gpu_string_and_canvas_noise_toggles():
+    """The r12 halves emit only on an explicit False, and only their own switch.
+
+    The point of these two is that they do strictly LESS than the bundles they were split out
+    of, so the test that matters is the negative one: neither may pull in the wide flag, and
+    neither may emit the other's.
+    """
+    assert "--disable-gpu-string-spoof" in fingerprint_args({"gpu_string_spoof": False})
+    assert "--disable-gpu-string-spoof" not in fingerprint_args({"gpu_string_spoof": True})
+    assert "--disable-gpu-string-spoof" not in fingerprint_args({})
+
+    assert "--disable-canvas-noise" in fingerprint_args({"canvas_noise": False})
+    assert "--disable-canvas-noise" not in fingerprint_args({"canvas_noise": True})
+    assert "--disable-canvas-noise" not in fingerprint_args({})
+
+    # Independence: neither narrow switch drags in the other, nor either bundle.
+    gpu_only = fingerprint_args({"gpu_string_spoof": False})
+    assert "--disable-canvas-noise" not in gpu_only
+    assert "--disable-gpu-fingerprint" not in gpu_only
+    assert "--disable-fingerprint-noise" not in gpu_only
+
+    canvas_only = fingerprint_args({"canvas_noise": False})
+    assert "--disable-gpu-string-spoof" not in canvas_only
+    assert "--disable-gpu-fingerprint" not in canvas_only
+    assert "--disable-fingerprint-noise" not in canvas_only
+
+    # Absence is byte-identical to before the options existed.
+    assert fingerprint_args({"gpu_string_spoof": True, "canvas_noise": True}) == fingerprint_args({})
+
+
 def test_skips_empty_and_none():
     args = fingerprint_args({"fingerprint": "", "timezone": None, "gpu_vendor": ""})
     assert not any(a.startswith("--fingerprint=") for a in args)

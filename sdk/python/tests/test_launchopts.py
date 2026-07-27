@@ -9,6 +9,8 @@ from clearcote._launchopts import (
     webrtc_default_deny_args,
 )
 
+import clearcote._launchopts as _lo  # module handle: web_bluetooth_args reads sys.platform
+
 
 def test_merge_feature_flags_collapses_into_one_each():
     out = merge_feature_flags([
@@ -91,3 +93,30 @@ def test_resolve_proxy_socks5_with_creds_warns():
         warnings.simplefilter("always")
         resolve_proxy({"server": "socks5://h:1", "username": "u", "password": "p"})
     assert any("SOCKS5" in str(w.message) for w in caught)
+
+
+# --------------------------------------------------------------------------- web bluetooth
+# WHY THESE EXIST: Web Bluetooth is compiled into the engine but runtime-disabled on Linux only
+# (Chromium marks WebBluetooth "stable" on Win/Mac and lets Linux fall to "experimental"), so a
+# Linux host serving a Windows persona exposed navigator.usb/serial/hid but NOT
+# navigator.bluetooth -- a combination no real Windows Chrome produces. The flag restores it.
+def test_web_bluetooth_args_on_linux(monkeypatch):
+    monkeypatch.setattr(_lo.sys, "platform", "linux")
+    assert _lo.web_bluetooth_args() == ["--enable-features=WebBluetooth"]
+
+
+def test_web_bluetooth_args_noop_off_linux(monkeypatch):
+    for plat in ("win32", "darwin"):
+        monkeypatch.setattr(_lo.sys, "platform", plat)
+        assert _lo.web_bluetooth_args() == [], plat
+
+
+def test_web_bluetooth_folds_into_one_enable_features(monkeypatch):
+    """The flag must survive merge_feature_flags: Chromium honours only the LAST
+    --enable-features, so a second occurrence would silently drop WebBluetooth."""
+    monkeypatch.setattr(_lo.sys, "platform", "linux")
+    merged = _lo.merge_feature_flags(
+        _lo.web_bluetooth_args() + ["--enable-features=SomethingElse"])
+    enables = [a for a in merged if a.startswith("--enable-features=")]
+    assert len(enables) == 1
+    assert "WebBluetooth" in enables[0] and "SomethingElse" in enables[0]

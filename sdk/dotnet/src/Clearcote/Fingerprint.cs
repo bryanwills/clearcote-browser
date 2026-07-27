@@ -90,6 +90,21 @@ public class FingerprintOptions
     public bool? DisableGpuFingerprint { get; set; }
     /// Set false to turn OFF per-eTLD+1 farbling noise (canvas/WebGL/audio/client-rects).
     public bool? FingerprintNoise { get; set; }
+
+    /// <summary>
+    /// <c>false</c> reports the machine's REAL WebGL UNMASKED_VENDOR/RENDERER and changes nothing
+    /// else -- the getParameter limit table, the extension list and the readPixels farble all stay
+    /// on the persona. The GPU-string half of <see cref="DisableGpuFingerprint"/> on its own.
+    /// Requires engine &gt;= Chromium 150 r12; inert on older builds.
+    /// </summary>
+    public bool? GpuStringSpoof { get; set; }
+
+    /// <summary>
+    /// <c>false</c> turns off the per-eTLD+1 farble on CANVAS 2D readback only (getImageData, and
+    /// toDataURL of a 2D canvas). WebGL readPixels and every other farbled surface are unchanged.
+    /// Requires engine &gt;= Chromium 150 r12; inert on older builds.
+    /// </summary>
+    public bool? CanvasNoise { get; set; }
     /// Import a real captured fingerprint: a path to a .json profile, a JSON string, or an object.
     public object? FingerprintProfile { get; set; }
     /// navigator.storage.estimate().quota in MEGABYTES.
@@ -322,6 +337,9 @@ public static class Fingerprint
             args.Add("--disable-features=WebRtcHideLocalIpsWithMdns");
         if (o.DisableGpuFingerprint == true) args.Add("--disable-gpu-fingerprint");
         if (o.FingerprintNoise == false) args.Add("--disable-fingerprint-noise");
+        // The two INDEPENDENT halves of the bundles above (engine >= Chromium 150 r12).
+        if (o.GpuStringSpoof == false) args.Add("--disable-gpu-string-spoof");
+        if (o.CanvasNoise == false) args.Add("--disable-canvas-noise");
         if (o.FingerprintProfile is not null) args.Add($"--fingerprint-profile={EncodeProfile(o.FingerprintProfile)}");
 
         if (o.CanvasBridge?.Url is { Length: > 0 } cbUrl)

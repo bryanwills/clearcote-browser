@@ -3,6 +3,7 @@ proxy resolution. Kept pure (input -> switches / cleaned options) so they're uni
 mirror the Node SDK exactly."""
 
 import re
+import sys
 import warnings
 
 _SOCKS = re.compile(r"^socks", re.IGNORECASE)
@@ -66,6 +67,28 @@ def quic_args(proxy):
     that no UDP egresses *around* the proxy (the #9 leak). No proxy -> leave QUIC on (real Chrome
     uses it, so disabling it everywhere would itself be a tell)."""
     return ["--disable-quic"] if (isinstance(proxy, dict) and proxy.get("server")) else []
+
+
+def web_bluetooth_args():
+    """Switches to expose ``navigator.bluetooth`` on Linux hosts (empty elsewhere).
+
+    Web Bluetooth is compiled into the engine but runtime-disabled on Linux only:
+    Chromium's runtime_enabled_features.json5 gives WebBluetooth status "stable" on Win/Mac/Android/
+    ChromeOS and lets Linux fall through to "default": "experimental", and content_features.cc
+    declares kWebBluetooth FEATURE_DISABLED_BY_DEFAULT. So a Linux host serving a Windows persona
+    reports navigator.usb, navigator.serial and navigator.hid but NOT navigator.bluetooth - a
+    combination no real Windows Chrome produces, and an OS-origin tell that survives every string
+    spoof. One flag restores it on the shipped binary; no rebuild is involved.
+    
+    Verified against Chromium 150's bluetooth.idl: getDevices() is gated on WebBluetoothGetDevices
+    and requestLEScan()/onadvertisementreceived on WebBluetoothScanning, both "experimental", so
+    real stable Chrome exposes exactly {constructor, getAvailability, requestDevice} - which is what
+    this flag produces. getAvailability() resolves false and requestDevice() rejects NotFoundError
+    on a machine with no adapter, matching a real desktop without Bluetooth hardware.
+    """
+    if not sys.platform.startswith("linux"):
+        return []  # Win/Mac builds ship it stable; the flag would be a no-op
+    return ["--enable-features=WebBluetooth"]
 
 
 def webrtc_default_deny_args(args, webrtc_ip=None):

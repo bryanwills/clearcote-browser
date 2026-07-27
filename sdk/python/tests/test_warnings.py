@@ -71,3 +71,30 @@ def test_automation_arg_readded():
     assert "automation-arg" in codes({"_user_args": ["--enable-automation"], "headless": False})
     assert "automation-arg" in codes({"_user_args": ["--remote-debugging-port=9222"], "headless": False})
     assert "automation-arg" not in codes({"_user_args": ["--no-sandbox"], "headless": False})
+
+
+def _codes(opts):
+    return {w["code"] for w in coherence_warnings(opts)}
+
+
+def test_narrow_gpu_and_canvas_switch_warnings():
+    """The r12 halves each carry their own advice, and neither contradicts the other.
+
+    The subtle one is the LAST assertion: gpu-noise used to say "pair with fingerprint_noise=
+    False" unconditionally, which told an operator who had ALREADY set canvas_noise=False to go
+    and turn off more. It must stand down once the relevant noise is off.
+    """
+    # The narrow GPU switch leaves readPixels noised, so its advice differs from the wide flag's.
+    c = _codes({"gpu_string_spoof": False})
+    assert "gpu-noise-string" in c
+    assert "gpu-noise" not in c          # the wide flag's warning must not double-fire
+    assert "gpu-string-only" in c        # names the WebGL-vs-WebGPU split the narrow switch opens
+
+    # canvas_noise=False must surface the toBlob gap, which neither switch gates.
+    assert "canvas-noise-toblob" in _codes({"canvas_noise": False})
+
+    # Already-correct configurations must not be nagged.
+    assert "gpu-noise-string" not in _codes({"gpu_string_spoof": False, "fingerprint_noise": False})
+    assert "gpu-noise" not in _codes({"disable_gpu_fingerprint": True, "canvas_noise": False})
+    # ...but the wide flag on its own still warns, exactly as before.
+    assert "gpu-noise" in _codes({"disable_gpu_fingerprint": True})

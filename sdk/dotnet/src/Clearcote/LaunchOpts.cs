@@ -63,6 +63,31 @@ public static class LaunchOpts
     /// Callers who need working WebRTC through a proxy want a transport that carries UDP (SOCKS5
     /// with UDP ASSOCIATE, or a full tunnel) and can set their own policy to opt out.
     /// webrtcIp is accepted and ignored, for call-site compatibility.
+    /// <summary>Switches to expose <c>navigator.bluetooth</c> on Linux hosts (empty elsewhere).</summary>
+    /// <remarks>
+    /// Web Bluetooth is compiled into the engine but runtime-disabled on Linux only:
+    /// Chromium's runtime_enabled_features.json5 gives WebBluetooth status "stable" on Win/Mac/Android/
+    /// ChromeOS and lets Linux fall through to "default": "experimental", and content_features.cc
+    /// declares kWebBluetooth FEATURE_DISABLED_BY_DEFAULT. So a Linux host serving a Windows persona
+    /// reports navigator.usb, navigator.serial and navigator.hid but NOT navigator.bluetooth - a
+    /// combination no real Windows Chrome produces, and an OS-origin tell that survives every string
+    /// spoof. One flag restores it on the shipped binary; no rebuild is involved.
+    /// 
+    /// Verified against Chromium 150's bluetooth.idl: getDevices() is gated on WebBluetoothGetDevices
+    /// and requestLEScan()/onadvertisementreceived on WebBluetoothScanning, both "experimental", so
+    /// real stable Chrome exposes exactly {constructor, getAvailability, requestDevice} - which is what
+    /// this flag produces. getAvailability() resolves false and requestDevice() rejects NotFoundError
+    /// on a machine with no adapter, matching a real desktop without Bluetooth hardware.
+    /// </remarks>
+    public static List<string> WebBluetoothArgs()
+    {
+        // Win/Mac builds ship WebBluetooth stable; the flag would be a no-op there.
+        if (!System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
+                System.Runtime.InteropServices.OSPlatform.Linux))
+            return new List<string>();
+        return new List<string> { "--enable-features=WebBluetooth" };
+    }
+
     public static List<string> WebrtcDefaultDenyArgs(IEnumerable<string> args, string? webrtcIp = null)
     {
         if (args.Any(a => a.StartsWith("--webrtc-ip-handling-policy")

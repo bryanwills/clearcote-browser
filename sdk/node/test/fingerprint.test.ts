@@ -97,6 +97,31 @@ describe("fingerprintArgs", () => {
     expect(fingerprintArgs({})).not.toContain("--disable-fingerprint-noise");
   });
 
+  // The r12 halves do strictly LESS than the bundles they were split out of, so the negative
+  // assertions are the ones carrying the weight: neither may pull in the other, or a bundle.
+  it("emits the independent gpu-string / canvas-noise switches only on an explicit false", () => {
+    expect(fingerprintArgs({ gpuStringSpoof: false })).toContain("--disable-gpu-string-spoof");
+    expect(fingerprintArgs({ gpuStringSpoof: true })).not.toContain("--disable-gpu-string-spoof");
+    expect(fingerprintArgs({})).not.toContain("--disable-gpu-string-spoof");
+
+    expect(fingerprintArgs({ canvasNoise: false })).toContain("--disable-canvas-noise");
+    expect(fingerprintArgs({ canvasNoise: true })).not.toContain("--disable-canvas-noise");
+    expect(fingerprintArgs({})).not.toContain("--disable-canvas-noise");
+
+    const gpuOnly = fingerprintArgs({ gpuStringSpoof: false });
+    expect(gpuOnly).not.toContain("--disable-canvas-noise");
+    expect(gpuOnly).not.toContain("--disable-gpu-fingerprint");
+    expect(gpuOnly).not.toContain("--disable-fingerprint-noise");
+
+    const canvasOnly = fingerprintArgs({ canvasNoise: false });
+    expect(canvasOnly).not.toContain("--disable-gpu-string-spoof");
+    expect(canvasOnly).not.toContain("--disable-gpu-fingerprint");
+    expect(canvasOnly).not.toContain("--disable-fingerprint-noise");
+
+    // Absence is byte-identical to before the options existed.
+    expect(fingerprintArgs({ gpuStringSpoof: true, canvasNoise: true })).toEqual(fingerprintArgs({}));
+  });
+
   it("skips empty / undefined / null values", () => {
     const args = fingerprintArgs({ fingerprint: "", timezone: undefined, gpuVendor: null as unknown as string });
     expect(args.some((a) => a.startsWith("--fingerprint="))).toBe(false);

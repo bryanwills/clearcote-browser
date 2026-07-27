@@ -42,6 +42,7 @@ import {
   mergeFeatureFlags,
   privacySandboxArgs,
   quicArgs,
+  webBluetoothArgs,
   webrtcDefaultDenyArgs,
   type PwProxy,
 } from "./launchopts.js";
@@ -306,7 +307,9 @@ function assembleArgs(
   userArgs: string[],
   proxyForQuic?: PwProxy
 ): string[] {
-  const base = [...fpArgs, ...agArgs, ...extArgs, ...proxyArgs, ...quicArgs(proxyForQuic)];
+  // webBluetoothArgs: Linux hosts hide navigator.bluetooth while exposing usb/serial/hid, an
+  // OS-origin tell on a Windows persona. No-op off Linux.
+  const base = [...fpArgs, ...agArgs, ...extArgs, ...proxyArgs, ...quicArgs(proxyForQuic), ...webBluetoothArgs()];
   // DEFAULT FLIPPED IN 0.23.0 — opt IN to disabling, rather than opt out.
   //
   // Disabling Topics/FLEDGE/Shared Storage/Fenced Frames is coherent for a de-Googled persona, and

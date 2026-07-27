@@ -124,6 +124,22 @@ export interface FingerprintOptions {
    */
   fingerprintNoise?: boolean;
   /**
+   * `false` reports the machine's REAL WebGL UNMASKED_VENDOR/RENDERER and changes nothing else --
+   * the getParameter limit table, the extension list, getShaderPrecisionFormat and the readPixels
+   * farble all stay on the persona. The GPU-STRING half of `disableGpuFingerprint` on its own, for
+   * hosts that rasterise in software. Note `navigator.gpu` still follows the wide flag, so with
+   * this alone WebGPU describes the persona while WebGL reports the real device.
+   * Requires engine >= Chromium 150 r12; inert on older builds.
+   */
+  gpuStringSpoof?: boolean;
+  /**
+   * `false` turns off the per-eTLD+1 farble on CANVAS 2D readback only (`getImageData`, and
+   * `toDataURL` of a 2D canvas). WebGL readPixels and every other farbled surface are unchanged --
+   * unlike `fingerprintNoise: false`, which is the process-wide off switch. `toBlob()` is gated by
+   * neither. Requires engine >= Chromium 150 r12; inert on older builds.
+   */
+  canvasNoise?: boolean;
+  /**
    * Import a real captured fingerprint so the browser presents *that machine's* identity instead
    * of the synthetic seed-derived one. Accepts a path to a `.json` profile, a profile object, or a
    * JSON string (capture one with `tools/fingerprint-collect`). Fields present in the profile
@@ -188,6 +204,8 @@ export const FINGERPRINT_KEYS: (keyof FingerprintOptions)[] = [
   "webrtcMdns",
   "disableGpuFingerprint",
   "fingerprintNoise",
+  "gpuStringSpoof",
+  "canvasNoise",
   "fingerprintProfile",
   "storageQuota",
   "canvasBridge",
@@ -457,6 +475,9 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
   // so those surfaces return natural values — for sites whose ML flags the noise as "tampered".
   // Identity spoofs (UA/screen/GPU/persona) stay on. Default keeps the noise.
   if (o.fingerprintNoise === false) args.push("--disable-fingerprint-noise");
+  // The two INDEPENDENT halves of the bundles above (engine >= Chromium 150 r12).
+  if (o.gpuStringSpoof === false) args.push("--disable-gpu-string-spoof");
+  if (o.canvasNoise === false) args.push("--disable-canvas-noise");
   // fingerprintProfile imports a real captured fingerprint (path/object/JSON) — see
   // tools/fingerprint-collect. Its fields override the seed-derived persona; absent fields fall
   // back to the seed, so partial profiles stay coherent.

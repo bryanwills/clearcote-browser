@@ -68,6 +68,25 @@ public class FingerprintTests
     {
         Assert.Contains("--disable-fingerprint-noise", Fingerprint.Args(new FingerprintOptions { FingerprintNoise = false }));
         Assert.DoesNotContain("--disable-fingerprint-noise", Fingerprint.Args(new FingerprintOptions { FingerprintNoise = true }));
+
+        // The r12 halves: emitted only on an explicit false, and never pulling in each other
+        // or the bundles they were split out of.
+        Assert.Contains("--disable-gpu-string-spoof", Fingerprint.Args(new FingerprintOptions { GpuStringSpoof = false }));
+        Assert.DoesNotContain("--disable-gpu-string-spoof", Fingerprint.Args(new FingerprintOptions { GpuStringSpoof = true }));
+        Assert.DoesNotContain("--disable-gpu-string-spoof", Fingerprint.Args(new FingerprintOptions()));
+        Assert.Contains("--disable-canvas-noise", Fingerprint.Args(new FingerprintOptions { CanvasNoise = false }));
+        Assert.DoesNotContain("--disable-canvas-noise", Fingerprint.Args(new FingerprintOptions { CanvasNoise = true }));
+        Assert.DoesNotContain("--disable-canvas-noise", Fingerprint.Args(new FingerprintOptions()));
+
+        var gpuOnly = Fingerprint.Args(new FingerprintOptions { GpuStringSpoof = false });
+        Assert.DoesNotContain("--disable-canvas-noise", gpuOnly);
+        Assert.DoesNotContain("--disable-gpu-fingerprint", gpuOnly);
+        Assert.DoesNotContain("--disable-fingerprint-noise", gpuOnly);
+
+        var canvasOnly = Fingerprint.Args(new FingerprintOptions { CanvasNoise = false });
+        Assert.DoesNotContain("--disable-gpu-string-spoof", canvasOnly);
+        Assert.DoesNotContain("--disable-gpu-fingerprint", canvasOnly);
+        Assert.DoesNotContain("--disable-fingerprint-noise", canvasOnly);
         Assert.DoesNotContain("--disable-fingerprint-noise", Fingerprint.Args(new FingerprintOptions()));
     }
 

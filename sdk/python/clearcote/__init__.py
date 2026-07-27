@@ -25,15 +25,17 @@ import time
 
 from ._agent import AGENT_KEYS, OPENROUTER_BASE_URL, agent_args, run_agent_task
 from ._fingerprint import FINGERPRINT_KEYS, fingerprint_args
+from ._fontpersona import ensure_persona_fonts, font_reachability
 from ._fonts import apply_font_env
 from ._geometry import apply_headless_geometry, fit_window_to_persona, move_window_to_origin
 from ._humanize import install_humanize, install_humanize_on_context
-from ._launchopts import (
+from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for tests)
     extension_args,
     merge_feature_flags,
     privacy_sandbox_args,
     quic_args,
     resolve_proxy,
+    web_bluetooth_args,
     webrtc_default_deny_args,
 )
 from ._profile import Profile, list_profiles, load_profile, resolve_profile_options
@@ -106,7 +108,7 @@ __all__ = [
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.24.0"
+__version__ = "0.25.0"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -340,6 +342,13 @@ def _prepare(kwargs):
                             quiet=quiet, pro=_cc_pro)
     else:
         kwargs.pop("_cc_auto_profile", None)
+    # Fonts are the most identifying surface measured -- 9.45 bits of entropy, and 35% of real
+    # machines carry a font set nobody else has. A seeded persona with no profile used to fall
+    # back to the engine's canonical per-OS list, which is byte-identical on every install: zero
+    # entropy, sitting in a conspicuous tail. Give it a real machine's list instead. No-ops when
+    # a profile is already set (an explicit one, or "auto", owns the fonts), under light_stealth,
+    # and when there is no seed at all -- see ensure_persona_fonts for why each is deliberate.
+    ensure_persona_fonts(fp, quiet=quiet)
     # SOCKS5-with-credentials must go through --proxy-server (Playwright rejects creds in its SOCKS
     # proxy descriptor); resolve_proxy returns proxy=None for that case so we drop it from Playwright.
     proxy_args, proxy = resolve_proxy(kwargs.get("proxy"))
@@ -349,6 +358,9 @@ def _prepare(kwargs):
         kwargs["proxy"] = proxy
     base = fingerprint_args(fp) + agent_args(agent) + extension_args(extensions) + proxy_args
     base += quic_args(proxy_opt)  # behind a proxy, disable QUIC so no HTTP/3 UDP egresses around it
+    # Linux hosts hide navigator.bluetooth while exposing usb/serial/hid — an OS-origin tell on a
+    # Windows persona. Restore it (no-op off Linux). See web_bluetooth_args.
+    base += web_bluetooth_args()
     if disable_privacy_sandbox:
         base += privacy_sandbox_args()
     user = list(extra_args or [])
@@ -365,9 +377,11 @@ def _prepare(kwargs):
     kwargs.setdefault("ignore_default_args", ["--enable-automation"])
     # Surface incoherent / missing-recommended option combos the SDK can't auto-fix (stderr; gated
     # by quiet / CLEARCOTE_NO_WARN). geoip may have just filled timezone/accept_language above.
+    # _font_reach is computed HERE, not inside coherence_warnings, because enumerating the
+    # host's installed families is I/O and that function is documented (and tested) as pure.
     emit_coherence_warnings(
         {**fp, "proxy": proxy_opt, "geoip": geoip, "headless": kwargs.get("headless"),
-         "_user_args": user},
+         "_user_args": user, "_font_reach": font_reachability(fp.get("fingerprint_profile"))},
         quiet=quiet, build_major=str(RELEASE["version"]).split(".")[0])
     # The motor-persona seed is the EFFECTIVE fingerprint (after the profile= merge above), i.e. the
     # same value that becomes --fingerprint — not the raw pre-merge kwarg. A profile-based launch

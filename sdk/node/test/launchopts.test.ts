@@ -1,8 +1,9 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   extensionArgs,
   resolveProxy,
   mergeFeatureFlags,
+  webBluetoothArgs,
   privacySandboxArgs,
   quicArgs,
   webrtcDefaultDenyArgs,
@@ -96,5 +97,41 @@ describe("resolveProxy", () => {
   it("leaves an authed HTTP proxy to Playwright", () => {
     const p = { server: "http://h:8080", username: "u", password: "p" };
     expect(resolveProxy(p)).toEqual({ args: [], proxy: p });
+  });
+});
+
+
+// --------------------------------------------------------------------------- web bluetooth
+// Web Bluetooth is compiled in but runtime-disabled on Linux only, so a Linux host serving a
+// Windows persona exposed navigator.usb/serial/hid but not navigator.bluetooth -- a combination
+// no real Windows Chrome produces. The flag restores it; off Linux it must stay a no-op.
+describe("webBluetoothArgs", () => {
+  const realPlatform = process.platform;
+  const setPlatform = (p: string) =>
+    Object.defineProperty(process, "platform", { value: p, configurable: true });
+  afterEach(() => setPlatform(realPlatform));
+
+  it("emits the flag on linux", () => {
+    setPlatform("linux");
+    expect(webBluetoothArgs()).toEqual(["--enable-features=WebBluetooth"]);
+  });
+
+  it("is a no-op off linux", () => {
+    for (const p of ["win32", "darwin"]) {
+      setPlatform(p);
+      expect(webBluetoothArgs()).toEqual([]);
+    }
+  });
+
+  it("folds into a single --enable-features", () => {
+    setPlatform("linux");
+    const merged = mergeFeatureFlags([
+      ...webBluetoothArgs(),
+      "--enable-features=SomethingElse",
+    ]);
+    const enables = merged.filter((a) => a.startsWith("--enable-features="));
+    expect(enables).toHaveLength(1);
+    expect(enables[0]).toContain("WebBluetooth");
+    expect(enables[0]).toContain("SomethingElse");
   });
 });

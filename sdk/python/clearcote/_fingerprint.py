@@ -39,6 +39,9 @@ FINGERPRINT_KEYS = (
     "webrtc_mdns",
     "disable_gpu_fingerprint",
     "fingerprint_noise",
+    # The two INDEPENDENT halves of the bundles above (engine >= Chromium 150 r12).
+    "gpu_string_spoof",
+    "canvas_noise",
     "fingerprint_profile",
     "storage_quota",
     "canvas_bridge",
@@ -331,6 +334,25 @@ def fingerprint_args(opts):
     # (UA/screen/GPU/persona) stay on. Default (unset/True) keeps the noise.
     if opts.get("fingerprint_noise") is False:
         args.append("--disable-fingerprint-noise")
+    # gpu_string_spoof=False reports the machine's REAL WebGL UNMASKED_VENDOR/RENDERER and changes
+    # NOTHING else: the getParameter limit table, the supported-extension list,
+    # getShaderPrecisionFormat and the WebGL readPixels farble all stay on the persona. It is the
+    # GPU-STRING half of disable_gpu_fingerprint on its own -- for hosts that rasterise in software,
+    # where claiming silicon the machine cannot render like is the weaker trade. Known gap:
+    # navigator.gpu still follows the wide flag, so with this switch alone WebGPU keeps describing
+    # the persona GPU while WebGL reports the real one. disable_gpu_fingerprint=True implies this
+    # (and reverts the rest too), so passing both is redundant, not contradictory.
+    # Default (unset/True) keeps the spoofed string. Requires engine >= 150 r12; inert on older.
+    if opts.get("gpu_string_spoof") is False:
+        args.append("--disable-gpu-string-spoof")
+    # canvas_noise=False turns OFF the per-eTLD+1 farble on CANVAS 2D readback only: getImageData,
+    # and toDataURL of a 2D canvas. WebGL readPixels, a WebGL canvas's toDataURL and every other
+    # farbled surface keep their current behaviour -- unlike fingerprint_noise=False, which is the
+    # process-wide off switch for all of them. Default (unset/True) keeps the noise.
+    # Known gap: canvas.toBlob()/OffscreenCanvas.convertToBlob() are gated by NEITHER switch.
+    # Requires engine >= 150 r12; inert on older builds.
+    if opts.get("canvas_noise") is False:
+        args.append("--disable-canvas-noise")
     # fingerprint_profile imports a real captured fingerprint (path/dict/JSON) — see
     # tools/fingerprint-collect. Its fields override the seed-derived persona; absent fields
     # fall back to the seed, so partial profiles stay coherent.

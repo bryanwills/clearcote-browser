@@ -82,6 +82,28 @@ export function quicArgs(proxy: PwProxy | undefined): string[] {
  * that genuinely need UDP will not establish. Callers who need working WebRTC through a proxy want
  * a transport that actually carries UDP (SOCKS5 with UDP ASSOCIATE, or a full tunnel) and can set
  * their own policy to opt out. */
+/**
+ * Switches to expose `navigator.bluetooth` on Linux hosts (empty elsewhere).
+ *
+ * Web Bluetooth is compiled into the engine but runtime-disabled on Linux only:
+ * Chromium's runtime_enabled_features.json5 gives WebBluetooth status "stable" on Win/Mac/Android/
+ * ChromeOS and lets Linux fall through to "default": "experimental", and content_features.cc
+ * declares kWebBluetooth FEATURE_DISABLED_BY_DEFAULT. So a Linux host serving a Windows persona
+ * reports navigator.usb, navigator.serial and navigator.hid but NOT navigator.bluetooth - a
+ * combination no real Windows Chrome produces, and an OS-origin tell that survives every string
+ * spoof. One flag restores it on the shipped binary; no rebuild is involved.
+ * 
+ * Verified against Chromium 150's bluetooth.idl: getDevices() is gated on WebBluetoothGetDevices
+ * and requestLEScan()/onadvertisementreceived on WebBluetoothScanning, both "experimental", so
+ * real stable Chrome exposes exactly {constructor, getAvailability, requestDevice} - which is what
+ * this flag produces. getAvailability() resolves false and requestDevice() rejects NotFoundError
+ * on a machine with no adapter, matching a real desktop without Bluetooth hardware.
+ */
+export function webBluetoothArgs(): string[] {
+  if (process.platform !== "linux") return []; // Win/Mac ship it stable
+  return ["--enable-features=WebBluetooth"];
+}
+
 export function webrtcDefaultDenyArgs(args: string[], _webrtcIp?: unknown): string[] {
   if (args.some((a) => a.startsWith("--webrtc-ip-handling-policy") || a.startsWith("--force-webrtc-ip-handling-policy"))) {
     return [];

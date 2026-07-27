@@ -15,7 +15,7 @@ namespace Clearcote;
 public static class Clearcote
 {
     /// This SDK's version (kept in lockstep with the npm/PyPI SDKs).
-    public const string Version = "0.24.0";
+    public const string Version = "0.25.0";
 
     private static readonly SemaphoreSlim PwLock = new(1, 1);
     private static IPlaywright? _pw;
@@ -294,6 +294,9 @@ public static class Clearcote
         baseList.AddRange(extArgs);
         baseList.AddRange(proxyArgs);
         baseList.AddRange(LaunchOpts.QuicArgs(proxyForQuic));
+        // Linux hosts hide navigator.bluetooth while exposing usb/serial/hid — an OS-origin tell
+        // on a Windows persona. Restore it (no-op off Linux). See LaunchOpts.WebBluetoothArgs.
+        baseList.AddRange(LaunchOpts.WebBluetoothArgs());
         // DEFAULT FLIPPED IN 0.23.0 — opt IN to disabling, rather than opt out.
         //
         // Disabling Topics/FLEDGE/Shared Storage/Fenced Frames is coherent for a de-Googled

@@ -53,7 +53,8 @@ def _gpu_incoherent(renderer, platform):
 
 def coherence_warnings(opts, host_platform=None, build_major=None):
     """Return a list of {severity, code, message} for incoherent/missing-recommended options.
-    `opts` is the resolved option dict (fingerprint kwargs + proxy/geoip/headless/_user_args)."""
+    `opts` is the resolved option dict (fingerprint kwargs + proxy/geoip/headless/_user_args,
+    plus `_font_reach`: the (claimed, reachable) font counts _prepare measured, or None)."""
     host = host_platform or sys.platform
     build_major = str(build_major) if build_major is not None else "149"
     out = []
@@ -68,6 +69,7 @@ def coherence_warnings(opts, host_platform=None, build_major=None):
     gpu_r, gpu_v = opts.get("gpu_renderer"), opts.get("gpu_vendor")
     profile = opts.get("fingerprint_profile")
     dgf, noise = opts.get("disable_gpu_fingerprint"), opts.get("fingerprint_noise")
+    gpu_string_spoof, canvas_noise = opts.get("gpu_string_spoof"), opts.get("canvas_noise")
     headless = opts.get("headless")
     bridge = opts.get("canvas_bridge")
     bridge_on = bool(bridge.get("url")) if isinstance(bridge, dict) else bool(bridge)
@@ -110,12 +112,55 @@ def coherence_warnings(opts, host_platform=None, build_major=None):
              "brand_version major %s differs from the build's Chrome %s - JA4/UA-CH version desync. "
              "Align brand_version to %s (or omit it)." % (str(bver).split(".")[0], build_major, build_major))
 
+    # A persona's font list is bounded by what this machine can actually render: the engine
+    # reports host INTERSECT list, and a listed-but-uninstalled family still measures absent.
+    # That is the safety property -- but it also means a rich donor imported onto a lean host
+    # quietly collapses. A 1,513-font profile on a 115-font host yields ~65 fonts and, until
+    # now, said nothing, leaving the caller believing they present an identity they do not.
+    reach = opts.get("_font_reach")
+    if reach and reach[0] >= 40 and reach[1] < reach[0] // 2:
+        warn("persona-fonts-unreachable",
+             "the fingerprint_profile claims %d fonts but this host can render only %d of them - "
+             "the persona's font identity is not achievable here, and what a site sees is that "
+             "intersection, not the donor's list. Fonts are the highest-entropy surface measured "
+             "(9.45 bits; 35%% of machines are unique on it), so this is a large divergence from "
+             "the captured machine. Install the missing families, or use a profile captured on a "
+             "host like this one (profile=\"auto\" selects for host coherence)."
+             % (reach[0], reach[1]))
+
     # --- render coherence ---
-    if dgf and noise is not False:
+    # The GPU string can be made real in two different ways, and each leaves a DIFFERENT amount of
+    # noise behind, so the advice differs. Fire neither once the operator has already turned the
+    # relevant noise off, or the warning contradicts the setting they just made.
+    noise_off = noise is False
+    if dgf and not noise_off and canvas_noise is not False:
         warn("gpu-noise",
              "disable_gpu_fingerprint presents the REAL GPU, but per-eTLD farble still perturbs the "
-             "canvas/WebGL readback - noise on otherwise-real pixels is itself a tell. Pair with "
-             "fingerprint_noise=False.")
+             "canvas 2D readback - noise on otherwise-real pixels is itself a tell. This mode "
+             "already skips the WebGL readPixels farble, so canvas_noise=False is the exact fix "
+             "(fingerprint_noise=False also works, and turns off more than is needed here).")
+    elif gpu_string_spoof is False and not dgf and not noise_off:
+        warn("gpu-noise-string",
+             "gpu_string_spoof=False reports the REAL WebGL vendor/renderer, but per-eTLD farble "
+             "still perturbs BOTH the canvas 2D readback and gl.readPixels - real string over "
+             "noised pixels is itself a tell. fingerprint_noise=False clears both; canvas_noise="
+             "False clears only the canvas 2D half and leaves readPixels noised.")
+    if gpu_string_spoof is False and not dgf:
+        note("gpu-string-only",
+             "gpu_string_spoof=False reports the REAL WebGL vendor/renderer while the persona keeps "
+             "supplying the getParameter limits, the extension list and the shader precision "
+             "formats - AND navigator.gpu (WebGPU) still reports the persona GPU, which WebGL no "
+             "longer matches. The GPU name, its capabilities and its WebGPU identity now come from "
+             "different sources, and WebGL-vs-WebGPU is readable in one page. That is the contract "
+             "of the narrow switch (it moves the WebGL string and nothing else); use "
+             "disable_gpu_fingerprint=True to take the whole GPU surface real together.")
+    if canvas_noise is False:
+        note("canvas-noise-toblob",
+             "canvas_noise=False silences canvas 2D getImageData and toDataURL, but NOT "
+             "canvas.toBlob() / OffscreenCanvas.convertToBlob() - that encode path carries its own "
+             "farble which neither canvas_noise nor fingerprint_noise gates (a pre-existing engine "
+             "gap, not a regression). A page that decodes the blob and diffs it against toDataURL "
+             "can see the disagreement, so avoid canvas_noise=False where toBlob is scored.")
     if headless is not False and not bridge_on and not dgf and not profile:
         note("headless-render",
              "headless with no canvas_bridge/disable_gpu_fingerprint/fingerprint_profile - canvas and "

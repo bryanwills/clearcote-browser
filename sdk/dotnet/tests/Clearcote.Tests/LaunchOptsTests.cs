@@ -78,4 +78,44 @@ public class LaunchOptsTests
         var (a3, p3) = LaunchOpts.ResolveProxy(httpAuth);
         Assert.Empty(a3); Assert.Same(httpAuth, p3);
     }
+
+    // ----------------------------------------------------------------- web bluetooth
+    // Web Bluetooth is compiled in but runtime-disabled on Linux only, so a Linux host serving
+    // a Windows persona exposed navigator.usb/serial/hid but not navigator.bluetooth -- a
+    // combination no real Windows Chrome produces. Platform is decided by RuntimeInformation,
+    // so assert against the host this test actually runs on rather than faking it.
+    [Fact]
+    public void WebBluetoothArgs_MatchesHostPlatform()
+    {
+        var args = LaunchOpts.WebBluetoothArgs();
+        if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
+                System.Runtime.InteropServices.OSPlatform.Linux))
+        {
+            Assert.Equal(new[] { "--enable-features=WebBluetooth" }, args);
+        }
+        else
+        {
+            Assert.Empty(args);
+        }
+    }
+
+    [Fact]
+    public void WebBluetoothArgs_FoldIntoSingleEnableFeatures()
+    {
+        // Chromium honours only the LAST --enable-features, so a second occurrence would
+        // silently drop WebBluetooth.
+        var input = new List<string>(LaunchOpts.WebBluetoothArgs())
+        {
+            "--enable-features=SomethingElse",
+        };
+        var merged = LaunchOpts.MergeFeatureFlags(input);
+        var enables = merged.FindAll(a => a.StartsWith("--enable-features="));
+        Assert.Single(enables);
+        Assert.Contains("SomethingElse", enables[0]);
+        if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
+                System.Runtime.InteropServices.OSPlatform.Linux))
+        {
+            Assert.Contains("WebBluetooth", enables[0]);
+        }
+    }
 }
