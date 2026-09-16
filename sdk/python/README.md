@@ -130,6 +130,52 @@ The returned `Server` exposes `.cdp_url`, `.ws_url()`, and `.close()`, and works
 (`pip install clearcote-mcp` or `npx -y clearcote-mcp`) — ~20 tools over one shared stealth browser,
 persona set via `CLEARCOTE_*` env.
 
+### Many identities on one endpoint (`serve_multiplex`, `clearcote serve`)
+
+One port, one browser per identity, chosen by the connection URL:
+
+```python
+# in another shell:  clearcote serve --port 9222 --idle-timeout 300
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    a = p.chromium.connect_over_cdp("http://127.0.0.1:9222?fingerprint=acct-1&timezone=Europe/Berlin")
+    b = p.chromium.connect_over_cdp("http://127.0.0.1:9222?fingerprint=acct-2&proxy=socks5%3A%2F%2Fu%3Ap%40host%3A1080&geoip=true")
+```
+
+- Query options: `fingerprint`, `timezone`, `locale`, `proxy`, `geoip`, plus any fingerprint option in kebab-case (`platform`, `hardware-concurrency`, `allow-third-party-cookies`, ...). Unknown options are rejected (400).
+- The same identity reuses its browser. Asking for a running identity with *different* options returns 409 — close it first.
+- `GET /` lists running browsers; `POST /fingerprint/<id>/close` stops one; `--idle-timeout <s>` closes a browser after its last client disconnects; `--max-browsers` caps them (default 16).
+- Behind a reverse proxy, WebSocket URLs honour `X-Forwarded-Host` / `X-Forwarded-Proto`; add the public name with `--allow-host`.
+- Binds `127.0.0.1` by default. Requests a web page could make (cross-site fetches, foreign `Origin`, a `Host` that isn't an IP / `localhost` / allowed) are refused.
+
+In code: `clearcote.serve_multiplex(port=9222, idle_timeout=300, data_dir="./profiles")`.
+
+### `clearcote` command line
+
+```bash
+clearcote install [--version 152] [--channel preview]
+clearcote info [--quick] [--json] [--proxy <url>]   # alias: doctor
+clearcote login [key]      # validates the key, saves it to ~/.clearcote/license.key
+clearcote logout
+clearcote clear-cache
+clearcote serve [--port 9222] ...
+```
+
+`info` never downloads: it reports the SDK, the cached builds, which engine features the binary supports, a launch test (skipped with `--quick`), licence seats, fonts and missing system libraries.
+
+### Engine options (PRO 152 r22+)
+
+| Option | Effect |
+|---|---|
+| `fingerprint="off"` | No persona at all — for telling whether a problem comes from the spoofing or from your environment. |
+| `fingerprint_voices=False` | Keep the host's own `speechSynthesis` voices under a persona. |
+| `allow_third_party_cookies=True` | Allow third-party cookies (blocked by default), for embedded sign-in, payment and captcha frames. |
+| `transparent_proxy=True` | With a proxy: send the headers a direct connection sends, and report connection timing as a reused connection. |
+
+On an older engine each of these is skipped with a warning; the launch still works.
+
+Also: `license_through_proxy=True` (or `CLEARCOTE_LICENSE_THROUGH_PROXY=1`) sends the licence calls through the launch proxy; `release_channel="preview"` (or `CLEARCOTE_RELEASE_CHANNEL`) picks up PRO preview builds; `get_session_seats()` reports seats in use.
+
 ### Through a proxy (report the proxy's IP, not your host's)
 
 ```python
@@ -155,7 +201,9 @@ browser = launch(
 )
 ```
 
-Anything you set explicitly wins over `geoip`. With no proxy it uses your direct connection's IP. The lookup needs an **http(s) proxy** — SOCKS proxies are skipped (set `timezone`/`accept_language` yourself).
+Anything you set explicitly wins over `geoip`. With no proxy it uses your direct connection's IP. The lookup goes through the proxy — http(s) and SOCKS5 (with username/password) alike.
+
+The whole lookup has one deadline, `CLEARCOTE_GEOIP_TIMEOUT_SECONDS` (default 20). If the region can't be resolved in time, `launch()` raises `GeoipError` (code `GEOIP_UNRESOLVED`) **before** any browser starts, instead of launching with this machine's clock and language. If you set both `timezone` and `accept_language` yourself, it warns and launches anyway.
 
 Geo data comes from the offline [geoip-all-in-one](https://github.com/daijro/geoip-all-in-one) MaxMind database (downloaded + cached on first use; GPL-3.0 data, the same source Camoufox uses) — more accurate than a single online API — with `ip-api.com` as a fallback.
 

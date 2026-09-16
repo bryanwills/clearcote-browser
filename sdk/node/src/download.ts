@@ -83,6 +83,12 @@ export interface DownloadOptions {
    * (or bare `"r7"`), which also requires a license. Also set via `CLEARCOTE_BROWSER_VERSION`.
    */
   version?: string;
+  /**
+   * PRO release channel: `"stable"` (default) or `"preview"`. Preview selects the newest build
+   * available for this platform — a newer preview when one exists, otherwise stable. An exact
+   * version pin overrides the channel. Also set via `CLEARCOTE_RELEASE_CHANNEL`.
+   */
+  releaseChannel?: ReleaseChannel;
 }
 
 /** A resolved release to fetch — either the pinned {@link RELEASE} or one discovered at runtime. */
@@ -105,7 +111,8 @@ function autoUpdateRequested(opt: boolean | undefined): boolean {
   return env === "1" || env === "true";
 }
 
-function defaultCacheRoot(): string {
+/** Per-OS cache root for downloaded browsers (CLEARCOTE_CACHE overrides). */
+export function defaultCacheRoot(): string {
   if (process.env.CLEARCOTE_CACHE) return process.env.CLEARCOTE_CACHE;
   if (process.platform === "win32") {
     return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "clearcote", "Cache");
@@ -694,8 +701,11 @@ export async function resolvedEngineVersion(
 /** Resolve a version selector to a downloaded, verified binary path (free from GitHub, pro via the licensed route). */
 export async function ensureVersion(
   selector: string,
-  opts: { licenseKey?: string; apiBase?: string; cacheDir?: string; quiet?: boolean } = {},
+  opts: { licenseKey?: string; apiBase?: string; cacheDir?: string; quiet?: boolean; releaseChannel?: string } = {},
 ): Promise<string> {
+  // Validated up front, and passed on every PRO path: a pinned version with channel "preview" must
+  // still ask the server for preview builds.
+  const releaseChannel = resolveReleaseChannel(opts.releaseChannel);
   // A PRO revision pin ("r7" / "150.0.7871.114-r7") isn't in the public catalog — it's a licensed
   // rebuild. Route it straight to the PRO download (which resolves the revision) before validating.
   if (isProRevisionSelector(selector)) {
@@ -704,11 +714,11 @@ export async function ensureVersion(
         `Clearcote '${selector}' is a PRO revision — set a license key (CLEARCOTE_LICENSE_KEY, or pass licenseKey) to pin it.`,
       );
     }
-    return proEnsureBinary(opts.licenseKey, { apiBase: opts.apiBase, cacheDir: opts.cacheDir, quiet: opts.quiet, version: selector });
+    return proEnsureBinary(opts.licenseKey, { apiBase: opts.apiBase, cacheDir: opts.cacheDir, quiet: opts.quiet, version: selector, releaseChannel });
   }
   const plan = await resolveVersion(selector, !!opts.licenseKey, opts.quiet);
   if (plan.kind === "pro") {
-    return proEnsureBinary(opts.licenseKey as string, { apiBase: opts.apiBase, cacheDir: opts.cacheDir, quiet: opts.quiet, version: plan.version });
+    return proEnsureBinary(opts.licenseKey as string, { apiBase: opts.apiBase, cacheDir: opts.cacheDir, quiet: opts.quiet, version: plan.version, releaseChannel });
   }
   const base = path.join(opts.cacheDir || defaultCacheRoot(), plan.rel.tag);
   {
@@ -716,6 +726,30 @@ export async function ensureVersion(
     if (cached) return cached;
   }
   return fetchAndVerify(plan.rel, base, { cacheDir: opts.cacheDir, quiet: opts.quiet });
+}
+
+/** Release channel for PRO builds: "stable" (default) or "preview". */
+export type ReleaseChannel = "stable" | "preview";
+
+/**
+ * Resolve the release channel: explicit option > CLEARCOTE_RELEASE_CHANNEL > "stable".
+ * Unknown values throw, so a typo never silently selects a different build.
+ */
+export function resolveReleaseChannel(explicit?: string, env: Record<string, string | undefined> = process.env): ReleaseChannel {
+  const raw = (explicit ?? env.CLEARCOTE_RELEASE_CHANNEL ?? "").trim().toLowerCase();
+  if (!raw || raw === "stable") return "stable";
+  if (raw === "preview") return "preview";
+  throw new Error(`Unknown release channel '${explicit ?? env.CLEARCOTE_RELEASE_CHANNEL}'. Use "stable" or "preview".`);
+}
+
+/** The PRO download URL for a platform, version selector and channel. */
+export function proDownloadUrl(baseUrl: string, plat: "windows" | "linux", version?: string, channel: ReleaseChannel = "stable"): string {
+  let u = `${baseUrl.replace(/\/$/, "")}/api/v1/download/pro?platform=${plat}`;
+  if (version) u += `&version=${encodeURIComponent(version)}`;
+  // An exact pin overrides the channel on the server; sending it anyway lets the server report
+  // which channel resolved. Omitted for stable so older servers see an unchanged request.
+  if (channel === "preview") u += "&channel=preview";
+  return u;
 }
 
 /** Options for {@link proEnsureBinary}. */
@@ -728,6 +762,8 @@ export interface ProDownloadOptions {
   quiet?: boolean;
   /** Request a specific PRO major/version; the server returns the newest match. */
   version?: string;
+  /** "preview" gets the newest build for this platform, preview or stable (default "stable"). */
+  releaseChannel?: ReleaseChannel;
 }
 
 /**
@@ -745,8 +781,8 @@ export async function proEnsureBinary(licenseKey: string, opts: ProDownloadOptio
   const plat = process.platform === "win32" ? "windows" : process.platform === "linux" ? "linux" : null;
   if (!plat) throw new Error("Clearcote PRO ships Windows x64 and Linux x64 only.");
 
-  let proUrl = `${baseUrl}/api/v1/download/pro?platform=${plat}`;
-  if (opts.version) proUrl += `&version=${encodeURIComponent(opts.version)}`; // request a specific PRO version
+  const channel = resolveReleaseChannel(opts.releaseChannel);
+  const proUrl = proDownloadUrl(baseUrl, plat, opts.version, channel);
   const res = await fetch(proUrl, {
     redirect: "follow",
     headers: { authorization: `Bearer ${licenseKey}`, "User-Agent": "clearcote-sdk" },
@@ -762,7 +798,11 @@ export async function proEnsureBinary(licenseKey: string, opts: ProDownloadOptio
   const meta = (await res.json()) as {
     tag?: string; version?: string; asset?: string; archive?: string; binary?: string;
     url?: string; sha256?: string; exe_sha256?: string; size?: number;
+    channel?: string; resolved_channel?: string;
   };
+  if (channel === "preview" && meta.resolved_channel && meta.resolved_channel !== "preview") {
+    log(opts.quiet, `release channel: preview requested, no newer preview for ${plat} -> ${meta.resolved_channel} ${meta.tag ?? ""}`.trim());
+  }
   if (!meta.url || !meta.sha256) {
     throw new Error(`Clearcote PRO build is not currently available for ${plat} (the server returned no download).`);
   }
@@ -816,4 +856,22 @@ export async function ensureBinary(opts: DownloadOptions = {}): Promise<string> 
     if (cached) return cached;
   }
   return fetchAndVerify(rel, base, opts);
+}
+
+/**
+ * Verified browser builds already in the cache, newest first (by directory mtime). Never downloads
+ * and never deletes: unlike cachedBinary(), a damaged entry is simply left out of the list.
+ */
+export function listCachedBuilds(cacheDir: string = defaultCacheRoot()): Array<{ tag: string; path: string }> {
+  if (!existsSync(cacheDir)) return [];
+  const out: Array<{ tag: string; path: string; mtime: number }> = [];
+  for (const e of readdirSync(cacheDir, { withFileTypes: true })) {
+    if (!e.isDirectory()) continue;
+    const base = path.join(cacheDir, e.name);
+    if (!existsSync(path.join(base, ".verified"))) continue;
+    const exe = findFile(path.join(base, "browser"), process.platform === "win32" ? "chrome.exe" : "chrome");
+    if (!exe) continue;
+    out.push({ tag: e.name, path: exe, mtime: statSync(base).mtimeMs });
+  }
+  return out.sort((a, b) => b.mtime - a.mtime).map(({ tag, path: p }) => ({ tag, path: p }));
 }

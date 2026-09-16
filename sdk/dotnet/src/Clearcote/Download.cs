@@ -29,6 +29,18 @@ public class ProDownloadOptions
     public bool Quiet { get; set; }
     /// Request a specific PRO major/version; the server returns the newest match.
     public string? Version { get; set; }
+    /// Release channel. <see cref="ReleaseChannel.Preview"/> gets the newest build for this platform,
+    /// preview or stable. Null = CLEARCOTE_RELEASE_CHANNEL, else stable.
+    public ReleaseChannel? ReleaseChannel { get; set; }
+}
+
+/// PRO release channel.
+public enum ReleaseChannel
+{
+    /// The default: the newest stable build.
+    Stable,
+    /// The newest build available for this platform — a newer preview when one exists, otherwise stable.
+    Preview,
 }
 
 /// A resolved version plan: a free release to download, or a pro version to fetch via the licensed route.
@@ -470,6 +482,37 @@ public static class Download
 
     private static void TryDelete(string path) { try { File.Delete(path); } catch { } }
 
+    /// Resolve the release channel: explicit option &gt; CLEARCOTE_RELEASE_CHANNEL &gt; stable.
+    /// Unknown env values throw, so a typo never silently selects a different build.
+    public static ReleaseChannel ResolveReleaseChannel(ReleaseChannel? @explicit = null, string? envValue = null)
+    {
+        if (@explicit is { } e)
+        {
+            if (!Enum.IsDefined(e)) throw new ArgumentException($"Unknown release channel '{(int)e}'. Use Stable or Preview.");
+            return e;
+        }
+        return ParseReleaseChannel(envValue ?? Environment.GetEnvironmentVariable("CLEARCOTE_RELEASE_CHANNEL"));
+    }
+
+    /// Parse "stable" / "preview" (any case, trimmed; empty = stable). Anything else throws.
+    public static ReleaseChannel ParseReleaseChannel(string? value)
+    {
+        var raw = (value ?? "").Trim().ToLowerInvariant();
+        if (raw is "" or "stable") return ReleaseChannel.Stable;
+        if (raw == "preview") return ReleaseChannel.Preview;
+        throw new ArgumentException($"Unknown release channel '{value}'. Use \"stable\" or \"preview\".");
+    }
+
+    /// The PRO download URL for a platform, version selector and channel. <c>&amp;channel=preview</c> is
+    /// only appended for preview, so older servers see an unchanged request for stable.
+    public static string ProDownloadUrl(string baseUrl, string plat, string? version = null, ReleaseChannel channel = ReleaseChannel.Stable)
+    {
+        var u = $"{baseUrl.TrimEnd('/')}/api/v1/download/pro?platform={plat}";
+        if (!string.IsNullOrEmpty(version)) u += $"&version={Uri.EscapeDataString(version)}";
+        if (channel == ReleaseChannel.Preview) u += "&channel=preview";
+        return u;
+    }
+
     /// Download + verify the PRO (license-gated) browser and return its chrome path. Throws on any
     /// failure — a licensed caller must get the PRO build, never a silent free fall-back.
     public static async Task<string> ProEnsureBinaryAsync(string licenseKey, ProDownloadOptions? opts = null)
@@ -479,9 +522,9 @@ public static class Download
         var plat = Native.IsWindows ? "windows" : Native.IsLinux ? "linux" : null;
         if (plat is null) throw new Exception("Clearcote PRO ships Windows x64 and Linux x64 only.");
 
+        var channel = ResolveReleaseChannel(opts.ReleaseChannel);
         using var client = SdkHttp.Create();
-        var proUrl = $"{baseUrl}/api/v1/download/pro?platform={plat}";
-        if (!string.IsNullOrEmpty(opts.Version)) proUrl += $"&version={Uri.EscapeDataString(opts.Version)}";
+        var proUrl = ProDownloadUrl(baseUrl, plat, opts.Version, channel);
         var req = new HttpRequestMessage(HttpMethod.Get, proUrl);
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", licenseKey);
         req.Headers.UserAgent.ParseAdd("clearcote-sdk");
@@ -496,6 +539,9 @@ public static class Download
         using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync().ConfigureAwait(false));
         var meta = doc.RootElement;
         string? Get(string k) => meta.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+        var resolvedChannel = Get("resolved_channel");
+        if (channel == ReleaseChannel.Preview && !string.IsNullOrEmpty(resolvedChannel) && resolvedChannel != "preview")
+            Log(opts.Quiet, $"release channel: preview requested, no newer preview for {plat} -> {resolvedChannel} {Get("tag")}".Trim());
         var url = Get("url"); var sha = Get("sha256");
         if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(sha))
             throw new Exception($"Clearcote PRO build is not currently available for {plat} (the server returned no download).");
@@ -651,9 +697,12 @@ public static class Download
         Regex.IsMatch((selector ?? "").Trim(), @"(?:^|-)r\d+$", RegexOptions.IgnoreCase);
 
     /// Resolve a version selector to a downloaded, verified binary path (free from GitHub, pro via the licensed route).
+    /// <paramref name="releaseChannel"/> is forwarded to the PRO route (null = CLEARCOTE_RELEASE_CHANNEL)
+    /// and validated here, so a typo throws on the pinned-version path too.
     public static async Task<string> EnsureVersionAsync(string selector, string? licenseKey = null,
-        string? apiBase = null, string? cacheDir = null, bool quiet = false)
+        string? apiBase = null, string? cacheDir = null, bool quiet = false, ReleaseChannel? releaseChannel = null)
     {
+        var channel = ResolveReleaseChannel(releaseChannel);
         // A PRO revision pin ("r7" / "150.0.7871.114-r7") isn't in the public catalog — it's a
         // licensed rebuild. Route it straight to the PRO download (which resolves the revision).
         if (IsProRevisionSelector(selector))
@@ -662,13 +711,13 @@ public static class Download
                 throw new Exception(
                     $"Clearcote '{selector}' is a PRO revision — set a license key (CLEARCOTE_LICENSE_KEY, or pass LicenseKey) to pin it.");
             return await ProEnsureBinaryAsync(licenseKey!,
-                new ProDownloadOptions { ApiBase = apiBase, CacheDir = cacheDir, Quiet = quiet, Version = selector }).ConfigureAwait(false);
+                new ProDownloadOptions { ApiBase = apiBase, CacheDir = cacheDir, Quiet = quiet, Version = selector, ReleaseChannel = channel }).ConfigureAwait(false);
         }
 
         var plan = await ResolveVersionAsync(selector, !string.IsNullOrEmpty(licenseKey), quiet).ConfigureAwait(false);
         if (plan.Kind == "pro")
             return await ProEnsureBinaryAsync(licenseKey!,
-                new ProDownloadOptions { ApiBase = apiBase, CacheDir = cacheDir, Quiet = quiet, Version = plan.Version }).ConfigureAwait(false);
+                new ProDownloadOptions { ApiBase = apiBase, CacheDir = cacheDir, Quiet = quiet, Version = plan.Version, ReleaseChannel = channel }).ConfigureAwait(false);
 
         var rel = plan.Rel!;
         var @base = Path.Combine(cacheDir ?? Native.CacheRoot(), rel.Tag);

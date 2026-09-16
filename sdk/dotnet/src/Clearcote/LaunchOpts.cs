@@ -160,4 +160,137 @@ public static class LaunchOpts
         if (!string.IsNullOrEmpty(encryptionKey)) return new() { $"--profile-encryption-key={encryptionKey}" };
         return portableProfile ? new() { "--portable-profile" } : new();
     }
+
+    // ── GPU launch defaults ──────────────────────────────────────────────────
+
+    /// Playwright launch defaults the SDK removes.
+    ///
+    /// <para><c>--enable-automation</c> keeps the engine's AutomationControlled feature off.
+    /// <c>--enable-unsafe-swiftshader</c> is added by Playwright (1.49+) to every Chromium launch; it lets
+    /// WebGL fall back to SwiftShader software rendering, which real Chrome no longer does for WebGL.
+    /// Stripping it on its own is NOT safe: on a GPU-less Linux host a HEADED launch then has no WebGL
+    /// at all, so it is only removed together with <see cref="GpuBlocklistArgs"/>. A caller's own
+    /// IgnoreDefaultArgs always wins.</para>
+    public static readonly IReadOnlyList<string> DefaultIgnoredArgs = new[] { "--enable-automation", "--enable-unsafe-swiftshader" };
+
+    /// <c>--ignore-gpu-blocklist</c> for headed launches and for every launch on Windows.
+    ///
+    /// <para>Headed on a host without a usable GPU (a VPS under Xvfb), Chromium's blocklist disables
+    /// WebGL once the SwiftShader fallback flag is gone; this lets WebGL run anyway. On Windows the
+    /// blocklist also refuses WebGPU on the Microsoft Basic Render Driver of GPU-less VMs. Headless
+    /// Linux already renders WebGL through SwiftShader, so nothing is added there. Never duplicated
+    /// when the caller already passes it.</para>
+    public static List<string> GpuBlocklistArgs(bool headed, string? osTag = null, IEnumerable<string>? userArgs = null)
+    {
+        var isWindows = (osTag ?? Native.OsTag) == "windows";
+        if (!headed && !isWindows) return new();
+        if (userArgs?.Contains("--ignore-gpu-blocklist") == true) return new();
+        return new() { "--ignore-gpu-blocklist" };
+    }
+
+    // ── engine capability probe ─────────────────────────────────────────────
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> SwitchCache = new();
+
+    /// Whether the engine binary implements a command-line switch, by searching it for the
+    /// NUL-delimited literal <c>"\0name\0"</c> (a switch constant in the string table). The delimiters
+    /// keep it from matching a longer literal. On Windows the switches live in chrome.dll next to the
+    /// launcher; elsewhere in the executable. Cached per (path, size, mtime). Any failure answers false.
+    public static bool EngineSupportsSwitch(string? exe, string name)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(exe)) return false;
+            var file = exe;
+            if (Native.IsWindows)
+            {
+                var dll = Path.Combine(Path.GetDirectoryName(exe) ?? "", "chrome.dll");
+                if (File.Exists(dll)) file = dll;
+            }
+            var fi = new FileInfo(file);
+            if (!fi.Exists) return false;
+            var key = $"{fi.FullName}|{name}|{fi.Length}|{fi.LastWriteTimeUtc.Ticks}";
+            if (SwitchCache.TryGetValue(key, out var cached)) return cached;
+            var needle = System.Text.Encoding.Latin1.GetBytes($"\0{name}\0");
+            var found = false;
+            using (var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16))
+            {
+                var chunk = new byte[8 * 1024 * 1024];
+                var carry = 0; // bytes kept from the previous chunk's tail, at chunk[0..carry]
+                int n;
+                while ((n = fs.Read(chunk, carry, chunk.Length - carry)) > 0)
+                {
+                    var len = carry + n;
+                    if (chunk.AsSpan(0, len).IndexOf(needle) >= 0) { found = true; break; }
+                    carry = Math.Min(needle.Length - 1, len);
+                    Buffer.BlockCopy(chunk, len - carry, chunk, 0, carry);
+                }
+            }
+            SwitchCache[key] = found;
+            return found;
+        }
+        catch { return false; }
+    }
+
+    // ── new engine switches (152 r22+) ───────────────────────────────────────
+
+    /// Switches introduced in engine 152 r22, with the option that asked for each. Gated per binary.
+    public static readonly IReadOnlyDictionary<string, string> GatedEngineSwitches = new Dictionary<string, string>
+    {
+        ["--fingerprint-passthrough"] = "Fingerprint = \"off\" (pass-through debug mode)",
+        ["--disable-fingerprint-voices"] = "FingerprintVoices = false",
+        ["--allow-third-party-cookies"] = "AllowThirdPartyCookies = true",
+        ["--transparent-proxy"] = "TransparentProxy = true",
+    };
+
+    /// Drop any 152 r22+ switch the engine that will run does not implement, with a warning.
+    /// Chromium ignores unknown switches silently, so an older engine would otherwise launch without
+    /// the feature and without saying so.
+    public static (List<string> Args, List<string> Warnings) GateEngineSwitches(string? exe, IEnumerable<string> args, bool quiet = false)
+    {
+        var warnings = new List<string>();
+        var outArgs = new List<string>();
+        foreach (var a in args)
+        {
+            var name = a.Split('=', 2)[0];
+            if (!GatedEngineSwitches.TryGetValue(name, out var what) || EngineSupportsSwitch(exe, name[2..]))
+            {
+                outArgs.Add(a);
+                continue;
+            }
+            warnings.Add($"clearcote: {what} needs engine 152 r22 or newer; this engine ignores it, so it was not applied.");
+        }
+        if (!quiet) foreach (var w in warnings) Console.Error.WriteLine(w);
+        return (outArgs, warnings);
+    }
+
+    /// Launch switches for the non-fingerprint engine options. <c>TransparentProxy</c> is only
+    /// meaningful with a proxy (it hides the <c>Proxy-Connection</c> header and proxy-shaped timing);
+    /// without one it is dropped with a note.
+    public static List<string> EngineExtrasArgs(bool? allowThirdPartyCookies, bool? transparentProxy, ProxyOptions? proxy, bool quiet = false)
+    {
+        var args = new List<string>();
+        if (allowThirdPartyCookies == true) args.Add("--allow-third-party-cookies");
+        if (transparentProxy == true)
+        {
+            if (!string.IsNullOrEmpty(proxy?.Server)) args.Add("--transparent-proxy");
+            else if (!quiet) Console.Error.WriteLine("clearcote: transparentProxy has no effect without a proxy; ignored.");
+        }
+        return args;
+    }
+
+    /// Serve as root on Linux needs --no-sandbox (unless the caller already passed it): serve spawns
+    /// the binary itself, so Playwright's own --no-sandbox is missing and Chromium refuses to start.
+    public static bool ServeNeedsNoSandbox(string osTag, uint? uid, IEnumerable<string> args)
+        => osTag == "linux" && uid == 0 && !args.Contains("--no-sandbox");
+
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "geteuid")]
+    private static extern uint GetEuid();
+
+    /// Effective uid on Unix, null elsewhere or when it cannot be read.
+    internal static uint? EffectiveUid()
+    {
+        if (Native.IsWindows) return null;
+        try { return GetEuid(); } catch { return null; }
+    }
 }

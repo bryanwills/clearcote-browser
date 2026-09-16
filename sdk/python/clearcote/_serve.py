@@ -72,6 +72,11 @@ class Server:
         except Exception:
             return None
 
+    @property
+    def pid(self):
+        """OS process id of the browser."""
+        return getattr(self.process, "pid", None)
+
     def is_alive(self) -> bool:
         return self.process.poll() is None
 
@@ -116,10 +121,14 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     ``launch()`` accepts.
     """
     # Lazy import to avoid a circular import at module load (this module is imported by __init__).
-    from . import _acquire_lease_from_kwargs, _prepare, _win_av_retry
+    from . import _acquire_lease_from_kwargs, _prepare_or_release, _win_av_retry
     from ._fonts import linux_font_env
+    from ._launchopts import serve_needs_no_sandbox
 
     kwargs.pop("headless", None)  # serve() drives headless directly via --headless=new
+    # ...so _prepare cannot see it: tell it explicitly (the GPU-blocklist rule depends on headed).
+    # serve launches the binary directly, so Playwright's SwiftShader default is never added here.
+    kwargs["_cc_headed"] = not headless
     # License (opt-in, inert in free mode). This MUST run before _prepare: it converts license_key
     # into the _cc_pro tuple _prepare needs to select the gated binary. Without it serve() silently
     # dropped the key and launched the FREE engine for a licensed caller -- and even had it resolved
@@ -128,7 +137,7 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     lease = _acquire_lease_from_kwargs(kwargs)
     # Build the full stealth arg set exactly like launch() does (fingerprint + privacy-sandbox +
     # webrtc leak-proofing + proxy + feature-merge + geoip), then launch the binary ourselves.
-    exe, args, pw_kwargs, _humanize, _show, _seed = _prepare(kwargs)
+    exe, args, pw_kwargs, _humanize, _show, _seed = _prepare_or_release(kwargs, lease)
 
     port = int(port) if port else _free_port()
     own_udd = user_data_dir is None
@@ -151,6 +160,10 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     prox = pw_kwargs.get("proxy")
     if isinstance(prox, dict) and prox.get("server"):
         cdp.append("--proxy-server=%s" % prox["server"])
+    # Chromium refuses to start as root without --no-sandbox, and serve spawns the binary itself, so
+    # Playwright's own --no-sandbox is missing: `clearcote serve` in a root container just timed out.
+    if serve_needs_no_sandbox(sys.platform, getattr(os, "getuid", lambda: None)(), args):
+        cdp.append("--no-sandbox")
 
     env = dict(os.environ)
     env.update(linux_font_env(exe))  # Linux: FONTCONFIG_FILE -> bundled font clones (no-op elsewhere)

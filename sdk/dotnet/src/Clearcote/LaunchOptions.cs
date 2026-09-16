@@ -12,6 +12,31 @@ public class LaunchOptions : FingerprintOptions
     public string? LicenseKey { get; set; }
     /// License backend base URL (default: CLEARCOTE_LICENSE_API env or clearcotelabs.com).
     public string? LicenseApiBase { get; set; }
+    /// Send the licence calls (lease checkout / heartbeat / check-in) through <see cref="Proxy"/>
+    /// instead of directly from this machine. Off by default. Null = CLEARCOTE_LICENSE_THROUGH_PROXY.
+    /// No effect without a proxy.
+    public bool? LicenseThroughProxy { get; set; }
+    /// PRO release channel. <c>Preview</c> selects the newest build for
+    /// this platform (a newer preview when one exists, otherwise stable). An exact <see cref="Version"/>
+    /// pin overrides it. Null = CLEARCOTE_RELEASE_CHANNEL ("stable" | "preview"; anything else throws),
+    /// else stable.
+    public ReleaseChannel? ReleaseChannel { get; set; }
+
+    // ── geoip ────────────────────────────────────────────────────────────────
+    /// Fill unset Timezone / AcceptLanguage / Location / WebrtcIp from the exit IP's region, looked up
+    /// THROUGH <see cref="Proxy"/> (HTTP or SOCKS5). Bounded by CLEARCOTE_GEOIP_TIMEOUT_SECONDS
+    /// (default 20). Fails closed with <see cref="GeoipException"/> before any browser starts, unless
+    /// both Timezone and AcceptLanguage were set explicitly (then it warns and launches).
+    public bool Geoip { get; set; }
+
+    // ── engine behaviour switches (engine 152 r22+; dropped with a warning on older engines) ──
+    /// Allow third-party cookies, as stock Chrome does. The de-Googled base blocks them by default,
+    /// which breaks embedded flows (reCAPTCHA, SSO sign-in, payment challenges). Default off.
+    public bool? AllowThirdPartyCookies { get; set; }
+    /// Hide proxy use from origins and pages: send <c>Connection</c> instead of
+    /// <c>Proxy-Connection</c> on plain-HTTP requests through an HTTP proxy, and report proxied
+    /// connection timing like a reused connection. Requires <see cref="Proxy"/>.
+    public bool? TransparentProxy { get; set; }
 
     // ── binary resolution ────────────────────────────────────────────────────
     /// Explicit chrome binary path (wins over everything, incl. CLEARCOTE_BINARY and the auto-download).
@@ -71,7 +96,8 @@ public class LaunchOptions : FingerprintOptions
     public string? Channel { get; set; }
     /// Slow down operations by N ms (Playwright slowMo).
     public float? SlowMo { get; set; }
-    /// Override the default `--enable-automation` strip (Playwright ignoreDefaultArgs).
+    /// Override the default strip of Playwright's <c>--enable-automation</c> and
+    /// <c>--enable-unsafe-swiftshader</c> (Playwright ignoreDefaultArgs). See <see cref="LaunchOpts.DefaultIgnoredArgs"/>.
     public IReadOnlyList<string>? IgnoreDefaultArgs { get; set; }
     /// Emulated viewport for the context. Leave unset to take the SDK's default: NoViewport when
     /// headed or when a persona owns the screen, otherwise a screen-fitted viewport (see

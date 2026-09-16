@@ -15,7 +15,7 @@ namespace Clearcote;
 public static class Clearcote
 {
     /// This SDK's version (kept in lockstep with the npm/PyPI SDKs).
-    public const string Version = "0.28.1";
+    public const string Version = "0.29.0";
 
     private static readonly SemaphoreSlim PwLock = new(1, 1);
     private static IPlaywright? _pw;
@@ -42,15 +42,18 @@ public static class Clearcote
         }
         var envBin = Environment.GetEnvironmentVariable("CLEARCOTE_BINARY");
         if (!string.IsNullOrEmpty(envBin)) { Download.CheckInstall(envBin); return envBin; }
+        // Validated on every download path (option > CLEARCOTE_RELEASE_CHANNEL), so a typo throws even
+        // when the build that would be fetched is free or pinned. Only the PRO route has channels.
+        var channel = Download.ResolveReleaseChannel(options.ReleaseChannel);
         var key = License.ResolveLicenseKey(options.LicenseKey);
         var version = options.Version ?? Environment.GetEnvironmentVariable("CLEARCOTE_BROWSER_VERSION");
         if (!string.IsNullOrEmpty(version))
             // Explicit version selector: validate against the catalog FIRST (clear error if it doesn't
             // exist or needs a license), then route free (GitHub) vs pro (authenticated route).
-            return await Download.EnsureVersionAsync(version, key, options.LicenseApiBase, options.CacheDir, options.Quiet).ConfigureAwait(false);
+            return await Download.EnsureVersionAsync(version, key, options.LicenseApiBase, options.CacheDir, options.Quiet, channel).ConfigureAwait(false);
         if (key is not null)
             return await Download.ProEnsureBinaryAsync(key,
-                new ProDownloadOptions { ApiBase = options.LicenseApiBase, CacheDir = options.CacheDir, Quiet = options.Quiet }).ConfigureAwait(false);
+                new ProDownloadOptions { ApiBase = options.LicenseApiBase, CacheDir = options.CacheDir, Quiet = options.Quiet, ReleaseChannel = channel }).ConfigureAwait(false);
         return await Download.EnsureBinaryAsync(
             new DownloadOptions { CacheDir = options.CacheDir, Quiet = options.Quiet, AutoUpdate = options.AutoUpdate }).ConfigureAwait(false);
     }
@@ -76,35 +79,36 @@ public static class Clearcote
     /// </remarks>
     public static async Task<IBrowser> LaunchAsync(LaunchOptions? options = null)
     {
-        options ??= new LaunchOptions();
+        options = await PrepareAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
         var exe = await ExecutablePathAsync(options).ConfigureAwait(false);
         EnsureRunnableHere(exe);
 
         var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy);
         var args = AssembleArgs(Fingerprint.Args(options), LaunchOpts.ExtensionArgs(options.Extensions),
-            proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy, options.Socks5Udp);
+            proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy, options.Socks5Udp,
+            Extras(options, exe, headed: options.Headless == false));
 
         var licVersion = options.Version ?? Environment.GetEnvironmentVariable("CLEARCOTE_BROWSER_VERSION");
         var licKey = License.ResolveLicenseKey(options.LicenseKey);
         var lease = await License.AcquireLeaseAsync(
-            new LicenseOptions { LicenseKey = options.LicenseKey, LicenseApiBase = options.LicenseApiBase },
+            new LicenseOptions { LicenseKey = options.LicenseKey, LicenseApiBase = options.LicenseApiBase, LicenseThroughProxy = options.LicenseThroughProxy },
             Version, options.Quiet,   // sdk_version = the SDK PACKAGE version
-            () => Download.ResolvedEngineVersionAsync(licVersion, licKey is not null)).ConfigureAwait(false);
+            () => Download.ResolvedEngineVersionAsync(licVersion, licKey is not null), options.Proxy).ConfigureAwait(false);
         var env = lease is not null ? License.WithRunToken(lease.Token, options.Env) : options.Env;
         env = ShaderDialect.Apply(options.ShaderDialect, env);  // opt-in; no-op when unset
 
         var pw = await PlaywrightAsync().ConfigureAwait(false);
-        var browser = await WinLaunch.WinAvRetryAsync(exePath => pw.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+        var browser = await License.ReleaseLeaseOnFailureAsync(lease, () => WinLaunch.WinAvRetryAsync(exePath => pw.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
         {
             ExecutablePath = exePath,
             Args = args,
             Headless = options.Headless,
             Channel = options.Channel,
             SlowMo = options.SlowMo,
-            IgnoreDefaultArgs = options.IgnoreDefaultArgs ?? new[] { "--enable-automation" },
+            IgnoreDefaultArgs = options.IgnoreDefaultArgs ?? LaunchOpts.DefaultIgnoredArgs.ToArray(),
             Env = env,
             Proxy = ToPwProxy(proxy),
-        }), exe).ConfigureAwait(false);
+        }), exe)).ConfigureAwait(false);
 
         if (lease is not null) browser.Disconnected += (_, _) => { _ = lease.StopAsync(); };
         return browser;
@@ -139,7 +143,14 @@ public static class Clearcote
     {
         var dir = Path.Combine(Path.GetTempPath(), "clearcote-run-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(dir);
-        var context = await LaunchPersistentContextAsync(dir, options).ConfigureAwait(false);
+        IBrowserContext context;
+        try { context = await LaunchPersistentContextAsync(dir, options).ConfigureAwait(false); }
+        catch
+        {
+            // A launch that fails (e.g. geoip failing closed) must not leak the throwaway profile dir.
+            try { Directory.Delete(dir, recursive: true); } catch { }
+            throw;
+        }
 
         var done = false;
         void Remove()
@@ -161,20 +172,21 @@ public static class Clearcote
     /// Launch a persistent context (a saved profile dir) and return a Playwright <see cref="IBrowserContext"/>.
     public static async Task<IBrowserContext> LaunchPersistentContextAsync(string userDataDir, LaunchOptions? options = null)
     {
-        options ??= new LaunchOptions();
+        options = await PrepareAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
         var exe = await ExecutablePathAsync(options).ConfigureAwait(false);
         EnsureRunnableHere(exe);
 
         var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy);
         var args = AssembleArgs(Fingerprint.Args(options), LaunchOpts.ExtensionArgs(options.Extensions),
-            proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy, options.Socks5Udp);
+            proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy, options.Socks5Udp,
+            Extras(options, exe, headed: options.Headless == false));
 
         var licVersion = options.Version ?? Environment.GetEnvironmentVariable("CLEARCOTE_BROWSER_VERSION");
         var licKey = License.ResolveLicenseKey(options.LicenseKey);
         var lease = await License.AcquireLeaseAsync(
-            new LicenseOptions { LicenseKey = options.LicenseKey, LicenseApiBase = options.LicenseApiBase },
+            new LicenseOptions { LicenseKey = options.LicenseKey, LicenseApiBase = options.LicenseApiBase, LicenseThroughProxy = options.LicenseThroughProxy },
             Version, options.Quiet,   // sdk_version = the SDK PACKAGE version
-            () => Download.ResolvedEngineVersionAsync(licVersion, licKey is not null)).ConfigureAwait(false);
+            () => Download.ResolvedEngineVersionAsync(licVersion, licKey is not null), options.Proxy).ConfigureAwait(false);
         var env = lease is not null ? License.WithRunToken(lease.Token, options.Env) : options.Env;
         env = ShaderDialect.Apply(options.ShaderDialect, env);  // opt-in; no-op when unset
 
@@ -183,7 +195,7 @@ public static class Clearcote
             callerSetGeometry: options.ViewportSize is not null || options.ScreenSize is not null);
 
         var pw = await PlaywrightAsync().ConfigureAwait(false);
-        var context = await WinLaunch.WinAvRetryAsync(exePath => pw.Chromium.LaunchPersistentContextAsync(userDataDir,
+        var context = await License.ReleaseLeaseOnFailureAsync(lease, () => WinLaunch.WinAvRetryAsync(exePath => pw.Chromium.LaunchPersistentContextAsync(userDataDir,
             new BrowserTypeLaunchPersistentContextOptions
             {
                 ExecutablePath = exePath,
@@ -191,7 +203,7 @@ public static class Clearcote
                 Headless = options.Headless,
                 Channel = options.Channel,
                 SlowMo = options.SlowMo,
-                IgnoreDefaultArgs = options.IgnoreDefaultArgs ?? new[] { "--enable-automation" },
+                IgnoreDefaultArgs = options.IgnoreDefaultArgs ?? LaunchOpts.DefaultIgnoredArgs.ToArray(),
                 Env = env,
                 Proxy = ToPwProxy(proxy),
                 // Headed with no explicit viewport -> real window size (matches launch()).
@@ -202,7 +214,7 @@ public static class Clearcote
                         ? ViewportSize.NoViewport
                         : geometry.Viewport),
                 ScreenSize = options.ScreenSize ?? geometry.Screen,
-            }), exe).ConfigureAwait(false);
+            }), exe)).ConfigureAwait(false);
 
         if (lease is not null) context.Close += (_, _) => { _ = lease.StopAsync(); };
         // Regime 2 needs its screen override issued by hand: Playwright .NET drops ScreenSize on a
@@ -225,14 +237,17 @@ public static class Clearcote
     /// Playwright/Puppeteer/CDP client can attach to via ConnectOverCDP. Returns a <see cref="Server"/>.
     public static async Task<Server> ServeAsync(ServeOptions? options = null)
     {
-        options ??= new ServeOptions();
+        options = await PrepareAsync(options ?? new ServeOptions()).ConfigureAwait(false);
         var host = string.IsNullOrEmpty(options.Host) ? "127.0.0.1" : options.Host;
         var exe = await ExecutablePathAsync(options).ConfigureAwait(false);
         EnsureRunnableHere(exe);
 
         var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy);
+        // serve launches the binary directly, so Playwright's SwiftShader default is never added; the
+        // blocklist rule still applies to a headed endpoint and on Windows.
         var engineArgs = AssembleArgs(Fingerprint.Args(options), LaunchOpts.ExtensionArgs(options.Extensions),
-            proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy, options.Socks5Udp);
+            proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy, options.Socks5Udp,
+            Extras(options, exe, headed: options.Headless == false));
 
         var port = options.Port ?? FreePort();
         var ownUdd = string.IsNullOrEmpty(options.UserDataDir);
@@ -247,15 +262,18 @@ public static class Clearcote
         };
         if (options.Headless != false) cdpArgs.Add("--headless=new");
         if (!string.IsNullOrEmpty(options.Proxy?.Server)) cdpArgs.Add($"--proxy-server={options.Proxy!.Server}");
+        // Chromium refuses to start as root without --no-sandbox, and serve spawns the binary itself,
+        // so Playwright's own --no-sandbox is missing: serve in a root container just timed out.
+        if (LaunchOpts.ServeNeedsNoSandbox(Native.OsTag, LaunchOpts.EffectiveUid(), engineArgs)) cdpArgs.Add("--no-sandbox");
 
         var licVersion = options.Version ?? Environment.GetEnvironmentVariable("CLEARCOTE_BROWSER_VERSION");
         var licKey = License.ResolveLicenseKey(options.LicenseKey);
         var lease = await License.AcquireLeaseAsync(
-            new LicenseOptions { LicenseKey = options.LicenseKey, LicenseApiBase = options.LicenseApiBase },
+            new LicenseOptions { LicenseKey = options.LicenseKey, LicenseApiBase = options.LicenseApiBase, LicenseThroughProxy = options.LicenseThroughProxy },
             Version, options.Quiet,   // sdk_version = the SDK PACKAGE version
-            () => Download.ResolvedEngineVersionAsync(licVersion, licKey is not null)).ConfigureAwait(false);
+            () => Download.ResolvedEngineVersionAsync(licVersion, licKey is not null), options.Proxy).ConfigureAwait(false);
 
-        var proc = await WinLaunch.WinAvRetryAsync(exePath =>
+        var proc = await License.ReleaseLeaseOnFailureAsync(lease, () => WinLaunch.WinAvRetryAsync(exePath =>
         {
             var psi = new ProcessStartInfo(exePath) { UseShellExecute = false };
             foreach (var a in engineArgs.Concat(cdpArgs)) psi.ArgumentList.Add(a);
@@ -266,7 +284,7 @@ public static class Clearcote
             if (dialect is not null) psi.Environment[ShaderDialect.EnvVar] = dialect;
             var p = Process.Start(psi) ?? throw new Exception("clearcote serve: failed to start the engine process.");
             return Task.FromResult(p);
-        }, exe).ConfigureAwait(false);
+        }, exe)).ConfigureAwait(false);
 
         // Readiness poll — wait for the CDP endpoint to answer /json/version.
         var deadline = DateTime.UtcNow.AddMilliseconds(options.ReadyTimeoutMs);
@@ -296,10 +314,27 @@ public static class Clearcote
 
     // ── internals ────────────────────────────────────────────────────────────
 
-    /// fpArgs + extArgs + proxyArgs + quic + (privacy-sandbox unless disabled==false) + webrtc-deny,
-    /// then userArgs appended last, then feature-flags collapsed. Mirrors index.ts assembleArgs.
+    /// Copy the caller's options (never mutate them) and apply geoip, which fails closed BEFORE the
+    /// binary is resolved or any browser starts.
+    internal static async Task<T> PrepareAsync<T>(T options) where T : LaunchOptions
+    {
+        var copy = (T)options.Clone();
+        if (copy.Geoip) await GeoIp.ApplyAsync(copy, copy.Proxy, copy.Quiet).ConfigureAwait(false);
+        return copy;
+    }
+
+    /// The per-launch inputs for the engine-switch extras and gating in <see cref="AssembleArgs"/>.
+    internal sealed record EngineExtras(string? Exe, bool Headed, bool Quiet, bool? AllowThirdPartyCookies, bool? TransparentProxy);
+
+    private static EngineExtras Extras(LaunchOptions o, string exe, bool headed)
+        => new(exe, headed, o.Quiet, o.AllowThirdPartyCookies, o.TransparentProxy);
+
+    /// fpArgs + extArgs + proxyArgs + quic + (privacy-sandbox unless disabled==false) + webrtc-deny
+    /// (+ engine extras + GPU blocklist), then userArgs appended last, then feature-flags collapsed,
+    /// then 152 r22+ switches this engine lacks dropped with a warning. Mirrors index.ts assembleArgs.
     internal static List<string> AssembleArgs(List<string> fpArgs, List<string> extArgs, List<string> proxyArgs,
-        bool? disablePrivacySandbox, string? webrtcIp, IReadOnlyList<string> userArgs, ProxyOptions? proxyForQuic, bool socks5Udp)
+        bool? disablePrivacySandbox, string? webrtcIp, IReadOnlyList<string> userArgs, ProxyOptions? proxyForQuic, bool socks5Udp,
+        EngineExtras? extra = null)
     {
         var baseList = new List<string>();
         baseList.AddRange(fpArgs);
@@ -321,7 +356,14 @@ public static class Clearcote
         // the persona genuinely is de-Googled Chromium.
         if (disablePrivacySandbox == true) baseList.AddRange(LaunchOpts.PrivacySandboxArgs());
         baseList.AddRange(LaunchOpts.WebrtcDefaultDenyArgs(baseList.Concat(userArgs), webrtcIp));
-        return LaunchOpts.MergeFeatureFlags(baseList.Concat(userArgs));
+        if (extra is not null)
+        {
+            baseList.AddRange(LaunchOpts.EngineExtrasArgs(extra.AllowThirdPartyCookies, extra.TransparentProxy, proxyForQuic, extra.Quiet));
+            baseList.AddRange(LaunchOpts.GpuBlocklistArgs(extra.Headed, null, userArgs));
+        }
+        var merged = LaunchOpts.MergeFeatureFlags(baseList.Concat(userArgs));
+        // Last: drop 152 r22+ switches this engine does not implement (with a warning), wherever they came from.
+        return extra is null ? merged : LaunchOpts.GateEngineSwitches(extra.Exe, merged, extra.Quiet).Args;
     }
 
     private static Proxy? ToPwProxy(ProxyOptions? p)

@@ -31,7 +31,28 @@ public class LicenseOptions
     public string? LicenseKey { get; set; }
     /// Backend base URL. Default: CLEARCOTE_LICENSE_API env or clearcotelabs.com.
     public string? LicenseApiBase { get; set; }
+    /// Send the licence calls (lease checkout / heartbeat / check-in, and seats) through the launch's
+    /// own proxy instead of directly from this machine. Off by default: direct calls never spend proxy
+    /// bandwidth. Null = CLEARCOTE_LICENSE_THROUGH_PROXY (1/true/yes/on). No effect without a proxy.
+    public bool? LicenseThroughProxy { get; set; }
 }
+
+/// State of a <see cref="License.GetSessionSeatsAsync"/> answer.
+public enum SeatsState
+{
+    /// Counts are present.
+    Ok,
+    /// No licence key is configured.
+    NoKey,
+    /// The backend rejected the key (401/403).
+    Invalid,
+    /// The backend is unreachable, or does not report seats; see <see cref="SessionSeats.Reason"/>.
+    Unavailable,
+}
+
+/// Concurrency seats on a licence, as reported by the backend. <see cref="Limit"/> null with
+/// <see cref="SeatsState.Ok"/> means unlimited.
+public sealed record SessionSeats(SeatsState State, int? Used = null, int? Limit = null, string? Plan = null, string? Reason = null);
 
 /// A live floating-concurrency lease. Keep it until the browser closes, then call <see cref="StopAsync"/>.
 public sealed class LeaseSession
@@ -140,12 +161,37 @@ public static class License
             {
                 string? lid = root.TryGetProperty("lease_id", out var l) && l.ValueKind == JsonValueKind.String
                     ? l.GetString() : null;
+                // A per-browser (free-tier) token belongs to the one browser it was checked out for.
+                // Reusing it would start another browser without a slot, so it is never taken from the
+                // cache, even one an older SDK wrote. Paid tokens are reused exactly as before.
+                if (TokenPlan(t.GetString()!) == PerBrowserPlan) return null;
                 return (t.GetString()!, exp, lid);
             }
         }
         catch { /* ignore */ }
         return null;
     }
+
+    // The plan whose tokens are per browser. Only used to keep such tokens out of the shared cache.
+    private const string PerBrowserPlan = "free";
+
+    /// The plan a run-token was minted for, read from its payload WITHOUT verifying it (routing only).
+    public static string? TokenPlan(string? token)
+    {
+        try
+        {
+            var body = (token ?? "").Split('.')[0].Replace('-', '+').Replace('_', '/');
+            body = body.PadRight(body.Length + (4 - body.Length % 4) % 4, '=');
+            using var doc = JsonDocument.Parse(Convert.FromBase64String(body));
+            return doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("plan", out var p) && p.ValueKind == JsonValueKind.String
+                ? p.GetString() : null;
+        }
+        catch { return null; }
+    }
+
+    /// One id per browser launch: the backend counts every launch_id as its own slot on per-browser plans.
+    public static string NewLaunchId() => Guid.NewGuid().ToString("N");
 
     private static void WriteCache(string licenseKey, string token, long exp, string? leaseId)
     {
@@ -158,9 +204,19 @@ public static class License
         catch { /* ignore */ }
     }
 
-    private static async Task<HttpResponseMessage> PostJsonAsync(string url, string licenseKey, object body)
+    /// Whether licence calls should use the launch proxy: explicit option, else the env switch.
+    public static bool LicenseThroughProxyRequested(bool? option, string? envValue = null)
     {
-        using var client = SdkHttp.Create();
+        if (option is { } o) return o;
+        var raw = (envValue ?? Environment.GetEnvironmentVariable("CLEARCOTE_LICENSE_THROUGH_PROXY") ?? "").Trim();
+        return System.Text.RegularExpressions.Regex.IsMatch(raw, "^(1|true|yes|on)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    }
+
+    private static async Task<HttpResponseMessage> PostJsonAsync(string url, string licenseKey, object body, ProxySpec? proxy = null)
+    {
+        // Through the launch proxy when LicenseThroughProxy is on; otherwise the unchanged direct path.
+        using var client = proxy is null ? SdkHttp.Create() : ProxiedHttp.Create(proxy);
+        if (proxy is not null && SdkHttp.HandlerOverride is null) client.Timeout = TimeSpan.FromSeconds(30);
         var req = new HttpRequestMessage(HttpMethod.Post, url)
         {
             Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"),
@@ -201,6 +257,7 @@ public static class License
         private readonly string? _sdkVersion;
         private readonly Func<Task<string?>>? _engineVersion;
         private readonly bool _quiet;
+        private readonly ProxySpec? _proxy;
         private readonly SemaphoreSlim _gate = new(1, 1);
         private volatile string? _token;
         private long _exp;
@@ -210,12 +267,15 @@ public static class License
         private bool _owner;               // only the cold-checkout owner heartbeats + checks in
         private CancellationTokenSource? _hbCts;
         private int _refs;
+        // Learned from the first checkout: "browser" means every launch holds its own lease.
+        private volatile string _scope = "machine";
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<BrowserLease, byte> _browsers = new();
 
         public MachineLease(string key, string baseUrl, string instanceId, string? sdkVersion,
-            Func<Task<string?>>? engineVersion, bool quiet)
+            Func<Task<string?>>? engineVersion, bool quiet, ProxySpec? proxy = null)
         {
             _key = key; _baseUrl = baseUrl; _instanceId = instanceId;
-            _sdkVersion = sdkVersion; _engineVersion = engineVersion; _quiet = quiet;
+            _sdkVersion = sdkVersion; _engineVersion = engineVersion; _quiet = quiet; _proxy = proxy;
         }
 
         private bool Valid() => _token != null && _exp > NowSec() + 60;
@@ -233,10 +293,13 @@ public static class License
 
         public async Task<LeaseSession> AcquireAsync()
         {
+            if (_scope == "browser") return await AcquireBrowserAsync().ConfigureAwait(false);
+            CheckoutData? pending = null;
+            string? pendingLaunch = null;
             await _gate.WaitAsync().ConfigureAwait(false);
             try
             {
-                if (!Valid())
+                if (_scope != "browser" && !Valid())
                 {
                     var cached = ReadCache(_key);
                     if (cached is { } c && c.exp > NowSec() + 60)
@@ -246,13 +309,26 @@ public static class License
                     }
                     else
                     {
-                        await CheckoutAsync().ConfigureAwait(false);
-                        _owner = true;
-                        StartHeartbeat();
+                        var launchId = NewLaunchId();
+                        var d = await CheckoutAsync(launchId).ConfigureAwait(false);
+                        if (d is not null)
+                        {
+                            // Per-browser plan: this checkout is THIS launch's own slot. Never shared or cached.
+                            _scope = "browser";
+                            pending = d; pendingLaunch = launchId;
+                        }
+                        else
+                        {
+                            _owner = true;
+                            StartHeartbeat();
+                        }
                     }
                 }
             }
             finally { _gate.Release(); }
+
+            if (pending is not null) return StartBrowser(pending, pendingLaunch!);
+            if (_scope == "browser") return await AcquireBrowserAsync().ConfigureAwait(false);
 
             Interlocked.Increment(ref _refs);
             // Per-launch handle: reads the machine's (rotating) token live; StopAsync just decrefs
@@ -264,21 +340,44 @@ public static class License
             });
         }
 
-        private async Task CheckoutAsync()
+        /// POST a checkout for one launch. Throws the backend's verdict; network errors propagate.
+        internal async Task<CheckoutData> CheckoutForAsync(string launchId)
+        {
+            using var res = await PostJsonAsync($"{_baseUrl}/api/v1/lease/checkout", _key,
+                new { instance_id = _instanceId,
+                      // per-browser plans count each launch_id as its own slot; machine plans ignore it
+                      launch_id = launchId,
+                      os = Native.OsTag, sdk_version = _sdkVersion,
+                      engine_version = await EngineVerAsync().ConfigureAwait(false) }, _proxy).ConfigureAwait(false);
+            if (!res.IsSuccessStatusCode) await ThrowForStatusAsync(res).ConfigureAwait(false);
+            using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync().ConfigureAwait(false));
+            var root = doc.RootElement;
+            return new CheckoutData(
+                root.GetProperty("token").GetString()!,
+                root.GetProperty("exp").GetInt64(),
+                root.GetProperty("lease_id").GetString()!,
+                root.TryGetProperty("heartbeat_interval_sec", out var hb) && hb.TryGetInt32(out var v) ? v : 270,
+                root.TryGetProperty("lease_scope", out var sc) && sc.ValueKind == JsonValueKind.String && sc.GetString() == "browser");
+        }
+
+        /// A licence call over this lease's route (direct or through the proxy), for a BrowserLease.
+        internal Task<HttpResponseMessage> PostAsync(string path, object body)
+            => PostJsonAsync($"{_baseUrl}{path}", _key, body, _proxy);
+
+        /// Machine-lease cold checkout. Returns the checkout when the backend says it is per-browser
+        /// (the caller hands it to that one launch); null when the machine lease now holds it.
+        private async Task<CheckoutData?> CheckoutAsync(string launchId)
         {
             try
             {
-                using var res = await PostJsonAsync($"{_baseUrl}/api/v1/lease/checkout", _key,
-                    new { instance_id = _instanceId, os = Native.OsTag, sdk_version = _sdkVersion,
-                          engine_version = await EngineVerAsync().ConfigureAwait(false) }).ConfigureAwait(false);
-                if (!res.IsSuccessStatusCode) await ThrowForStatusAsync(res).ConfigureAwait(false);
-                using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync().ConfigureAwait(false));
-                var root = doc.RootElement;
-                _token = root.GetProperty("token").GetString()!;
-                _exp = root.GetProperty("exp").GetInt64();
-                _leaseId = root.GetProperty("lease_id").GetString()!;
-                _hbSec = root.TryGetProperty("heartbeat_interval_sec", out var hb) && hb.TryGetInt32(out var v) ? v : 270;
+                var d = await CheckoutForAsync(launchId).ConfigureAwait(false);
+                if (d.BrowserScope) return d;
+                _token = d.Token;
+                _exp = d.Exp;
+                _leaseId = d.LeaseId;
+                _hbSec = d.HeartbeatSec;
                 WriteCache(_key, _token, _exp, _leaseId);
+                return null;
             }
             catch (LicenseError) { throw; } // a definitive verdict must surface (never silently downgrade)
             catch (Exception e)
@@ -288,11 +387,35 @@ public static class License
                 {
                     if (!_quiet) Console.Error.WriteLine($"[clearcote] [license] backend unreachable ({e.Message}); using cached run-token.");
                     _token = c.token; _exp = c.exp; _leaseId = c.leaseId;
-                    return;
+                    return null;
                 }
                 throw new LicenseError($"Could not reach the license server and no valid cached token: {e.Message}");
             }
         }
+
+        /// A new launch on a per-browser plan: its own checkout. A refusal (one browser running) throws.
+        private async Task<LeaseSession> AcquireBrowserAsync()
+        {
+            var launchId = NewLaunchId();
+            CheckoutData d;
+            try { d = await CheckoutForAsync(launchId).ConfigureAwait(false); }
+            catch (LicenseError) { throw; }
+            catch (Exception e)
+            {
+                // No offline grace: without the backend there is no slot for this browser.
+                throw new LicenseError($"Could not reach the license server to start this browser: {e.Message}");
+            }
+            return StartBrowser(d, launchId);
+        }
+
+        private LeaseSession StartBrowser(CheckoutData d, string launchId)
+        {
+            var lease = new BrowserLease(this, d, launchId);
+            _browsers[lease] = 0;
+            return lease.Session;
+        }
+
+        internal void Forget(BrowserLease lease) => _browsers.TryRemove(lease, out _);
 
         private void StartHeartbeat()
         {
@@ -309,12 +432,12 @@ public static class License
                     try
                     {
                         using var res = await PostJsonAsync($"{_baseUrl}/api/v1/lease/heartbeat", _key,
-                            new { lease_id = _leaseId, nonce = Guid.NewGuid().ToString() }).ConfigureAwait(false);
+                            new { lease_id = _leaseId, nonce = Guid.NewGuid().ToString() }, _proxy).ConfigureAwait(false);
                         if ((int)res.StatusCode == 409) // reclaimed/expired -> re-checkout to keep the slot
                         {
                             using var co = await PostJsonAsync($"{_baseUrl}/api/v1/lease/checkout", _key,
                                 new { instance_id = _instanceId, os = Native.OsTag, sdk_version = _sdkVersion,
-                                      engine_version = await EngineVerAsync().ConfigureAwait(false) }).ConfigureAwait(false);
+                                      engine_version = await EngineVerAsync().ConfigureAwait(false) }, _proxy).ConfigureAwait(false);
                             if (co.IsSuccessStatusCode)
                             {
                                 using var d = JsonDocument.Parse(await co.Content.ReadAsStringAsync().ConfigureAwait(false));
@@ -341,24 +464,98 @@ public static class License
         // Single checkin at process exit (owner only). Frees the slot without waiting for the TTL.
         public async Task ShutdownAsync()
         {
+            // Per-browser leases still open at exit (a browser nobody closed): release their slots too.
+            foreach (var b in _browsers.Keys.ToArray())
+                try { await b.StopAsync().ConfigureAwait(false); } catch { /* best-effort */ }
             _hbCts?.Cancel();
             if (_owner && _leaseId != null)
             {
                 try
                 {
                     using var _ = await PostJsonAsync($"{_baseUrl}/api/v1/lease/checkin", _key,
-                        new { lease_id = _leaseId }).ConfigureAwait(false);
+                        new { lease_id = _leaseId }, _proxy).ConfigureAwait(false);
                 }
                 catch { /* best-effort; the lease TTL reclaims it anyway */ }
             }
         }
     }
 
+    internal sealed record CheckoutData(string Token, long Exp, string LeaseId, int HeartbeatSec, bool BrowserScope);
+
+    // One browser's own lease on a per-browser plan (the free tier: "1 browser at a time"). Checked out
+    // for exactly one launch, heartbeated while that browser runs, checked in when it closes. Its token
+    // is never written to the shared cache and never handed to another launch.
+    private sealed class BrowserLease
+    {
+        private readonly MachineLease _owner;
+        private readonly string _launchId;
+        private readonly CancellationTokenSource _cts = new();
+        private volatile string _token;
+        private int _stopped;
+        public LeaseSession Session { get; }
+
+        public BrowserLease(MachineLease owner, CheckoutData d, string launchId)
+        {
+            _owner = owner;
+            _launchId = launchId;
+            _token = d.Token;
+            Session = new LeaseSession(() => _token, d.LeaseId, StopAsync);
+            var hbMs = Math.Max(5, d.HeartbeatSec) * 1000;
+            var ct = _cts.Token;
+            _ = Task.Run(async () =>
+            {
+                while (!ct.IsCancellationRequested)
+                {
+                    try { await Task.Delay(hbMs, ct).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { break; }
+                    try
+                    {
+                        using var res = await _owner.PostAsync("/api/v1/lease/heartbeat",
+                            new { lease_id = Session.LeaseId, nonce = Guid.NewGuid().ToString() }).ConfigureAwait(false);
+                        if (ct.IsCancellationRequested) break;
+                        if ((int)res.StatusCode == 409)
+                        {
+                            // Reclaimed: re-take the slot as the SAME launch (the backend's own-lease takeover).
+                            var again = await _owner.CheckoutForAsync(_launchId).ConfigureAwait(false);
+                            Session.LeaseId = again.LeaseId;
+                            _token = again.Token;
+                            continue;
+                        }
+                        if (res.IsSuccessStatusCode)
+                        {
+                            using var d2 = JsonDocument.Parse(await res.Content.ReadAsStringAsync().ConfigureAwait(false));
+                            if (d2.RootElement.TryGetProperty("token", out var t) && t.ValueKind == JsonValueKind.String)
+                                _token = t.GetString()!;
+                        }
+                    }
+                    catch { /* transient; the next beat retries, and the lease TTL is the backstop */ }
+                }
+            });
+        }
+
+        public async Task StopAsync()
+        {
+            if (Interlocked.Exchange(ref _stopped, 1) != 0) return;
+            _cts.Cancel();
+            _owner.Forget(this);
+            try
+            {
+                using var _ = await _owner.PostAsync("/api/v1/lease/checkin", new { lease_id = Session.LeaseId }).ConfigureAwait(false);
+            }
+            catch { /* best-effort; the lease TTL reclaims it */ }
+        }
+    }
+
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, MachineLease> _machineLeases = new();
     private static int _exitHooked;
 
-    /// Acquire a per-MACHINE concurrency lease, shared across every launch in this process (checks out
-    /// ~once per token-TTL, not once per launch). Returns null in free mode (no key). Throws
+    /// Acquire a concurrency lease for one launch. Returns null in free mode (no key).
+    ///
+    /// Machine plans (every paid plan): a per-MACHINE lease shared across every launch in this process
+    /// (checks out ~once per token-TTL, not once per launch); StopAsync only drops a reference.
+    /// Per-browser plans (the GitHub free tier, told by the backend's lease_scope "browser"): every
+    /// launch checks out its own slot and StopAsync releases it, so a second browser is refused while
+    /// one runs. Throws
     /// <see cref="ConcurrencyLimitError"/> / <see cref="LicenseRevokedError"/> / <see cref="LicenseError"/>
     /// only on a cold checkout the backend definitively refuses; falls back to a cached, still-valid
     /// token on a transient network failure (offline grace).
@@ -368,14 +565,22 @@ public static class License
     /// on a cold checkout only, so the catalog is never consulted per launch.
     public static async Task<LeaseSession?> AcquireLeaseAsync(
         LicenseOptions opts, string? sdkVersion = null, bool quiet = false,
-        Func<Task<string?>>? engineVersion = null)
+        Func<Task<string?>>? engineVersion = null, ProxyOptions? proxy = null)
     {
         var licenseKey = ResolveLicenseKey(opts.LicenseKey);
         if (licenseKey is null) return null; // free mode — inert
 
         var baseUrl = ApiBase(opts);
-        var ml = _machineLeases.GetOrAdd(licenseKey,
-            k => new MachineLease(k, baseUrl, ResolveInstanceId(), sdkVersion, engineVersion, quiet));
+        var wantProxy = LicenseThroughProxyRequested(opts.LicenseThroughProxy);
+        var viaProxy = wantProxy ? ProxySpec.From(proxy) : null;
+        if (wantProxy && viaProxy is null && !quiet)
+            Console.Error.WriteLine("[clearcote] [license] licenseThroughProxy is on but this launch has no proxy; licence calls go direct.");
+        // One lease per (key, route): a direct lease and a proxied lease are different network paths,
+        // so they must not share the in-process heartbeat owner. The proxy username is part of the
+        // route: rotating-session proxies encode the exit in it.
+        var mapKey = viaProxy is null ? licenseKey : $"{licenseKey}|{viaProxy.ServerString}|{viaProxy.Username}";
+        var ml = _machineLeases.GetOrAdd(mapKey,
+            _ => new MachineLease(licenseKey, baseUrl, ResolveInstanceId(), sdkVersion, engineVersion, quiet, viaProxy));
         if (Interlocked.Exchange(ref _exitHooked, 1) == 0)
         {
             AppDomain.CurrentDomain.ProcessExit += (_, _) =>
@@ -385,6 +590,67 @@ public static class License
             };
         }
         return await ml.AcquireAsync().ConfigureAwait(false);
+    }
+
+    /// Start a browser; if it fails to start, release the lease before re-throwing. On a per-browser plan
+    /// (the free tier) the slot would otherwise stay taken until the lease TTL.
+    public static async Task<T> ReleaseLeaseOnFailureAsync<T>(LeaseSession? lease, Func<Task<T>> start)
+    {
+        try
+        {
+            return await start().ConfigureAwait(false);
+        }
+        catch
+        {
+            if (lease is not null) { try { await lease.StopAsync().ConfigureAwait(false); } catch { /* the start failure is what matters */ } }
+            throw;
+        }
+    }
+
+    /// Seats in use on a licence right now (live leases), without checking one out. Never cached and
+    /// never throws: an unreachable backend, or an older one without the endpoint, reports
+    /// <see cref="SeatsState.Unavailable"/> with the reason rather than a guessed number. Goes through
+    /// <paramref name="proxy"/> only when LicenseThroughProxy is on.
+    public static async Task<SessionSeats> GetSessionSeatsAsync(LicenseOptions? opts = null, ProxyOptions? proxy = null)
+    {
+        opts ??= new LicenseOptions();
+        var key = ResolveLicenseKey(opts.LicenseKey);
+        if (key is null) return new SessionSeats(SeatsState.NoKey);
+        try
+        {
+            var via = LicenseThroughProxyRequested(opts.LicenseThroughProxy) ? ProxySpec.From(proxy) : null;
+            using var client = ProxiedHttp.Create(via);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            using var req = new HttpRequestMessage(HttpMethod.Get, $"{ApiBase(opts)}/api/v1/lease/seats");
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
+            req.Headers.UserAgent.ParseAdd("clearcote-sdk");
+            using var res = await client.SendAsync(req, cts.Token).ConfigureAwait(false);
+            var status = (int)res.StatusCode;
+            int? used = null, limit = null;
+            string? plan = null, error = null;
+            var hasUsed = false;
+            try
+            {
+                using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync(cts.Token).ConfigureAwait(false));
+                var r = doc.RootElement;
+                if (r.ValueKind == JsonValueKind.Object)
+                {
+                    if (r.TryGetProperty("used", out var u) && u.ValueKind == JsonValueKind.Number) { used = u.GetInt32(); hasUsed = true; }
+                    if (r.TryGetProperty("limit", out var l) && l.ValueKind == JsonValueKind.Number) limit = l.GetInt32();
+                    if (r.TryGetProperty("plan", out var p) && p.ValueKind == JsonValueKind.String) plan = p.GetString();
+                    if (r.TryGetProperty("error", out var e) && e.ValueKind == JsonValueKind.String) error = e.GetString();
+                }
+            }
+            catch { /* non-JSON body */ }
+            if (res.IsSuccessStatusCode && hasUsed) return new SessionSeats(SeatsState.Ok, used, limit, plan);
+            if (status is 401 or 403) return new SessionSeats(SeatsState.Invalid, Reason: string.IsNullOrEmpty(error) ? $"HTTP {status}" : error);
+            if (status == 404) return new SessionSeats(SeatsState.Unavailable, Reason: "this licence server does not report seats yet");
+            return new SessionSeats(SeatsState.Unavailable, Reason: string.IsNullOrEmpty(error) ? $"HTTP {status}" : error);
+        }
+        catch (Exception e)
+        {
+            return new SessionSeats(SeatsState.Unavailable, Reason: $"licence server unreachable ({e.Message})");
+        }
     }
 
     /// Merge the run-token into an env dictionary (base defaults to the current process env).

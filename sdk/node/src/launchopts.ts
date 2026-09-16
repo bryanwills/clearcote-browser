@@ -258,3 +258,83 @@ export function resolveProxy(proxy: PwProxy | undefined, engineSupportsProxyAuth
   }
   return { args: [], proxy };
 }
+
+// ── GPU launch defaults ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Playwright launch defaults the SDK removes.
+ *
+ * `--enable-automation` keeps the engine's AutomationControlled feature off. `--enable-unsafe-swiftshader`
+ * is added by Playwright (1.49+) to every Chromium launch; it lets WebGL fall back to SwiftShader
+ * software rendering, which real Chrome no longer does for WebGL. Stripping it on its own is NOT
+ * safe: measured on a GPU-less Linux host, a HEADED launch then has no WebGL at all. It is only
+ * removed together with {@link gpuBlocklistArgs}, which restores WebGL through the normal GPU path.
+ * A caller's own `ignoreDefaultArgs` always wins.
+ */
+export const DEFAULT_IGNORED_ARGS: readonly string[] = ["--enable-automation", "--enable-unsafe-swiftshader"];
+
+/**
+ * `--ignore-gpu-blocklist` for headed launches and for every launch on Windows.
+ *
+ * Headed on a host without a usable GPU (a VPS under Xvfb), Chromium's blocklist disables WebGL
+ * outright once the SwiftShader fallback flag is gone; this flag lets WebGL run anyway. On Windows,
+ * the blocklist also refuses WebGPU on the Microsoft Basic Render Driver found on GPU-less VMs.
+ * Headless Linux already renders WebGL through SwiftShader regardless (measured), so nothing is
+ * added there. Not added when the caller already passes it.
+ */
+export function gpuBlocklistArgs(headed: boolean, platform: NodeJS.Platform = process.platform, userArgs: readonly string[] = []): string[] {
+  if (!headed && platform !== "win32") return [];
+  if (userArgs.includes("--ignore-gpu-blocklist")) return [];
+  return ["--ignore-gpu-blocklist"];
+}
+
+// ── new engine switches (152 r22+) ──────────────────────────────────────────────────────────────
+
+/** Switches introduced in engine 152 r22, with what the caller asked for. Gated per binary. */
+export const GATED_ENGINE_SWITCHES: Readonly<Record<string, string>> = {
+  "--fingerprint-passthrough": "fingerprint: \"off\" (pass-through debug mode)",
+  "--disable-fingerprint-voices": "fingerprintVoices: false",
+  "--allow-third-party-cookies": "allowThirdPartyCookies: true",
+  "--transparent-proxy": "transparentProxy: true",
+};
+
+/**
+ * Drop any 152 r22+ switch the engine that will run does not implement, with a warning.
+ *
+ * Chromium ignores unknown switches silently, so an older engine would launch without the feature
+ * and without saying so. Detection is the same NUL-delimited literal probe as {@link engineSupportsSwitch}.
+ */
+export function gateEngineSwitches(exe: string | undefined, args: string[], quiet?: boolean): { args: string[]; warnings: string[] } {
+  const warnings: string[] = [];
+  const out = args.filter((a) => {
+    const name = a.split("=")[0];
+    const what = GATED_ENGINE_SWITCHES[name];
+    if (!what) return true;
+    if (engineSupportsSwitch(exe, name.slice(2))) return true;
+    warnings.push(`clearcote: ${what} needs engine 152 r22 or newer; this engine ignores it, so it was not applied.`);
+    return false;
+  });
+  if (!quiet) for (const w of warnings) console.warn(w);
+  return { args: out, warnings };
+}
+
+/**
+ * Launch switches for the non-fingerprint engine options.
+ *
+ * `transparentProxy` is only meaningful with a proxy: it removes what an origin or page can observe
+ * about the proxy (the `Proxy-Connection` header on plain-HTTP requests, and proxy-shaped
+ * DNS/connect/TLS timing). Without a proxy it is dropped with a note.
+ */
+export function engineExtrasArgs(
+  o: { allowThirdPartyCookies?: boolean; transparentProxy?: boolean },
+  proxy: PwProxy | undefined,
+  quiet?: boolean,
+): string[] {
+  const args: string[] = [];
+  if (o.allowThirdPartyCookies === true) args.push("--allow-third-party-cookies");
+  if (o.transparentProxy === true) {
+    if (proxy?.server) args.push("--transparent-proxy");
+    else if (!quiet) console.warn("clearcote: transparentProxy has no effect without a proxy; ignored.");
+  }
+  return args;
+}

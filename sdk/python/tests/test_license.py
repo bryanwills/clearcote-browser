@@ -61,7 +61,7 @@ def test_resolve_binary_pro_selector_routes_to_pro(monkeypatch):
     monkeypatch.delenv("CLEARCOTE_BINARY", raising=False)
     called = {}
 
-    def fake_pro(license_key, api_base=None, cache_dir=None, quiet=False):
+    def fake_pro(license_key, api_base=None, cache_dir=None, quiet=False, release_channel=None):
         called["key"] = license_key
         called["api_base"] = api_base
         return "/cache/pro/chrome"

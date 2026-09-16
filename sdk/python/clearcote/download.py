@@ -55,6 +55,11 @@ def _cache_root():
     return os.path.join(base, "clearcote")
 
 
+def default_cache_root():
+    """Per-OS cache root for downloaded browsers (CLEARCOTE_CACHE overrides)."""
+    return _cache_root()
+
+
 def _find(dirpath, name):
     name = name.lower()
     for root, _dirs, files in os.walk(dirpath):
@@ -667,7 +672,62 @@ def ensure_binary(cache_dir=None, quiet=False, auto_update=None):
     return _fetch_and_verify(rel, base, quiet)
 
 
-def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, version=None):
+RELEASE_CHANNELS = ("stable", "preview")
+
+
+def resolve_release_channel(explicit=None, env=None):
+    """Resolve the PRO release channel: explicit option > CLEARCOTE_RELEASE_CHANNEL > "stable".
+
+    Unknown values raise ValueError, so a typo never silently selects a different build."""
+    env = os.environ if env is None else env
+    source = explicit if explicit is not None else env.get("CLEARCOTE_RELEASE_CHANNEL")
+    raw = str(source or "").strip().lower()
+    if not raw or raw == "stable":
+        return "stable"
+    if raw == "preview":
+        return "preview"
+    raise ValueError(f"Unknown release channel '{source}'. Use \"stable\" or \"preview\".")
+
+
+def pro_download_url(base_url, plat, version=None, channel="stable"):
+    """The PRO download URL for a platform, version selector and channel."""
+    import urllib.parse
+
+    url = f"{str(base_url).rstrip('/')}/api/v1/download/pro?platform={plat}"
+    if version:  # request a specific PRO major/version; server returns the newest match
+        url += f"&version={urllib.parse.quote(str(version), safe='')}"
+    # An exact pin overrides the channel on the server; sending it anyway lets the server report
+    # which channel resolved. Omitted for stable so older servers see an unchanged request.
+    if channel == "preview":
+        url += "&channel=preview"
+    return url
+
+
+def list_cached_builds(cache_dir=None):
+    """Verified browser builds already in the cache, newest first (by directory mtime).
+
+    Returns ``[{"tag": ..., "path": ...}]``. Never downloads and never deletes: unlike the resolve
+    path, a damaged entry is simply left out of the list."""
+    root = cache_dir or _cache_root()
+    if not os.path.isdir(root):
+        return []
+    binary = "chrome.exe" if sys.platform == "win32" else "chrome"
+    out = []
+    for name in os.listdir(root):
+        base = os.path.join(root, name)
+        if not os.path.isdir(base) or not os.path.exists(os.path.join(base, ".verified")):
+            continue
+        browser_dir = os.path.join(base, "browser")
+        exe = _find(browser_dir, binary) if os.path.isdir(browser_dir) else None
+        if not exe:
+            continue
+        out.append((os.path.getmtime(base), name, exe))
+    out.sort(key=lambda t: t[0], reverse=True)
+    return [{"tag": name, "path": exe} for _m, name, exe in out]
+
+
+def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, version=None,
+                      release_channel=None):
     """Download + verify the PRO (license-gated) browser and return its chrome path.
 
     The PRO build is not on a public releases page: the SDK asks the site for it via
@@ -675,9 +735,11 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, v
     URL + sha256, then reuses the SAME verify+extract path as the free binary
     (``_fetch_and_verify``, sha256-only — no GPG). Cached per PRO tag. Raises on any
     failure — a licensed caller must get the PRO build, never a silent free fall-back.
+
+    ``release_channel="preview"`` (or CLEARCOTE_RELEASE_CHANNEL=preview) gets the newest build for
+    this platform, preview or stable. An exact version pin overrides the channel.
     """
     import urllib.error
-    import urllib.parse
 
     base_url = (api_base or os.environ.get("CLEARCOTE_LICENSE_API")
                 or "https://www.clearcotelabs.com").rstrip("/")
@@ -686,9 +748,8 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, v
     if plat is None:
         raise RuntimeError("Clearcote PRO ships Windows x64 and Linux x64 only.")
 
-    url = f"{base_url}/api/v1/download/pro?platform={plat}"
-    if version:  # request a specific PRO major/version; server returns the newest match
-        url += f"&version={urllib.parse.quote(str(version))}"
+    channel = resolve_release_channel(release_channel)
+    url = pro_download_url(base_url, plat, version, channel)
     req = urllib.request.Request(
         url, headers={"Authorization": f"Bearer {license_key}", "User-Agent": "clearcote-sdk"})
     try:
@@ -700,6 +761,10 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, v
             f"Clearcote PRO download not authorized (HTTP {e.code}): {body}\n"
             "Check your license key and that your plan is active.") from None
 
+    resolved = meta.get("resolved_channel")
+    if channel == "preview" and resolved and resolved != "preview":
+        _log(quiet, f"release channel: preview requested, no newer preview for {plat} -> "
+                    f"{resolved} {meta.get('tag') or ''}".strip())
     if not meta.get("url") or not meta.get("sha256"):
         raise RuntimeError(
             f"Clearcote PRO build is not currently available for {plat} "

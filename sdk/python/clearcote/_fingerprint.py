@@ -15,6 +15,9 @@ import sys
 # (everything else is passed straight through to Playwright).
 FINGERPRINT_KEYS = (
     "fingerprint",
+    # False keeps the host machine's real speech-synthesis voices under a persona instead of the
+    # persona's voice table (engine 152 r22+).
+    "fingerprint_voices",
     "platform",
     "platform_version",
     "brand",
@@ -87,6 +90,22 @@ _FLAGS = {
     # host value. Emitted whenever the value is not None -- including 0, which is a real value for
     # max_touch_points (a non-touch desktop) rather than "unset".
 }
+
+
+def is_fingerprint_passthrough(value):
+    """True when ``fingerprint`` asks for PASS-THROUGH debug mode: the string "off" (trimmed, any
+    case) or the boolean False. Anything else -- including 0, "0", "no", "false" -- is an ordinary
+    seed, so an existing identity keyed by such a value never silently loses its persona.
+
+    Pass-through runs the browser with NO persona, so a caller can tell whether a problem comes from
+    the spoofing or from their environment. The SDK never sends ``--fingerprint=off`` itself: an
+    engine older than 152 r22 would read "off" as an ordinary seed and build a persona from it, the
+    opposite of what was asked."""
+    if value is False:
+        return True
+    if not isinstance(value, str):
+        return False
+    return value.strip().lower() == "off"
 
 
 def clean_accept_language(value):
@@ -261,6 +280,24 @@ def fingerprint_args(opts):
     """Build the Chromium switches for a dict of fingerprint options."""
     args = []
     opts = dict(opts)  # clearcote-light-stealth: never mutate the caller's fp dict
+    if is_fingerprint_passthrough(opts.get("fingerprint")):
+        # Pass-through: no persona switches at all -- not even the platform/brand/accept-language
+        # defaults the SDK normally adds for coherence. Only what the caller set explicitly for locale
+        # and network survives, mirroring the engine, which keeps timezone / accept-lang / webrtc-ip
+        # in this mode. --fingerprint-passthrough also makes a 152 r22+ engine strip persona switches
+        # passed in `args`.
+        args.append("--fingerprint-passthrough")
+        if opts.get("timezone"):
+            args.append(f"--timezone={opts['timezone']}")
+        if opts.get("accept_language"):
+            clean = clean_accept_language(opts["accept_language"])
+            args.append(f"--accept-lang={clean}")
+            primary = clean.split(",")[0]
+            if primary:
+                args.append(f"--lang={primary}")
+        if opts.get("webrtc_ip"):
+            args.append(f"--webrtc-ip={opts['webrtc_ip']}")
+        return args
     if opts.get("light_stealth"):
         # Fill in a coherent metadata bundle via native override switches. setdefault
         # semantics: an explicit caller kwarg (e.g. device_memory=16) wins over the preset.
@@ -362,6 +399,9 @@ def fingerprint_args(opts):
     # Requires engine >= 150 r12; inert on older builds.
     if opts.get("canvas_noise") is False:
         args.append("--disable-canvas-noise")
+    # fingerprint_voices=False keeps the host's own speech voices under a persona (engine 152 r22+).
+    if opts.get("fingerprint_voices") is False:
+        args.append("--disable-fingerprint-voices")
     # real_gpu_host=True: the engine may honour a schema-2 persona's discrete-GPU draw. Without it
     # (or a canvas bridge) the persona claims the index-0 iGPU regardless of tier, because a GPU
     # string the host's pixels cannot back is the stronger tell. Inert on schema 1.

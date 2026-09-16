@@ -13,6 +13,12 @@ export interface FingerprintOptions {
    */
   fingerprint?: string | number;
   /**
+   * `false` keeps the host machine's real speech-synthesis voices while a persona is active, instead
+   * of the persona's voice table. Use it when a target reacts badly to the persona's voice list.
+   * Default (unset/`true`) keeps the persona's voices. Engine 152 r22+.
+   */
+  fingerprintVoices?: boolean;
+  /**
    * Spoofed OS family for UA / UA-CH / navigator.platform. `"android"` is a best-effort **mobile**
    * persona (seed-selected from a Pixel/Galaxy device pool): Android UA + `Sec-CH-UA-Mobile: ?1`,
    * touch (`maxTouchPoints`), `pointer:coarse`/`hover:none`, mobile screen/DPR, Mali/Adreno WebGL,
@@ -193,6 +199,7 @@ export interface FingerprintOptions {
 
 export const FINGERPRINT_KEYS: (keyof FingerprintOptions)[] = [
   "fingerprint",
+  "fingerprintVoices",
   "platform",
   "platformVersion",
   "brand",
@@ -330,6 +337,21 @@ export function lightStealthValues(seed?: string | number): Partial<FingerprintO
   };
 }
 
+/**
+ * True when `fingerprint` asks for PASS-THROUGH debug mode: "off", "false", "0", "no", "disable",
+ * "disabled" (any case).
+ *
+ * Pass-through runs the browser with NO persona, so a caller can tell whether a problem comes from
+ * the spoofing or from their environment. The SDK never sends `--fingerprint=off` itself: an engine
+ * older than 152 r22 would read "off" as an ordinary seed and build a persona from it, the opposite
+ * of what was asked.
+ */
+export function isFingerprintPassthrough(value: unknown): boolean {
+  // Only the string "off". Seeds such as 0, "0", "no" or "false" stay seeds: a caller looping
+  // `fingerprint: i` from 0 must still get a persona for i = 0.
+  return typeof value === "string" && value.trim().toLowerCase() === "off";
+}
+
 /** Build the Chromium switches for a set of fingerprint options. */
 /** Parse the leading integer (the major) out of a version string like "120.0.6099.109" -> 120. */
 function majorFromVersion(value?: string): number | undefined {
@@ -396,6 +418,22 @@ export function defaultTimezone(primaryLang: string): string | undefined {
 export function fingerprintArgs(o: FingerprintOptions): string[] {
   const args: string[] = [];
   o = { ...o }; // never mutate the caller's options
+  if (isFingerprintPassthrough(o.fingerprint)) {
+    // Pass-through: no persona switches at all — not even the platform/brand/accept-language defaults
+    // the SDK normally adds for coherence. Only what the caller set explicitly for locale and network
+    // survives, mirroring the engine, which keeps timezone / accept-lang / webrtc-ip in this mode.
+    // `--fingerprint-passthrough` also makes a 152 r22+ engine strip persona switches passed in `args`.
+    args.push("--fingerprint-passthrough");
+    if (o.timezone) args.push(`--timezone=${o.timezone}`);
+    if (o.acceptLanguage) {
+      const clean = cleanAcceptLanguage(String(o.acceptLanguage));
+      args.push(`--accept-lang=${clean}`);
+      const primary = clean.split(",")[0];
+      if (primary) args.push(`--lang=${primary}`);
+    }
+    if (o.webrtcIp) args.push(`--webrtc-ip=${o.webrtcIp}`);
+    return args;
+  }
   if (o.lightStealth) {
     // Fill in the coherent metadata bundle via native override switches. An explicit caller field
     // (e.g. deviceMemory: 16) wins over the preset. CRITICAL: never emit --fingerprint, so the
@@ -492,6 +530,8 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
   // The two INDEPENDENT halves of the bundles above (engine >= Chromium 150 r12).
   if (o.gpuStringSpoof === false) args.push("--disable-gpu-string-spoof");
   if (o.canvasNoise === false) args.push("--disable-canvas-noise");
+  // fingerprintVoices=false keeps the host's own speech voices under a persona (engine 152 r22+).
+  if (o.fingerprintVoices === false) args.push("--disable-fingerprint-voices");
   // Persona schema (see FingerprintOptions.personaSchema); the real-GPU declaration gates a
   // schema-2 persona's discrete-GPU draw and is inert on schema 1.
   set("fingerprint-schema", o.personaSchema);

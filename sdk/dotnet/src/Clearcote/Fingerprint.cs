@@ -30,6 +30,10 @@ public class FingerprintOptions
 {
     /// Master fingerprint seed (per-eTLD+1 farbling root). Same seed =&gt; same identity across launches.
     public string? Fingerprint { get; set; }
+    /// <c>false</c> keeps the host machine's real speech-synthesis voices while a persona is active,
+    /// instead of the persona's voice table. Default (unset/true) keeps the persona's voices.
+    /// Engine 152 r22+ (dropped with a warning on older engines).
+    public bool? FingerprintVoices { get; set; }
     /// Spoofed OS family for UA / UA-CH ("windows" | "linux" | "macos" | "android"). "android" is a
     /// best-effort mobile persona.
     public string? Platform { get; set; }
@@ -261,9 +265,37 @@ public static class Fingerprint
     private static string HostPlatform =>
         Native.OsTag switch { "windows" => "windows", "linux" => "linux", "macos" => "macos", _ => "windows" };
 
+    /// True when <paramref name="value"/> asks for PASS-THROUGH debug mode: exactly "off" (any case,
+    /// surrounding whitespace ignored). "0", "no", "false", "disable" and the like are ordinary seeds.
+    ///
+    /// Pass-through runs the browser with NO persona, so a caller can tell whether a problem comes
+    /// from the spoofing or from their environment. The SDK never sends <c>--fingerprint=off</c>: an
+    /// engine older than 152 r22 would read "off" as an ordinary seed and build a persona from it.
+    public static bool IsFingerprintPassthrough(string? value)
+        => value is not null && string.Equals(value.Trim(), "off", StringComparison.OrdinalIgnoreCase);
+
     /// Build the Chromium switches for a set of fingerprint options (ports fingerprintArgs()).
     public static List<string> Args(FingerprintOptions o)
     {
+        if (IsFingerprintPassthrough(o.Fingerprint))
+        {
+            // Pass-through: no persona switches at all — not even the platform/brand/accept-language
+            // coherence defaults. Only explicit locale and network values survive, mirroring the
+            // engine, which keeps timezone / accept-lang / webrtc-ip in this mode.
+            // `--fingerprint-passthrough` also makes a 152 r22+ engine strip persona switches from Args.
+            var pt = new List<string> { "--fingerprint-passthrough" };
+            if (!string.IsNullOrEmpty(o.Timezone)) pt.Add($"--timezone={o.Timezone}");
+            if (!string.IsNullOrEmpty(o.AcceptLanguage))
+            {
+                var clean = CleanAcceptLanguage(o.AcceptLanguage);
+                pt.Add($"--accept-lang={clean}");
+                var primary = clean.Split(',')[0];
+                if (primary.Length > 0) pt.Add($"--lang={primary}");
+            }
+            if (!string.IsNullOrEmpty(o.WebrtcIp)) pt.Add($"--webrtc-ip={o.WebrtcIp}");
+            return pt;
+        }
+
         // Apply the LightStealth preset first, on a copy (explicit fields win; never emit --fingerprint).
         if (o.LightStealth == true)
         {
@@ -340,6 +372,8 @@ public static class Fingerprint
         // The two INDEPENDENT halves of the bundles above (engine >= Chromium 150 r12).
         if (o.GpuStringSpoof == false) args.Add("--disable-gpu-string-spoof");
         if (o.CanvasNoise == false) args.Add("--disable-canvas-noise");
+        // FingerprintVoices=false keeps the host's own speech voices under a persona (engine 152 r22+).
+        if (o.FingerprintVoices == false) args.Add("--disable-fingerprint-voices");
         if (o.FingerprintProfile is not null) args.Add($"--fingerprint-profile={EncodeProfile(o.FingerprintProfile)}");
 
         if (o.CanvasBridge?.Url is { Length: > 0 } cbUrl)

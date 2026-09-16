@@ -6,10 +6,12 @@
 // (direct geo through the proxy) if the DB can't be fetched/opened.
 //
 // The .mmdb (GPL-3.0 data) is downloaded + cached on first use (≈52 MB zip → ≈120 MB), NOT bundled.
-// http(s) proxies only for the lookup; SOCKS is skipped (we never fall back to the local IP under a
-// proxy, which would give the wrong region).
+// The exit-IP and ip-api lookups go THROUGH the proxy (HTTP or SOCKS5, see ./net.ts); we never fall
+// back to the local IP under a proxy, which would give the wrong region.
+//
+// Budget: CLEARCOTE_GEOIP_TIMEOUT_SECONDS (default 20) bounds the whole resolution. A lookup that
+// runs out of budget fails rather than hanging a launch.
 
-import http from "node:http";
 import { createWriteStream, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,6 +19,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import extract from "extract-zip";
 import maxmind, { type Reader } from "maxmind";
+import { proxiedRequest, toProxySpec, type ProxySpec } from "./net.js";
 
 const MMDB_URL = "https://github.com/daijro/geoip-all-in-one/releases/latest/download/geoip-aio-all.mmdb.zip";
 const MMDB_MAX_AGE_DAYS = 30;
@@ -35,7 +38,8 @@ function log(quiet: boolean | undefined, m: string): void {
   if (!quiet) process.stderr.write(`[clearcote] ${m}\n`);
 }
 
-function geoCacheRoot(): string {
+/** Where the geoip database is cached (CLEARCOTE_CACHE/geoip when set). */
+export function geoCacheRoot(): string {
   if (process.env.CLEARCOTE_CACHE) return path.join(process.env.CLEARCOTE_CACHE, "geoip");
   if (process.platform === "win32")
     return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "clearcote", "geoip");
@@ -43,50 +47,17 @@ function geoCacheRoot(): string {
   return path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache"), "clearcote", "geoip");
 }
 
-function proxyUrl(proxy?: { server?: string; username?: string; password?: string }): string | null {
-  if (!proxy?.server) return null;
-  let server = proxy.server;
-  if (!/:\/\//.test(server)) server = "http://" + server;
-  if (proxy.username) {
-    const u = new URL(server);
-    u.username = encodeURIComponent(proxy.username);
-    if (proxy.password) u.password = encodeURIComponent(proxy.password);
-    return u.toString();
-  }
-  return server;
+/** Whole-resolution budget in ms: CLEARCOTE_GEOIP_TIMEOUT_SECONDS (seconds, > 0), default 20s. */
+export function geoipTimeoutMs(env: Record<string, string | undefined> = process.env): number {
+  const raw = (env.CLEARCOTE_GEOIP_TIMEOUT_SECONDS ?? "").trim();
+  const n = Number(raw);
+  return raw && Number.isFinite(n) && n > 0 ? Math.round(n * 1000) : 20_000;
 }
 
-function isSocks(proxy?: { server?: string }): boolean {
-  return !!proxy?.server && /^socks/i.test(proxy.server);
-}
-
-// GET an http:// URL, optionally through an http proxy (absolute-form request target). Text body.
-function httpGetText(targetUrl: string, proxy: string | null, timeoutMs: number): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const t = new URL(targetUrl);
-    let opts: http.RequestOptions;
-    if (proxy) {
-      const p = new URL(proxy);
-      opts = { host: p.hostname, port: p.port || 80, path: targetUrl, timeout: timeoutMs,
-        headers: { Host: t.host, "User-Agent": "clearcote-sdk", Accept: "*/*" } };
-      if (p.username) {
-        const cred = Buffer.from(`${decodeURIComponent(p.username)}:${decodeURIComponent(p.password)}`).toString("base64");
-        (opts.headers as Record<string, string>)["Proxy-Authorization"] = `Basic ${cred}`;
-      }
-    } else {
-      opts = { host: t.hostname, port: t.port || 80, path: t.pathname + t.search, timeout: timeoutMs,
-        headers: { Host: t.host, "User-Agent": "clearcote-sdk", Accept: "*/*" } };
-    }
-    const req = http.request(opts, (res) => {
-      let data = "";
-      res.setEncoding("utf8");
-      res.on("data", (c) => (data += c));
-      res.on("end", () => resolve(data.trim()));
-    });
-    req.on("error", reject);
-    req.on("timeout", () => req.destroy(new Error("timed out")));
-    req.end();
-  });
+async function getText(url: string, proxy: ProxySpec | null, timeoutMs: number): Promise<string> {
+  const res = await proxiedRequest(url, { proxy, timeoutMs: Math.max(1, timeoutMs) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.text()).trim();
 }
 
 const IPV4 = /^(?:\d{1,3}\.){3}\d{1,3}$/;
@@ -95,11 +66,13 @@ function looksLikeIp(s: string): boolean {
   return IPV4.test(s) || (s.includes(":") && IPV6.test(s));
 }
 
-/** Discover the egress IP via an IP-echo through the proxy (or direct). */
-async function exitIp(proxy: string | null, quiet?: boolean): Promise<string | null> {
+/** Discover the egress IP via an IP-echo through the proxy (or direct), within `deadline`. */
+async function exitIp(proxy: ProxySpec | null, deadline: number, quiet?: boolean): Promise<string | null> {
   for (const url of IPECHO_URLS) {
+    const left = deadline - Date.now();
+    if (left <= 0) break;
     try {
-      const ip = (await httpGetText(url, proxy, 8000)).split(/\s+/)[0];
+      const ip = (await getText(url, proxy, Math.min(left, 8000))).split(/\s+/)[0];
       if (looksLikeIp(ip)) return ip;
     } catch {
       /* try next */
@@ -163,8 +136,17 @@ function findMmdb(dir: string): string | null {
 }
 
 let _reader: Reader<any> | null = null;
-async function mmdbLookup(ip: string, quiet?: boolean): Promise<Geo | null> {
-  const file = await ensureMmdb(quiet);
+async function mmdbLookup(ip: string, deadline: number, quiet?: boolean): Promise<Geo | null> {
+  // The first-run database download (~52 MB) may outlast the budget. It keeps going in the
+  // background and caches for the next launch; this launch falls back to ip-api instead of waiting.
+  const left = deadline - Date.now();
+  if (left <= 0) return null;
+  let timer: NodeJS.Timeout | undefined;
+  const file = await Promise.race([
+    ensureMmdb(quiet),
+    new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), left); }),
+  ]);
+  if (timer) clearTimeout(timer);
   if (!file) return null;
   try {
     if (!_reader) _reader = await maxmind.open(file);
@@ -189,9 +171,11 @@ async function mmdbLookup(ip: string, quiet?: boolean): Promise<Geo | null> {
 }
 
 // Fallback: ip-api.com returns geo directly (through the proxy), no DB needed.
-async function ipApiFallback(proxy: string | null, quiet?: boolean): Promise<Geo | null> {
+async function ipApiFallback(proxy: ProxySpec | null, deadline: number): Promise<Geo | null> {
+  const left = deadline - Date.now();
+  if (left <= 0) return null;
   try {
-    const txt = await httpGetText(IPAPI_URL, proxy, 8000);
+    const txt = await getText(IPAPI_URL, proxy, Math.min(left, 8000));
     const j = JSON.parse(txt);
     if (j?.status !== "success") return null;
     return {
@@ -206,24 +190,59 @@ async function ipApiFallback(proxy: string | null, quiet?: boolean): Promise<Geo
   }
 }
 
+/** Outcome of a geo resolution: the geo, or why there is none. */
+export interface GeoResult {
+  geo: Geo | null;
+  /** Human-readable failure reason when `geo` is null or has no timezone. */
+  reason?: string;
+  /** How long the resolution took, in ms. */
+  elapsedMs: number;
+}
+
+/**
+ * Resolve geo for the egress (through `proxy` if given — HTTP or SOCKS5 — else direct), reporting
+ * why it failed. Never throws. Bounded by `timeoutMs` (default {@link geoipTimeoutMs}).
+ */
+export async function resolveGeoDetailed(
+  proxy?: string | { server?: string; username?: string; password?: string },
+  opts: { quiet?: boolean; timeoutMs?: number } = {},
+): Promise<GeoResult> {
+  const started = Date.now();
+  const budget = opts.timeoutMs ?? geoipTimeoutMs();
+  const deadline = started + budget;
+  let spec: ProxySpec | null;
+  try {
+    spec = toProxySpec(proxy ?? null);
+  } catch (e) {
+    return { geo: null, reason: `invalid proxy (${(e as Error).message})`, elapsedMs: Date.now() - started };
+  }
+  const ip = await exitIp(spec, deadline, opts.quiet);
+  let geo: Geo | null = ip ? await mmdbLookup(ip, deadline, opts.quiet) : null;
+  if (!geo) geo = await ipApiFallback(spec, deadline);
+  const elapsedMs = Date.now() - started;
+  if (geo && geo.timezone) {
+    log(opts.quiet, `geoip: ${geo.ip} -> ${geo.country} tz=${geo.timezone} lang=${geo.acceptLanguage}`);
+    return { geo, elapsedMs };
+  }
+  const reason = Date.now() >= deadline
+    ? `timed out after ${Math.round(budget / 1000)}s (CLEARCOTE_GEOIP_TIMEOUT_SECONDS)`
+    : !ip
+      ? `could not determine the exit IP${spec ? " through the proxy" : ""}`
+      : geo
+        ? `no timezone for exit IP ${ip}`
+        : `no geo data for exit IP ${ip}`;
+  return { geo, reason, elapsedMs };
+}
+
 /**
  * Resolve geo for the egress (through `proxy` if given, else direct). Never throws — returns null
  * on failure. Uses the geoip-all-in-one offline DB first, ip-api.com as a fallback.
  */
 export async function resolveGeo(
-  proxy?: { server?: string; username?: string; password?: string },
-  opts: { quiet?: boolean } = {}
+  proxy?: string | { server?: string; username?: string; password?: string },
+  opts: { quiet?: boolean; timeoutMs?: number } = {}
 ): Promise<Geo | null> {
-  if (isSocks(proxy)) {
-    log(opts.quiet, "geoip: SOCKS proxy can't be used for the geo lookup — set timezone/acceptLanguage explicitly. Skipping.");
-    return null;
-  }
-  const purl = proxyUrl(proxy);
-  const ip = await exitIp(purl, opts.quiet);
-  let geo: Geo | null = ip ? await mmdbLookup(ip, opts.quiet) : null;
-  if (!geo) geo = await ipApiFallback(purl, opts.quiet);
-  if (geo) log(opts.quiet, `geoip: ${geo.ip} -> ${geo.country} tz=${geo.timezone} lang=${geo.acceptLanguage}`);
-  return geo;
+  return (await resolveGeoDetailed(proxy, opts)).geo;
 }
 
 // country (ISO-3166 alpha-2) -> Accept-Language. Plain comma list (NO ;q= weights — Chromium's
@@ -248,4 +267,19 @@ const COUNTRY_LANG: Record<string, string> = {
 export function acceptLanguageForCountry(cc?: string): string {
   if (!cc) return "en-US,en";
   return COUNTRY_LANG[cc.toUpperCase()] || "en-US,en";
+}
+
+/**
+ * Thrown by launch() when `geoip: true` was requested and the region could not be resolved.
+ *
+ * Failing closed is the point: continuing would launch with the host's clock and a default
+ * language — UTC + en-US on most servers — which is exactly the mismatch geoip exists to prevent.
+ * Pass an explicit `timezone` AND `acceptLanguage` to launch anyway when the lookup is unavailable.
+ */
+export class GeoipError extends Error {
+  code = "GEOIP_UNRESOLVED";
+  constructor(message: string) {
+    super(message);
+    this.name = "GeoipError";
+  }
 }

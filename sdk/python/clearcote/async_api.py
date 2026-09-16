@@ -30,6 +30,7 @@ from . import (  # shared sync helpers
     _headed_no_viewport, _headless_geometry_kwargs, _prepare, _acquire_lease_from_kwargs,
     _is_win_launch_race,
 )
+from ._launchopts import DEFAULT_IGNORED_ARGS
 from ._geometry import (
     apply_headless_geometry, fit_window_to_persona_async, move_window_to_origin_async,
 )
@@ -40,7 +41,7 @@ from ._humanize_async import install_humanize, install_humanize_on_context
 from ._profile import Profile, list_profiles, load_profile
 from ._render_async import check_render_coherence
 from .download import ensure_binary, warm_files
-from .geoip import resolve_geo
+from .geoip import GeoipError, resolve_geo, resolve_geo_detailed  # noqa: F401  (re-exported)
 from .release import RELEASE
 
 from . import __version__ as __version__  # re-export the package version
@@ -62,18 +63,41 @@ __all__ = [
 ]
 
 
-async def executable_path(executable_path=None, cache_dir=None, quiet=False, auto_update=None):
+def _prepare_releasing(kwargs, lease):
+    """_prepare (looked up at call time, so tests can patch it), releasing the lease handle if it
+    raises (e.g. GeoipError before any browser starts)."""
+    try:
+        return _prepare(kwargs)
+    except BaseException:
+        if lease:
+            try:
+                lease.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        raise
+
+
+async def executable_path(executable_path=None, cache_dir=None, quiet=False, auto_update=None,
+                          version=None, license_key=None, license_api_base=None,
+                          release_channel=None):
     """Resolve the Clearcote chrome.exe path (download/verify if needed). Runs the blocking
     resolve in a thread so it never stalls the event loop."""
     from . import executable_path as _sync_executable_path
     return await asyncio.to_thread(
-        _sync_executable_path, executable_path, cache_dir, quiet, auto_update)
+        _sync_executable_path, executable_path, cache_dir, quiet, auto_update, version,
+        license_key, license_api_base, release_channel)
 
 
-async def download(cache_dir=None, quiet=False, auto_update=None):
+async def download(cache_dir=None, quiet=False, auto_update=None, version=None, license_key=None,
+                   license_api_base=None, release_channel=None):
     """Pre-fetch + verify the Clearcote binary without launching (off-loop). Returns the path."""
+    if version is None and license_key is None and license_api_base is None and release_channel is None:
+        return await asyncio.to_thread(
+            ensure_binary, cache_dir=cache_dir, quiet=quiet, auto_update=auto_update)
+    from . import download as _sync_download
     return await asyncio.to_thread(
-        ensure_binary, cache_dir=cache_dir, quiet=quiet, auto_update=auto_update)
+        _sync_download, cache_dir, quiet, auto_update, version, license_key, license_api_base,
+        release_channel)
 
 
 def _bind_driver(closable, pw):
@@ -205,7 +229,8 @@ async def launch(**kwargs):
     # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
     shader_dialect = kwargs.pop("shader_dialect", None)  # popped before _prepare: not a PW option
     lease = await asyncio.to_thread(_acquire_lease_from_kwargs, kwargs)  # opt-in; None in free mode
-    exe, args, pw_kwargs, humanize, show_cursor, seed = await asyncio.to_thread(_prepare, kwargs)
+    exe, args, pw_kwargs, humanize, show_cursor, seed = await asyncio.to_thread(
+        _prepare_releasing, kwargs, lease)
     if lease:  # inject CLEARCOTE_RUN_TOKEN so the PRO engine gate lets the browser launch
         inject_run_token(pw_kwargs, lease.token)
     await asyncio.to_thread(apply_font_env, exe, pw_kwargs)  # Linux: bundled font clones (mirror sync)
@@ -240,14 +265,15 @@ async def launch_persistent_context(user_data_dir, **kwargs):
     Pass ``widevine=True`` to seed + enable the (opt-in) Widevine CDM so DRM/EME works."""
     # Automation strip before the Widevine helper (it appends --disable-component-update rather than
     # clobbering ['--enable-automation']) — mirrors the sync path.
-    kwargs.setdefault("ignore_default_args", ["--enable-automation"])
+    kwargs.setdefault("ignore_default_args", list(DEFAULT_IGNORED_ARGS))
     if kwargs.get("widevine"):
         from ._widevine import apply_widevine_launch
         await asyncio.to_thread(apply_widevine_launch, user_data_dir, kwargs, kwargs.get("quiet", False))
     # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
     shader_dialect = kwargs.pop("shader_dialect", None)  # popped before _prepare: not a PW option
     lease = await asyncio.to_thread(_acquire_lease_from_kwargs, kwargs)  # opt-in; None in free mode
-    exe, args, pw_kwargs, humanize, show_cursor, seed = await asyncio.to_thread(_prepare, kwargs)
+    exe, args, pw_kwargs, humanize, show_cursor, seed = await asyncio.to_thread(
+        _prepare_releasing, kwargs, lease)
     if lease:  # inject CLEARCOTE_RUN_TOKEN so the PRO engine gate lets the browser launch
         inject_run_token(pw_kwargs, lease.token)
     await asyncio.to_thread(apply_font_env, exe, pw_kwargs)  # Linux: bundled font clones (mirror sync)

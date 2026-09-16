@@ -97,6 +97,51 @@ official Docker image also works: `docker run -d --rm -p 9222:9222 teamflatearth
 [`clearcote-mcp`](https://github.com/clearcotelabs/clearcote-browser/tree/main/mcp) server
 (`npx -y clearcote-mcp` or `pip install clearcote-mcp`) — ~20 tools over one shared stealth browser.
 
+### Many identities on one endpoint (`serveMultiplex`, `clearcote serve`)
+
+One port, one browser per identity, chosen by the connection URL:
+
+```ts
+import { chromium } from "playwright-core";
+// in another process:  npx clearcote serve --port 9222 --idle-timeout 300
+const a = await chromium.connectOverCDP("http://127.0.0.1:9222?fingerprint=acct-1&timezone=Europe/Berlin");
+const b = await chromium.connectOverCDP(`http://127.0.0.1:9222?fingerprint=acct-2&proxy=${encodeURIComponent("socks5://u:p@host:1080")}&geoip=true`);
+```
+
+- Query options: `fingerprint`, `timezone`, `locale`, `proxy`, `geoip`, plus any fingerprint option in kebab-case (`platform`, `hardware-concurrency`, `allow-third-party-cookies`, ...). Unknown options are rejected (400).
+- The same identity reuses its browser. Asking for a running identity with *different* options returns 409 — close it first.
+- `GET /` lists running browsers; `POST /fingerprint/<id>/close` stops one; `--idle-timeout <s>` closes a browser after its last client disconnects; `--max-browsers` caps them (default 16).
+- Behind a reverse proxy, WebSocket URLs honour `X-Forwarded-Host` / `X-Forwarded-Proto`; add the public name with `--allow-host`.
+- Binds `127.0.0.1` by default. Requests a web page could make (cross-site fetches, foreign `Origin`, a `Host` that isn't an IP / `localhost` / allowed) are refused.
+
+In code: `serveMultiplex({ port: 9222, idleTimeoutSec: 300, dataDir: "./profiles" })`.
+
+### `clearcote` command line
+
+```bash
+npx clearcote install [--version 152] [--channel preview]
+npx clearcote info [--quick] [--json] [--proxy <url>]   # alias: doctor
+npx clearcote login [key]      # validates the key, saves it to ~/.clearcote/license.key
+npx clearcote logout
+npx clearcote clear-cache
+npx clearcote serve [--port 9222] ...
+```
+
+`info` never downloads: it reports the SDK, the cached builds, which engine features the binary supports, a launch test (skipped with `--quick`), licence seats, fonts and missing system libraries.
+
+### Engine options (PRO 152 r22+)
+
+| Option | Effect |
+|---|---|
+| `fingerprint: "off"` | No persona at all — for telling whether a problem comes from the spoofing or from your environment. |
+| `fingerprintVoices: false` | Keep the host's own `speechSynthesis` voices under a persona. |
+| `allowThirdPartyCookies: true` | Allow third-party cookies (blocked by default), for embedded sign-in, payment and captcha frames. |
+| `transparentProxy: true` | With a proxy: send the headers a direct connection sends, and report connection timing as a reused connection. |
+
+On an older engine each of these is skipped with a warning; the launch still works.
+
+Also: `licenseThroughProxy: true` (or `CLEARCOTE_LICENSE_THROUGH_PROXY=1`) sends the licence calls through the launch proxy; `releaseChannel: "preview"` (or `CLEARCOTE_RELEASE_CHANNEL`) picks up PRO preview builds; `getSessionSeats()` reports seats in use.
+
 ### Through a proxy (report the proxy's IP, not your host's)
 
 ```ts
@@ -122,7 +167,9 @@ const browser = await launch({
 });
 ```
 
-Anything you set explicitly wins over `geoip`. With no proxy it uses your direct connection's IP. The lookup needs an **http(s) proxy** — SOCKS proxies are skipped (set `timezone`/`acceptLanguage` yourself).
+Anything you set explicitly wins over `geoip`. With no proxy it uses your direct connection's IP. The lookup goes through the proxy — http(s) and SOCKS5 (with username/password) alike.
+
+The whole lookup has one deadline, `CLEARCOTE_GEOIP_TIMEOUT_SECONDS` (default 20). If the region can't be resolved in time, `launch()` throws `GeoipError` (code `GEOIP_UNRESOLVED`) **before** any browser starts, instead of launching with this machine's clock and language. If you set both `timezone` and `acceptLanguage` yourself, it warns and launches anyway.
 
 Geo data comes from the offline [geoip-all-in-one](https://github.com/daijro/geoip-all-in-one) MaxMind database (downloaded + cached on first use; GPL-3.0 data, the same source Camoufox uses) — more accurate than a single online API — with `ip-api.com` as a fallback.
 

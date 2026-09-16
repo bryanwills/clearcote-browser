@@ -182,8 +182,14 @@ This SDK covers the core: persona → engine switches, free + PRO binary resolut
 extract / cache, with the Windows first-launch AV-race work-around), the full floating-concurrency licensing
 client, `LaunchAsync` / `LaunchPersistentContextAsync` / `ServeAsync` / `ExecutablePathAsync`, and the default
 stealth args. The higher-level add-ons in the Node/Python SDKs — the humanized cursor, in-browser AI agent,
-Widevine/EME helper, geoip auto-fill, saved-profile manager, and render-coherence linter — are planned
-follow-ups; the underlying engine switches are all reachable today via `Args`.
+Widevine/EME helper, saved-profile manager, and render-coherence linter — are planned follow-ups; the
+underlying engine switches are all reachable today via `Args`.
+
+Also available (0.29.0): `Geoip = true` (through the proxy, incl. SOCKS5; one
+`CLEARCOTE_GEOIP_TIMEOUT_SECONDS` deadline; throws `GeoipException` before launch if unresolved unless
+`Timezone` and `AcceptLanguage` are both set), `Fingerprint = "off"` (no persona), `FingerprintVoices = false`,
+`AllowThirdPartyCookies = true`, `TransparentProxy = true` (engine 152 r22+; skipped with a warning on older
+engines), `LicenseThroughProxy`, `ReleaseChannel`, and `License.GetSessionSeatsAsync()`.
 
 ## License
 

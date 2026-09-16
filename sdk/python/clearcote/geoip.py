@@ -6,19 +6,26 @@ IP-echo *through the proxy*, then look that IP up in the cached .mmdb. Falls bac
 (direct geo through the proxy) if the DB can't be fetched/opened.
 
 The .mmdb (GPL-3.0 data) is downloaded + cached on first use (~52 MB zip -> ~120 MB), NOT bundled.
-http(s) proxies only for the lookup; SOCKS is skipped. Needs the `maxminddb` package (a dependency);
-if it's missing, falls back to ip-api.com.
+The exit-IP and ip-api lookups go THROUGH the proxy (HTTP or SOCKS5, see ``_net``); we never fall
+back to the local IP under a proxy, which would give the wrong region. Needs the `maxminddb`
+package (a dependency); if it's missing, falls back to ip-api.com.
+
+Budget: CLEARCOTE_GEOIP_TIMEOUT_SECONDS (default 20) bounds the whole resolution. A lookup that
+runs out of budget fails rather than hanging a launch.
 """
 
 import json
+import math
 import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 import zipfile
-from urllib.parse import quote, urlsplit, urlunsplit
+
+from ._net import proxied_request, to_proxy_spec
 
 try:
     import maxminddb  # type: ignore
@@ -55,21 +62,34 @@ def _geo_cache_root():
     return os.path.join(base, "clearcote", "geoip")
 
 
-def _proxy_url(proxy):
-    if not proxy or not proxy.get("server"):
-        return None
-    server = proxy["server"]
-    if "://" not in server:
-        server = "http://" + server
-    user = proxy.get("username")
-    if not user:
-        return server
-    parts = urlsplit(server)
-    cred = quote(user, safe="")
-    if proxy.get("password"):
-        cred += ":" + quote(proxy["password"], safe="")
-    netloc = f"{cred}@{parts.hostname}" + (f":{parts.port}" if parts.port else "")
-    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+def geo_cache_root():
+    """Where the geoip database is cached (CLEARCOTE_CACHE/geoip when set)."""
+    return _geo_cache_root()
+
+
+def geoip_timeout_seconds(env=None):
+    """Whole-resolution budget in seconds: CLEARCOTE_GEOIP_TIMEOUT_SECONDS (> 0), default 20."""
+    env = os.environ if env is None else env
+    raw = str(env.get("CLEARCOTE_GEOIP_TIMEOUT_SECONDS") or "").strip()
+    try:
+        n = float(raw)
+    except ValueError:
+        return 20.0
+    if not math.isfinite(n) or n <= 0:
+        return 20.0
+    return n
+
+
+class GeoipError(RuntimeError):
+    """Raised by launch() when ``geoip=True`` was requested and the region could not be resolved.
+
+    Failing closed is the point: continuing would launch with the host's clock and a default
+    language -- UTC + en-US on most servers -- which is exactly the mismatch geoip exists to prevent.
+    Pass an explicit ``timezone`` AND ``accept_language`` to launch anyway when the lookup is
+    unavailable.
+    """
+
+    code = "GEOIP_UNRESOLVED"
 
 
 def _find_in(data, dotted):
@@ -82,12 +102,11 @@ def _find_in(data, dotted):
     return data
 
 
-def _opener(proxy_url):
-    if proxy_url:
-        return urllib.request.build_opener(
-            urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
-        )
-    return urllib.request.build_opener()
+def _get_text(url, spec, timeout):
+    res = proxied_request(url, timeout=max(0.001, timeout), proxy=spec)
+    if not res.ok:
+        raise RuntimeError(f"HTTP {res.status}")
+    return res.text().strip()
 
 
 def _looks_like_ip(s):
@@ -96,18 +115,18 @@ def _looks_like_ip(s):
     return ":" in s and all(c in "0123456789abcdefABCDEF:" for c in s)
 
 
-def _exit_ip(proxy_url, quiet):
-    op = _opener(proxy_url)
+def _exit_ip(spec, deadline, quiet):
     for url in IPECHO_URLS:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "clearcote-sdk"})
-            with op.open(req, timeout=8) as resp:
-                ip = resp.read().decode("utf-8", "replace").split()[0].strip()
+            text = _get_text(url, spec, min(left, 8.0))
+            ip = text.split()[0].strip() if text else ""
             if _looks_like_ip(ip):
                 return ip
         except Exception:  # noqa: BLE001
             continue
-    _log(quiet, "geoip: could not determine the exit IP")
     return None
 
 
@@ -125,6 +144,7 @@ def _ensure_mmdb(quiet):
         _log(quiet, "geoip: downloading the geoip-all-in-one database (~52 MB, first run only)")
         with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
             zpath = tmp.name
+        part = mmdb + ".part-%d" % os.getpid()
         try:
             with urllib.request.urlopen(  # noqa: S310
                 urllib.request.Request(MMDB_URL, headers={"User-Agent": "clearcote-sdk"}), timeout=120
@@ -134,13 +154,15 @@ def _ensure_mmdb(quiet):
                 member = next((n for n in z.namelist() if n.lower().endswith(".mmdb")), None)
                 if not member:
                     raise RuntimeError("no .mmdb in archive")
-                with z.open(member) as src, open(mmdb, "wb") as dst:
+                with z.open(member) as src, open(part, "wb") as dst:
                     shutil.copyfileobj(src, dst)
+            os.replace(part, mmdb)  # atomic: a timed-out waiter never opens a half-written file
         finally:
-            try:
-                os.remove(zpath)
-            except OSError:
-                pass
+            for f in (zpath, part):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
         _log(quiet, "geoip: database ready")
         return mmdb
     except Exception as e:  # noqa: BLE001
@@ -148,8 +170,37 @@ def _ensure_mmdb(quiet):
         return None
 
 
-def _mmdb_lookup(ip, quiet):
-    mmdb = _ensure_mmdb(quiet)
+_MMDB_LOCK = threading.Lock()
+_MMDB_THREAD = None
+
+
+def _ensure_mmdb_within(quiet, left):
+    """_ensure_mmdb bounded by ``left`` seconds. The first-run database download (~52 MB) may
+    outlast the budget: it keeps going in a background thread and caches for the next launch,
+    while this launch falls back to ip-api instead of waiting."""
+    global _MMDB_THREAD
+    result = {}
+    with _MMDB_LOCK:
+        if _MMDB_THREAD is None or not _MMDB_THREAD.is_alive():
+            def run():
+                result["path"] = _ensure_mmdb(quiet)
+            _MMDB_THREAD = threading.Thread(target=run, name="clearcote-geoip-db", daemon=True)
+            _MMDB_THREAD.start()
+        thread = _MMDB_THREAD  # possibly a download already in flight from an earlier launch
+    thread.join(max(0.0, left))
+    if thread.is_alive():
+        return None
+    if "path" in result:
+        return result["path"]
+    mmdb = os.path.join(_geo_cache_root(), "geoip-aio-all.mmdb")
+    return mmdb if os.path.exists(mmdb) else None
+
+
+def _mmdb_lookup(ip, deadline, quiet):
+    left = deadline - time.monotonic()
+    if left <= 0:
+        return None
+    mmdb = _ensure_mmdb_within(quiet, left)
     if not mmdb:
         return None
     try:
@@ -175,12 +226,12 @@ def _mmdb_lookup(ip, quiet):
         return None
 
 
-def _ip_api_fallback(proxy_url, quiet):
+def _ip_api_fallback(spec, deadline):
+    left = deadline - time.monotonic()
+    if left <= 0:
+        return None
     try:
-        op = _opener(proxy_url)
-        req = urllib.request.Request(IPAPI_URL, headers={"User-Agent": "clearcote-sdk"})
-        with op.open(req, timeout=8) as resp:
-            j = json.loads(resp.read().decode("utf-8", "replace"))
+        j = json.loads(_get_text(IPAPI_URL, spec, min(left, 8.0)))
         if j.get("status") != "success":
             return None
         lat, lon = j.get("lat"), j.get("lon")
@@ -195,26 +246,50 @@ def _ip_api_fallback(proxy_url, quiet):
         return None
 
 
-def resolve_geo(proxy=None, quiet=False, timeout=8):
-    """Resolve geo for the egress (through ``proxy`` if given, else direct). Never raises — returns
-    None on failure. geoip-all-in-one offline DB first, ip-api.com fallback. Returns a dict
-    {ip, country, timezone, accept_language, location} or None."""
-    if proxy and proxy.get("server"):
-        server = proxy["server"]
-        scheme = server.split("://", 1)[0].lower() if "://" in server else "http"
-        if scheme.startswith("socks"):
-            _log(quiet, "geoip: SOCKS proxy can't be used for the geo lookup — "
-                        "set timezone/accept_language explicitly. Skipping.")
-            return None
-    proxy_url = _proxy_url(proxy)
-    ip = _exit_ip(proxy_url, quiet)
-    geo = _mmdb_lookup(ip, quiet) if ip else None
+def resolve_geo_detailed(proxy=None, quiet=False, timeout=None):
+    """Resolve geo for the egress (through ``proxy`` if given -- HTTP or SOCKS5, a Playwright dict
+    or a URL string -- else direct), reporting why it failed.
+
+    Returns ``(geo, reason, elapsed_ms)``: ``geo`` is the dict (or None), ``reason`` a human-readable
+    failure reason when there is no geo/timezone (else None). Never raises. Bounded by ``timeout``
+    seconds (default :func:`geoip_timeout_seconds`)."""
+    started = time.monotonic()
+    budget = float(timeout) if timeout is not None else geoip_timeout_seconds()
+    deadline = started + budget
+
+    def elapsed():
+        return int(round((time.monotonic() - started) * 1000))
+
+    try:
+        spec = to_proxy_spec(proxy) if proxy else None
+    except Exception as e:  # noqa: BLE001
+        return None, f"invalid proxy ({e})", elapsed()
+    ip = _exit_ip(spec, deadline, quiet)
+    geo = _mmdb_lookup(ip, deadline, quiet) if ip else None
     if not geo:
-        geo = _ip_api_fallback(proxy_url, quiet)
-    if geo:
+        geo = _ip_api_fallback(spec, deadline)
+    if geo and geo.get("timezone"):
         _log(quiet, f"geoip: {geo['ip']} -> {geo['country']} "
                     f"tz={geo['timezone']} lang={geo['accept_language']}")
-    return geo
+        return geo, None, elapsed()
+    if time.monotonic() >= deadline:
+        secs = "%g" % round(budget, 1)
+        reason = f"timed out after {secs}s (CLEARCOTE_GEOIP_TIMEOUT_SECONDS)"
+    elif not ip:
+        reason = "could not determine the exit IP" + (" through the proxy" if spec else "")
+    elif geo:
+        reason = f"no timezone for exit IP {ip}"
+    else:
+        reason = f"no geo data for exit IP {ip}"
+    return geo, reason, elapsed()
+
+
+def resolve_geo(proxy=None, quiet=False, timeout=None):
+    """Resolve geo for the egress (through ``proxy`` if given, else direct). Never raises — returns
+    None on failure. geoip-all-in-one offline DB first, ip-api.com fallback. Returns a dict
+    {ip, country, timezone, accept_language, location} or None. ``timeout`` bounds the whole
+    resolution in seconds (default CLEARCOTE_GEOIP_TIMEOUT_SECONDS, else 20)."""
+    return resolve_geo_detailed(proxy, quiet=quiet, timeout=timeout)[0]
 
 
 # country (ISO-3166 alpha-2) -> Accept-Language. Plain comma list (NO ;q= weights). The geoip DB

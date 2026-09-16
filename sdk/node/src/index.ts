@@ -23,9 +23,9 @@ import type {
   LaunchOptions as PlaywrightLaunchOptions,
   Page,
 } from "playwright-core";
-import { checkInstall, ensureBinary, ensureVersion, proEnsureBinary, resolvedEngineVersion, warmFiles, type DownloadOptions } from "./download.js";
-import { fingerprintArgs, splitFingerprintOptions, type FingerprintOptions } from "./fingerprint.js";
-import { resolveGeo, type Geo } from "./geoip.js";
+import { checkInstall, ensureBinary, ensureVersion, proEnsureBinary, resolvedEngineVersion, resolveReleaseChannel, warmFiles, type DownloadOptions } from "./download.js";
+import { fingerprintArgs, isFingerprintPassthrough, splitFingerprintOptions, type FingerprintOptions } from "./fingerprint.js";
+import { resolveGeoDetailed, GeoipError, type Geo } from "./geoip.js";
 import { installHumanize, installHumanizeOnContext, type HumanizeOptions } from "./humanize.js";
 import { agentArgs, splitAgentOptions, type AgentOptions } from "./agent.js";
 import { resolveProfileOptions, Profile } from "./profile.js";
@@ -48,6 +48,10 @@ import {
   socks5UdpArgs,
   webBluetoothArgs,
   webrtcDefaultDenyArgs,
+  DEFAULT_IGNORED_ARGS,
+  gpuBlocklistArgs,
+  gateEngineSwitches,
+  engineExtrasArgs,
   type PwProxy,
 } from "./launchopts.js";
 import { RELEASE, platformRelease } from "./release.js";
@@ -65,7 +69,12 @@ export type { FingerprintOptions } from "./fingerprint.js";
 export type { DownloadOptions } from "./download.js";
 export { proEnsureBinary, type ProDownloadOptions } from "./download.js";
 export { checkInstall, verifyInstall } from "./download.js";
-export { resolveGeo, type Geo } from "./geoip.js";
+export { resolveGeo, resolveGeoDetailed, geoipTimeoutMs, GeoipError, type Geo, type GeoResult } from "./geoip.js";
+export { proxiedRequest, toProxySpec, type ProxySpec } from "./net.js";
+export { resolveReleaseChannel, type ReleaseChannel } from "./download.js";
+export { isFingerprintPassthrough } from "./fingerprint.js";
+export { DEFAULT_IGNORED_ARGS, gpuBlocklistArgs, gateEngineSwitches, engineSupportsSwitch } from "./launchopts.js";
+export { serveMultiplex, type MultiplexOptions, type MultiplexServer } from "./multiplex.js";
 export type { HumanizeOptions } from "./humanize.js";
 export { Profile, listProfiles, loadProfile, PROFILE_DIR, type ProfileOptions } from "./profile.js";
 // Profile library: real captured personas, selected for coherence with THIS host.
@@ -100,6 +109,12 @@ export { checkRenderCoherence, type RenderVerdict } from "./render.js";
 export {
   resolveLicenseKey,
   acquireLease,
+  getSessionSeats,
+  saveLicenseKey,
+  removeLicenseKey,
+  licenseKeySource,
+  licenseKeyPath,
+  type SessionSeats,
   LicenseError,
   ConcurrencyLimitError,
   LicenseRevokedError,
@@ -175,6 +190,22 @@ interface ShaderDialectOption {
   shaderDialect?: ShaderDialect;
 }
 
+/** Engine behaviour switches that are not part of the persona (engine 152 r22+). */
+interface EngineExtrasOption {
+  /**
+   * Allow third-party cookies, as stock Chrome does. The de-Googled base blocks them by default,
+   * which breaks embedded flows that rely on them: reCAPTCHA, SSO sign-in, payment challenges.
+   * Default off (unchanged behaviour).
+   */
+  allowThirdPartyCookies?: boolean;
+  /**
+   * Hide proxy use from origins and pages: send `Connection` instead of `Proxy-Connection` on
+   * plain-HTTP requests through an HTTP proxy, and report proxied connection timing the way a reused
+   * connection reports it (no proxy-shaped DNS/connect/TLS durations). Requires a proxy.
+   */
+  transparentProxy?: boolean;
+}
+
 /** Opt-in SOCKS5 UDP relaying (see {@link socks5UdpArgs}). */
 interface Socks5UdpOption {
   /** Relay WebRTC's UDP through the SOCKS5 proxy using UDP ASSOCIATE, instead of letting it egress
@@ -190,7 +221,7 @@ interface Socks5UdpOption {
 }
 
 /** Options for {@link launch}: Playwright launch options + Clearcote fingerprint + agent + download options. */
-export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, ExtensionsOption, EphemeralProfileOption, HumanizeOptions, DownloadOptions, LicenseOptions, ShaderDialectOption, Socks5UdpOption {}
+export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, ExtensionsOption, EphemeralProfileOption, HumanizeOptions, DownloadOptions, LicenseOptions, ShaderDialectOption, Socks5UdpOption, EngineExtrasOption {}
 
 /** Options for {@link launchPersistentContext}. */
 export interface PersistentContextOptions
@@ -205,7 +236,8 @@ export interface PersistentContextOptions
     DownloadOptions,
     LicenseOptions,
     ShaderDialectOption,
-    Socks5UdpOption {
+    Socks5UdpOption,
+    EngineExtrasOption {
   /**
    * Seed + enable the opt-in Widevine CDM in this profile so DRM/EME works
    * (`requestMediaKeySystemAccess('com.widevine.alpha')` resolves) and the EME surface matches a
@@ -215,10 +247,28 @@ export interface PersistentContextOptions
   widevine?: boolean;
 }
 
-/** Fill unset timezone/acceptLanguage/location/webrtcIp on `fp` from the proxy's exit-IP geo. */
-async function applyGeoip(fp: FingerprintOptions, proxy: unknown): Promise<void> {
-  const geo: Geo | null = await resolveGeo(proxy as { server?: string; username?: string; password?: string } | undefined);
-  if (!geo) return;
+/**
+ * Fill unset timezone/acceptLanguage/location/webrtcIp on `fp` from the proxy's exit-IP geo.
+ *
+ * FAILS CLOSED: if the region cannot be resolved, the launch throws {@link GeoipError} instead of
+ * continuing on the host's clock and a default language (UTC + en-US on most servers) — the exact
+ * mismatch geoip exists to prevent. A caller who set BOTH `timezone` and `acceptLanguage`
+ * explicitly still launches (with a warning), since nothing geoip would fill is missing.
+ */
+export async function applyGeoip(fp: FingerprintOptions, proxy: unknown, quiet?: boolean): Promise<void> {
+  const result = await resolveGeoDetailed(proxy as { server?: string; username?: string; password?: string } | undefined, { quiet });
+  const geo: Geo | null = result.geo;
+  if (!geo || !geo.timezone) {
+    if (fp.timezone && fp.acceptLanguage) {
+      if (!quiet) console.warn(`clearcote: geoip could not resolve the region (${result.reason}); using the explicit timezone and acceptLanguage.`);
+      return;
+    }
+    throw new GeoipError(
+      `geoip: could not resolve the ${proxy ? "proxy's" : "connection's"} region (${result.reason}). ` +
+        "Launching anyway would use this machine's clock and a default language. Fix the proxy, raise " +
+        "CLEARCOTE_GEOIP_TIMEOUT_SECONDS, or pass timezone and acceptLanguage explicitly.",
+    );
+  }
   if (geo.timezone && fp.timezone == null) fp.timezone = geo.timezone;
   if (geo.acceptLanguage && fp.acceptLanguage == null) fp.acceptLanguage = geo.acceptLanguage;
   if (geo.location && fp.location == null) fp.location = geo.location;
@@ -245,7 +295,7 @@ function ensureRunnableHere(exe: string): void {
  * site's authenticated download route. When it's absent — the free path — behaviour is unchanged.
  */
 export async function executablePath(
-  options: { executablePath?: string; version?: string; pro?: { licenseKey: string; licenseApiBase?: string } } & DownloadOptions = {}
+  options: { executablePath?: string; version?: string; releaseChannel?: string; pro?: { licenseKey: string; licenseApiBase?: string } } & DownloadOptions = {}
 ): Promise<string> {
   if (options.executablePath) {
     // Caller-supplied tree (often a browser bundled into a packaged app): we did not install it, so
@@ -266,6 +316,7 @@ export async function executablePath(
       apiBase: options.pro?.licenseApiBase,
       cacheDir: options.cacheDir,
       quiet: options.quiet,
+      releaseChannel: options.releaseChannel,
     });
   }
   if (options.pro) {
@@ -273,6 +324,7 @@ export async function executablePath(
       apiBase: options.pro.licenseApiBase,
       cacheDir: options.cacheDir,
       quiet: options.quiet,
+      releaseChannel: resolveReleaseChannel(options.releaseChannel),
     });
   }
   return ensureBinary({ cacheDir: options.cacheDir, quiet: options.quiet, autoUpdate: options.autoUpdate });
@@ -292,10 +344,10 @@ function proSelector(
  * versions need `licenseKey` / `CLEARCOTE_LICENSE_KEY`). Pin a PRO rebuild with "150.0.7871.114-r7"
  * (or bare "r7"). */
 export async function download(
-  options: DownloadOptions & { version?: string; licenseKey?: string; licenseApiBase?: string } = {},
+  options: DownloadOptions & { version?: string; licenseKey?: string; licenseApiBase?: string; releaseChannel?: string } = {},
 ): Promise<string> {
-  const { version, licenseKey, licenseApiBase, ...dl } = options;
-  return executablePath({ version, pro: proSelector(licenseKey, licenseApiBase), ...dl });
+  const { version, licenseKey, licenseApiBase, releaseChannel, ...dl } = options;
+  return executablePath({ version, releaseChannel, pro: proSelector(licenseKey, licenseApiBase), ...dl });
 }
 
 /** Headless: the geometry defaults are CONTEXT options and `chromium.launch()` takes none, so they
@@ -357,7 +409,8 @@ function assembleArgs(
   webrtcIp: unknown,
   userArgs: string[],
   proxyForQuic?: PwProxy,
-  socks5Udp?: boolean
+  socks5Udp?: boolean,
+  extra?: { exe?: string; headed?: boolean; quiet?: boolean; allowThirdPartyCookies?: boolean; transparentProxy?: boolean },
 ): string[] {
   // webBluetoothArgs: Linux hosts hide navigator.bluetooth while exposing usb/serial/hid, an
   // OS-origin tell on a Windows persona. No-op off Linux.
@@ -372,7 +425,13 @@ function assembleArgs(
   // de-Googled Chromium.
   if (disablePrivacySandbox === true) base.push(...privacySandboxArgs());
   base.push(...webrtcDefaultDenyArgs([...base, ...userArgs], webrtcIp));
-  return mergeFeatureFlags([...base, ...userArgs]);
+  if (extra) {
+    base.push(...engineExtrasArgs(extra, proxyForQuic, extra.quiet));
+    base.push(...gpuBlocklistArgs(!!extra.headed, process.platform, userArgs));
+  }
+  const merged = mergeFeatureFlags([...base, ...userArgs]);
+  // Last: drop 152 r22+ switches this engine does not implement (with a warning), wherever they came from.
+  return extra ? gateEngineSwitches(extra.exe, merged, extra.quiet).args : merged;
 }
 
 export function isWinLaunchRace(err: unknown): boolean {
@@ -585,6 +644,19 @@ function asBrowserLike(context: BrowserContext): Browser {
  * and no state survives to the next launch — the incognito-like isolation callers relied on is
  * preserved. Pass `userDataDir` to keep a profile, or `ephemeralProfile: false` to opt back out.
  */
+/**
+ * Start a browser; if it fails to start, release the lease before re-throwing. On a per-browser plan
+ * (the free tier) the slot would otherwise stay taken until the lease TTL. Exported for tests.
+ */
+export async function releaseLeaseOnFailure<T>(lease: LeaseSession | null, start: () => Promise<T>): Promise<T> {
+  try {
+    return await start();
+  } catch (e) {
+    try { await lease?.stop(); } catch { /* ignore: the original failure is what matters */ }
+    throw e;
+  }
+}
+
 export async function launch(options: LaunchOptions = {}): Promise<Browser> {
   // ephemeralProfile: false restores the pre-0.23 incognito launch. Kept because the persistent
   // path costs a directory create+delete per launch, which a caller spawning hundreds of
@@ -615,15 +687,15 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
     options.profile && !isAutoProfile
       ? { ...resolveProfileOptions(options.profile as string | Profile), ...options }
       : options;
-  const { profile: _profile, profileSelect: _profileSelect, extensions, portableProfile, shaderDialect, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, ...rest } = merged;
+  const { profile: _profile, profileSelect: _profileSelect, extensions, portableProfile, shaderDialect, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
-  if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy);
+  if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy, quiet);
   // The binary is resolved before the proxy route is chosen: http(s) credentials go to the
   // engine's --proxy-auth only when THIS engine implements it (r19+); older engines keep
   // Playwright's handling, which authenticates (routing blindly would leave every request at 407).
-  const exe = await executablePath({ executablePath: exeOption, version, autoUpdate, cacheDir, quiet, pro: proSelector(licenseKey, licenseApiBase) });  // capability-gated proxy route
+  const exe = await executablePath({ executablePath: exeOption, version, autoUpdate, cacheDir, quiet, releaseChannel, pro: proSelector(licenseKey, licenseApiBase) });  // capability-gated proxy route
   ensureRunnableHere(exe);
   // SOCKS5-with-credentials must go through --proxy-server (Playwright rejects it); drop it from PW.
   const { args: proxyArgs, proxy } = resolveProxy((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, engineSupportsSwitch(exe, "proxy-auth"));
@@ -639,7 +711,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   // machinery stays off, which is the whole reason this path survives strict scoring.
   // Resolved here, after `exe` is known, because both the engine's Chromium major and the host
   // GPU measurement depend on the binary that will actually run.
-  if (isAutoProfile) {
+  if (isAutoProfile && !isFingerprintPassthrough(fingerprint.fingerprint)) {
     await applyAutoProfile(fingerprint, exe, {
       quiet,
       licenseKey: resolveLicenseKey(licenseKey),
@@ -653,29 +725,31 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   // License (opt-in): check out a concurrency slot and inject CLEARCOTE_RUN_TOKEN so the PRO
   // engine gate lets the browser launch. Inert (null) in free mode / when no key is set.
   const lease = await acquireLease({
-    licenseKey, licenseApiBase, quiet, sdkVersion: SDK_VERSION,
+    licenseKey, licenseApiBase, quiet, sdkVersion: SDK_VERSION, licenseThroughProxy, proxy: proxyOpt as PwProxy | undefined,
     // resolved lazily on cold checkout only (never per launch); telemetry, never gates the lease
     engineVersion: () => resolvedEngineVersion(version, !!resolveLicenseKey(licenseKey)),
   });
   // On Linux, point FONTCONFIG_FILE at the bundled metric-compatible clones (Segoe UI, Arial, …).
   const launchEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (pwOptions as PlaywrightLaunchOptions).env));
   const runtimeEnv = lease ? withRunToken(lease.token, launchEnv) : launchEnv;
-  const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? [], proxyOpt as PwProxy | undefined, socks5Udp);
+  const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? [], proxyOpt as PwProxy | undefined, socks5Udp,
+    { exe, headed, quiet, allowThirdPartyCookies, transparentProxy });
   // Headless: screen.* has to be handled alongside the viewport or the window reports a geometry no
   // real browser can (see ./geometry.ts). Probe a copy — viewport/screen are context options, which
   // chromium.launch() does not take — and carry the result to newPage/newContext.
   const geom = headed
     ? null
     : applyHeadlessGeometry({ ...(pwOptions as Record<string, unknown>) }, fingerprint.fingerprint, engineArgs);
-  const browser = await winAvRetry((exePath) => chromium.launch({
-    // Drop Playwright's default --enable-automation so the engine's AutomationControlled feature
-    // stays off (it flips webdriver-adjacent tells). Caller can override via ignoreDefaultArgs.
-    ignoreDefaultArgs: ["--enable-automation"],
+  const browser = await releaseLeaseOnFailure(lease, () => winAvRetry((exePath) => chromium.launch({
+    // Drop Playwright's --enable-automation (keeps AutomationControlled off) and
+    // --enable-unsafe-swiftshader (see DEFAULT_IGNORED_ARGS; paired with --ignore-gpu-blocklist in
+    // assembleArgs). Caller can override via ignoreDefaultArgs.
+    ignoreDefaultArgs: [...DEFAULT_IGNORED_ARGS],
     ...(pwOptions as PlaywrightLaunchOptions),
     executablePath: exePath,
     ...(runtimeEnv ? { env: runtimeEnv } : {}),
     args: engineArgs,
-  }), exe);
+  }), exe));
   // Release the concurrency slot when the browser closes.
   if (lease) browser.on("disconnected", () => { void lease.stop(); });
   if (headed) installHeadedViewport(browser); // launch() takes no viewport option -> wrap newPage/newContext
@@ -693,12 +767,12 @@ export async function launchPersistentContext(
   options: PersistentContextOptions = {}
 ): Promise<BrowserContext> {
   const merged = options.profile ? { ...resolveProfileOptions(options.profile), ...options } : options;
-  const { profile: _profile, extensions, portableProfile, shaderDialect, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, version, licenseKey, licenseApiBase, ...rest } = merged;
+  const { profile: _profile, extensions, portableProfile, shaderDialect, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
-  if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy);
-  const exe = await executablePath({ executablePath: exeOption, version, autoUpdate, cacheDir, quiet, pro: proSelector(licenseKey, licenseApiBase) });  // capability-gated proxy route
+  if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy, quiet);
+  const exe = await executablePath({ executablePath: exeOption, version, autoUpdate, cacheDir, quiet, releaseChannel, pro: proSelector(licenseKey, licenseApiBase) });  // capability-gated proxy route
   ensureRunnableHere(exe);
   const { args: proxyArgs, proxy } = resolveProxy((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, engineSupportsSwitch(exe, "proxy-auth"));
   warnUnsupportedEngineOptions(exe, fingerprint as Record<string, unknown>, proxyOpt as PwProxy | undefined, quiet);
@@ -714,7 +788,7 @@ export async function launchPersistentContext(
   // Default the automation strip BEFORE the Widevine helper so it appends --disable-component-update
   // to ['--enable-automation'] rather than clobbering it (losing the strip). Caller's own wins.
   let ignoreDefaultArgs: string[] | boolean | undefined =
-    (opts.ignoreDefaultArgs as string[] | boolean | undefined) ?? ["--enable-automation"];
+    (opts.ignoreDefaultArgs as string[] | boolean | undefined) ?? [...DEFAULT_IGNORED_ARGS];
   let userArgs = args ?? [];
   if (widevine) {
     try {
@@ -736,25 +810,26 @@ export async function launchPersistentContext(
   // A license key selects the PRO (gated) binary; no key -> the free binary (unchanged path).
   // License (opt-in): check out a concurrency slot + inject CLEARCOTE_RUN_TOKEN. Inert in free mode.
   const lease = await acquireLease({
-    licenseKey, licenseApiBase, quiet, sdkVersion: SDK_VERSION,
+    licenseKey, licenseApiBase, quiet, sdkVersion: SDK_VERSION, licenseThroughProxy, proxy: proxyOpt as PwProxy | undefined,
     // resolved lazily on cold checkout only (never per launch); telemetry, never gates the lease
     engineVersion: () => resolvedEngineVersion(version, !!resolveLicenseKey(licenseKey)),
   });
   const ctxEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (opts as PlaywrightLaunchOptions).env));
   const runtimeEnv = lease ? withRunToken(lease.token, ctxEnv) : ctxEnv;
-  const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs, proxyOpt as PwProxy | undefined, socks5Udp);
+  const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs, proxyOpt as PwProxy | undefined, socks5Udp,
+    { exe, headed: opts.headless === false, quiet, allowThirdPartyCookies, transparentProxy });
   // headless: the persona owns screen when it is running, so only the window needs fitting; with no
   // persona the SDK overrides screen itself (see ./geometry.ts). Headed already set viewport: null.
   const geom = opts.headless === false
     ? null
     : applyHeadlessGeometry(opts as unknown as Record<string, unknown>, fingerprint.fingerprint, engineArgs);
-  const context = await winAvRetry((exePath) => chromium.launchPersistentContext(userDataDir, {
+  const context = await releaseLeaseOnFailure(lease, () => winAvRetry((exePath) => chromium.launchPersistentContext(userDataDir, {
     ...opts,
     ignoreDefaultArgs,  // keep AutomationControlled off (+ component updater on when widevine)
     executablePath: exePath,
     ...(runtimeEnv ? { env: runtimeEnv } : {}),
     args: engineArgs,
-  }), exe);
+  }), exe));
   if (lease) context.on("close", () => { void lease.stop(); });
   if (geom) await installWindowFixup(context, engineArgs, geom.mode === "persona");
   installHumanizeOnContext(context, { humanize, showCursor, seed: fingerprint.fingerprint }); // seed => stable motor persona
@@ -841,6 +916,10 @@ export class Server {
       return undefined;
     }
   }
+  /** OS process id of the browser, when running. */
+  get pid(): number | undefined {
+    return this.proc.pid;
+  }
   isAlive(): boolean {
     return this.proc.exitCode === null && !this.proc.killed;
   }
@@ -879,6 +958,11 @@ export class Server {
  * to the page; the port binds to loopback with an origin allowlist; attaching over CDP adds no
  * launch flags, so the served persona is preserved end to end.
  */
+/** serve() as root on Linux needs --no-sandbox (unless the caller already passed it). */
+export function serveNeedsNoSandbox(platform: string, uid: number | undefined, args: string[]): boolean {
+  return platform === "linux" && uid === 0 && !args.includes("--no-sandbox");
+}
+
 export async function serve(options: ServeOptions = {}): Promise<Server> {
   const {
     port,
@@ -898,13 +982,13 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
     : launchOpts;
   const {
     profile: _profile, extensions, portableProfile, shaderDialect, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption,
-    args: userArgs, geoip, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, ...rest
+    args: userArgs, geoip, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, ...rest
   } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined;
-  if (geoip) await applyGeoip(fingerprint, proxyOpt);
-  const exe = await executablePath({ executablePath: exeOption, version, autoUpdate, cacheDir, quiet, pro: proSelector(licenseKey, licenseApiBase) });  // capability-gated proxy route
+  if (geoip) await applyGeoip(fingerprint, proxyOpt, quiet);
+  const exe = await executablePath({ executablePath: exeOption, version, autoUpdate, cacheDir, quiet, releaseChannel, pro: proSelector(licenseKey, licenseApiBase) });  // capability-gated proxy route
   ensureRunnableHere(exe);
   const { args: proxyArgs } = resolveProxy(proxyOpt, engineSupportsSwitch(exe, "proxy-auth"));
   warnUnsupportedEngineOptions(exe, fingerprint as Record<string, unknown>, proxyOpt, quiet);
@@ -914,7 +998,10 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   // A license key selects the PRO (gated) binary; no key -> the free binary (unchanged path).
   const engineArgs = assembleArgs(
     fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)],
-    proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs ?? [], proxyOpt, socks5Udp);
+    proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs ?? [], proxyOpt, socks5Udp,
+    // serve launches the binary directly, so Playwright's SwiftShader default is never added; the
+    // blocklist rule still applies to a headed endpoint and on Windows.
+    { exe, headed: !headless, quiet, allowThirdPartyCookies, transparentProxy });
 
   const resolvedPort = port ?? (await freePort());
   const ownUdd = !uddOption;
@@ -928,10 +1015,13 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   ];
   if (headless) cdpArgs.push("--headless=new");
   if (proxyOpt?.server) cdpArgs.push(`--proxy-server=${proxyOpt.server}`);
+  // Chromium refuses to start as root without --no-sandbox, and serve spawns the binary itself, so
+  // Playwright's own --no-sandbox is missing: `clearcote serve` in a root container just timed out.
+  if (serveNeedsNoSandbox(process.platform, process.getuid?.(), engineArgs)) cdpArgs.push("--no-sandbox");
 
   // License (opt-in): check out a concurrency slot + inject CLEARCOTE_RUN_TOKEN. Inert in free mode.
   const lease = await acquireLease({
-    licenseKey, licenseApiBase, quiet, sdkVersion: SDK_VERSION,
+    licenseKey, licenseApiBase, quiet, sdkVersion: SDK_VERSION, licenseThroughProxy, proxy: proxyOpt,
     // resolved lazily on cold checkout only (never per launch); telemetry, never gates the lease
     engineVersion: () => resolvedEngineVersion(version, !!resolveLicenseKey(licenseKey)),
   });
@@ -939,7 +1029,7 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   // Launched DIRECTLY (no Playwright) => no --enable-automation => navigator.webdriver stays false.
   // Wrap in winAvRetry so a just-extracted binary survives the Windows SxS/AV first-launch race
   // ("spawn UNKNOWN"), same as launch(): warm + back off + retry, then recover from a fresh copy.
-  const proc = await winAvRetry(
+  const proc = await releaseLeaseOnFailure(lease, () => winAvRetry(
     (exePath) => new Promise<ChildProcess>((resolve, reject) => {
       let settled = false;
       const p = spawn(exePath, [...engineArgs, ...cdpArgs], { env, stdio: "ignore" });
@@ -947,7 +1037,7 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
       p.once("spawn", () => { if (!settled) { settled = true; resolve(p); } });
     }),
     exe,
-  );
+  ));
 
   const deadline = Date.now() + readyTimeoutMs;
   let ready = false;

@@ -20,7 +20,7 @@ def test_accept_language_has_no_q_weights():
         assert ";" not in accept_language_for_country(cc)
 
 
-def test_resolve_geo_socks_returns_none():
-    # SOCKS can't be used for the geo lookup and we must not fall back to the local IP
-    # under a proxy (wrong region) — returns None without any network call.
-    assert resolve_geo({"server": "socks5://127.0.0.1:9050"}, quiet=True) is None
+def test_resolve_geo_dead_socks_returns_none():
+    # The lookup now goes THROUGH a SOCKS proxy, and must never fall back to the local IP under a
+    # proxy (wrong region): a dead SOCKS proxy returns None within the budget.
+    assert resolve_geo({"server": "socks5://127.0.0.1:9"}, quiet=True, timeout=1.5) is None

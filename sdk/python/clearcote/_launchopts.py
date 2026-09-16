@@ -292,3 +292,95 @@ def resolve_proxy(proxy, engine_supports_proxy_auth=False):
         # http(s) it would turn on interception + cache-disable for the credentials we now own
         return args, None
     return [], proxy
+
+
+# -- GPU launch defaults ------------------------------------------------------------------------
+
+# Playwright launch defaults the SDK removes.
+#
+# ``--enable-automation`` keeps the engine's AutomationControlled feature off.
+# ``--enable-unsafe-swiftshader`` is added by Playwright (1.49+) to every Chromium launch; it lets
+# WebGL fall back to SwiftShader software rendering, which real Chrome no longer does for WebGL.
+# Stripping it on its own is NOT safe: measured on a GPU-less Linux host, a HEADED launch then has no
+# WebGL at all. It is only removed together with gpu_blocklist_args(), which restores WebGL through
+# the normal GPU path. A caller's own ``ignore_default_args`` always wins.
+DEFAULT_IGNORED_ARGS = ("--enable-automation", "--enable-unsafe-swiftshader")
+
+
+def gpu_blocklist_args(headed, platform=None, user_args=()):
+    """``--ignore-gpu-blocklist`` for headed launches and for every launch on Windows.
+
+    Headed on a host without a usable GPU (a VPS under Xvfb), Chromium's blocklist disables WebGL
+    outright once the SwiftShader fallback flag is gone; this flag lets WebGL run anyway. On Windows
+    the blocklist also refuses WebGPU on the Microsoft Basic Render Driver found on GPU-less VMs.
+    Headless Linux already renders WebGL through SwiftShader regardless (measured), so nothing is
+    added there. Not added when the caller already passes it."""
+    platform = sys.platform if platform is None else platform
+    if not headed and not str(platform).startswith("win"):
+        return []
+    if "--ignore-gpu-blocklist" in (user_args or ()):
+        return []
+    return ["--ignore-gpu-blocklist"]
+
+
+# -- new engine switches (152 r22+) -------------------------------------------------------------
+
+# Switches introduced in engine 152 r22, with what the caller asked for. Gated per binary.
+GATED_ENGINE_SWITCHES = {
+    "--fingerprint-passthrough": 'fingerprint="off" (pass-through debug mode)',
+    "--disable-fingerprint-voices": "fingerprint_voices=False",
+    "--allow-third-party-cookies": "allow_third_party_cookies=True",
+    "--transparent-proxy": "transparent_proxy=True",
+}
+
+
+def gate_engine_switches(exe, args, quiet=False):
+    """Drop any 152 r22+ switch the engine that will run does not implement, with a warning.
+
+    Chromium ignores unknown switches silently, so an older engine would launch without the feature
+    and without saying so. Detection is the same NUL-delimited literal probe as
+    :func:`engine_supports_switch`. Returns ``(args, warnings)``; the warnings are emitted through
+    :mod:`warnings` unless ``quiet``."""
+    out, notes = [], []
+    for a in args:
+        name = str(a).split("=", 1)[0]
+        what = GATED_ENGINE_SWITCHES.get(name)
+        if what is None or engine_supports_switch(exe, name[2:]):
+            out.append(a)
+            continue
+        notes.append(f"clearcote: {what} needs engine 152 r22 or newer; this engine ignores it, "
+                     "so it was not applied.")
+    if not quiet:
+        for n in notes:
+            warnings.warn(n, stacklevel=3)
+    return out, notes
+
+
+def engine_extras_args(allow_third_party_cookies=None, transparent_proxy=None, proxy=None, quiet=False):
+    """Launch switches for the non-fingerprint engine options.
+
+    ``allow_third_party_cookies=True`` allows third-party cookies as stock Chrome does (the
+    de-Googled base blocks them, breaking reCAPTCHA / SSO / payment challenge iframes).
+    ``transparent_proxy=True`` removes what an origin or page can observe about the proxy (the
+    ``Proxy-Connection`` header on plain-HTTP requests, and proxy-shaped DNS/connect/TLS timing); it
+    is only meaningful with a proxy, so without one it is dropped with a note."""
+    args = []
+    if allow_third_party_cookies is True:
+        args.append("--allow-third-party-cookies")
+    if transparent_proxy is True:
+        server = (proxy or {}).get("server") if isinstance(proxy, dict) else proxy
+        if server:
+            args.append("--transparent-proxy")
+        elif not quiet:
+            warnings.warn("clearcote: transparentProxy has no effect without a proxy; ignored.",
+                          stacklevel=3)
+    return args
+
+
+def serve_needs_no_sandbox(platform=None, uid=None, args=()):
+    """serve() as root on Linux needs --no-sandbox (unless the caller already passed it).
+
+    Chromium refuses to start as root without it, and serve spawns the binary itself, so
+    Playwright's own --no-sandbox is missing: ``clearcote serve`` in a root container just timed out."""
+    platform = sys.platform if platform is None else platform
+    return str(platform).startswith("linux") and uid == 0 and "--no-sandbox" not in (args or ())
