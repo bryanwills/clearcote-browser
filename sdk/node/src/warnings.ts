@@ -117,6 +117,17 @@ export function coherenceWarnings(
   return out;
 }
 
+/** Engine-behaviour advisories: true for every launch, so they live here rather than in
+ *  coherenceWarnings() (whose contract is "a coherent default is silent"). Fire once per process. */
+const ENGINE_NOTES: ReadonlyArray<readonly [string, string]> = [
+  ["cdp-console-events",
+    "the engine does not forward console or page-error events to automation clients: " +
+    "page.on('console') and page.on('pageerror') receive nothing, by design, as part of the " +
+    "protection against automation-presence probes. In-page window.onerror and " +
+    "unhandledrejection handlers fire normally. To capture console output, collect it in-page " +
+    "and read it back with page.evaluate()."],
+];
+
 /** Print coherence warnings to stderr unless quiet or CLEARCOTE_NO_WARN. NOTE lines fire once/process. */
 export function emitCoherenceWarnings(
   opts: Record<string, unknown>,
@@ -131,5 +142,10 @@ export function emitCoherenceWarnings(
       seenNotes.add(w.code);
     }
     process.stderr.write(`clearcote: ${w.severity === "warn" ? "warning" : "note"}: ${w.message}\n`);
+  }
+  for (const [code, message] of ENGINE_NOTES) {
+    if (seenNotes.has(code)) continue;
+    seenNotes.add(code);
+    process.stderr.write(`clearcote: note: ${message}\n`);
   }
 }

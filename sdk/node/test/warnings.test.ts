@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { coherenceWarnings } from "../src/warnings.js";
+import { describe, it, expect, vi } from "vitest";
+import { coherenceWarnings, emitCoherenceWarnings } from "../src/warnings.js";
 
 const codes = (o: Record<string, unknown>, host = "win32", build = "149") =>
   new Set(coherenceWarnings(o, host, build).map((w) => w.code));
@@ -55,5 +55,26 @@ describe("coherenceWarnings", () => {
     expect(codes({ _userArgs: ["--enable-automation"], headless: false }).has("automation-arg")).toBe(true);
     expect(codes({ _userArgs: ["--remote-debugging-port=9222"], headless: false }).has("automation-arg")).toBe(true);
     expect(codes({ _userArgs: ["--no-sandbox"], headless: false }).has("automation-arg")).toBe(false);
+  });
+
+  it("emits engine-behaviour notes once per process from the emitter, never from coherenceWarnings", () => {
+    // The coherent default is asserted silent above, so the console-events note must come from
+    // emitCoherenceWarnings() only, and fire a single time across repeated launches.
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    }) as never);
+    const prev = process.env.CLEARCOTE_NO_WARN;
+    delete process.env.CLEARCOTE_NO_WARN;
+    try {
+      const opts = { platform: "windows", fingerprint: "s", headless: false };
+      emitCoherenceWarnings(opts, false, "win32", "149");
+      emitCoherenceWarnings(opts, false, "win32", "149");
+      expect(writes.filter((w) => w.includes("page.on('console')")).length).toBe(1);
+    } finally {
+      spy.mockRestore();
+      if (prev !== undefined) process.env.CLEARCOTE_NO_WARN = prev;
+    }
   });
 });

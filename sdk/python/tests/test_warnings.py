@@ -80,9 +80,12 @@ def _codes(opts):
 def test_narrow_gpu_and_canvas_switch_warnings():
     """The r12 halves each carry their own advice, and neither contradicts the other.
 
-    The subtle one is the LAST assertion: gpu-noise used to say "pair with fingerprint_noise=
-    False" unconditionally, which told an operator who had ALREADY set canvas_noise=False to go
-    and turn off more. It must stand down once the relevant noise is off.
+    History matters here. gpu-noise once said "pair with fingerprint_noise=False"; it was then
+    softened to accept canvas_noise=False as sufficient under disable_gpu_fingerprint; and on
+    2026-09-15 measurement showed the softening was wrong. Under dgf the WebGL readPixels farble
+    stands down but a WebGL canvas's toDataURL/toBlob farble does not (it keys on fingerprint_noise,
+    not canvas_noise), so canvas_noise=False leaves two reads of one buffer disagreeing. gpu-noise
+    must therefore keep firing under dgf until fingerprint_noise itself is off.
     """
     # The narrow GPU switch leaves readPixels noised, so its advice differs from the wide flag's.
     c = _codes({"gpu_string_spoof": False})
@@ -90,11 +93,28 @@ def test_narrow_gpu_and_canvas_switch_warnings():
     assert "gpu-noise" not in c          # the wide flag's warning must not double-fire
     assert "gpu-string-only" in c        # names the WebGL-vs-WebGPU split the narrow switch opens
 
-    # canvas_noise=False must surface the toBlob gap, which neither switch gates.
+    # canvas_noise=False must surface the toBlob note (a switch gap on engines before 152 r21).
     assert "canvas-noise-toblob" in _codes({"canvas_noise": False})
 
     # Already-correct configurations must not be nagged.
     assert "gpu-noise-string" not in _codes({"gpu_string_spoof": False, "fingerprint_noise": False})
-    assert "gpu-noise" not in _codes({"disable_gpu_fingerprint": True, "canvas_noise": False})
+    # canvas_noise=False is NOT enough under dgf: the WebGL export stays farbled, so keep warning.
+    assert "gpu-noise" in _codes({"disable_gpu_fingerprint": True, "canvas_noise": False})
     # ...but the wide flag on its own still warns, exactly as before.
     assert "gpu-noise" in _codes({"disable_gpu_fingerprint": True})
+
+
+def test_engine_notes_fire_once_via_emitter(capsys, monkeypatch):
+    """Engine-behaviour notes are NOT coherence findings: coherence_warnings() must stay silent for
+    a coherent default (asserted above), so they are emitted by emit_coherence_warnings() instead -
+    once per process, and honouring quiet like every other note."""
+    from clearcote import _warnings
+    monkeypatch.setattr(_warnings, "_seen_notes", set())
+    monkeypatch.delenv("CLEARCOTE_NO_WARN", raising=False)
+    opts = {"platform": "windows", "fingerprint": "s", "headless": False}
+    _warnings.emit_coherence_warnings(opts, host_platform="win32", build_major="149")
+    _warnings.emit_coherence_warnings(opts, host_platform="win32", build_major="149")
+    assert capsys.readouterr().err.count("page.on('console')") == 1   # once per process, not per launch
+    monkeypatch.setattr(_warnings, "_seen_notes", set())
+    _warnings.emit_coherence_warnings(opts, quiet=True, host_platform="win32", build_major="149")
+    assert "page.on('console')" not in capsys.readouterr().err

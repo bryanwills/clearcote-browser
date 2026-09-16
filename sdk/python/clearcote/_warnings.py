@@ -133,12 +133,16 @@ def coherence_warnings(opts, host_platform=None, build_major=None):
     # noise behind, so the advice differs. Fire neither once the operator has already turned the
     # relevant noise off, or the warning contradicts the setting they just made.
     noise_off = noise is False
-    if dgf and not noise_off and canvas_noise is not False:
+    # canvas_noise=False is NOT an escape hatch here: under disable_gpu_fingerprint the WebGL
+    # readPixels farble stands down but a WebGL canvas's toDataURL/toBlob farble does not (it keys
+    # on fingerprint_noise, not canvas_noise), so two reads of one buffer disagree. Measured 2026-09-15.
+    if dgf and not noise_off:
         warn("gpu-noise",
              "disable_gpu_fingerprint presents the REAL GPU, but per-eTLD farble still perturbs the "
-             "canvas 2D readback - noise on otherwise-real pixels is itself a tell. This mode "
-             "already skips the WebGL readPixels farble, so canvas_noise=False is the exact fix "
-             "(fingerprint_noise=False also works, and turns off more than is needed here).")
+             "canvas readbacks - noise on otherwise-real pixels is itself a tell. On a WebGL canvas "
+             "this mode stands down the readPixels farble but not the toDataURL/toBlob farble, so "
+             "two reads of one drawing buffer disagree. fingerprint_noise=False is the fix; "
+             "canvas_noise=False silences only the 2D canvas and leaves the WebGL export noised.")
     elif gpu_string_spoof is False and not dgf and not noise_off:
         warn("gpu-noise-string",
              "gpu_string_spoof=False reports the REAL WebGL vendor/renderer, but per-eTLD farble "
@@ -156,11 +160,11 @@ def coherence_warnings(opts, host_platform=None, build_major=None):
              "disable_gpu_fingerprint=True to take the whole GPU surface real together.")
     if canvas_noise is False:
         note("canvas-noise-toblob",
-             "canvas_noise=False silences canvas 2D getImageData and toDataURL, but NOT "
-             "canvas.toBlob() / OffscreenCanvas.convertToBlob() - that encode path carries its own "
-             "farble which neither canvas_noise nor fingerprint_noise gates (a pre-existing engine "
-             "gap, not a regression). A page that decodes the blob and diffs it against toDataURL "
-             "can see the disagreement, so avoid canvas_noise=False where toBlob is scored.")
+             "canvas_noise=False silences canvas 2D getImageData and toDataURL. On engines before "
+             "152 r21, canvas.toBlob() / OffscreenCanvas.convertToBlob() were not covered by any "
+             "noise switch and could disagree with toDataURL - avoid canvas_noise=False there where "
+             "toBlob is scored. From 152 r21 the switch covers the blob exits too and all three "
+             "agree byte-for-byte.")
     if headless is not False and not bridge_on and not dgf and not profile:
         note("headless-render",
              "headless with no canvas_bridge/disable_gpu_fingerprint/fingerprint_profile - canvas and "
@@ -181,6 +185,19 @@ def coherence_warnings(opts, host_platform=None, build_major=None):
     return out
 
 
+# Engine-behaviour advisories. These are not a property of the options - they hold for every
+# launch - so they do NOT belong in coherence_warnings(), whose contract is "a coherent default is
+# silent". They are emitted here instead, once per process, under the same quiet/CLEARCOTE_NO_WARN.
+_ENGINE_NOTES = (
+    ("cdp-console-events",
+     "the engine does not forward console or page-error events to automation clients: "
+     "page.on('console') and page.on('pageerror') receive nothing, by design, as part of the "
+     "protection against automation-presence probes. In-page window.onerror and "
+     "unhandledrejection handlers fire normally. To capture console output, collect it in-page "
+     "and read it back with page.evaluate()."),
+)
+
+
 def emit_coherence_warnings(opts, quiet=False, host_platform=None, build_major=None):
     """Print coherence warnings to stderr (unless quiet=True or CLEARCOTE_NO_WARN is set).
     NOTE-level lines fire at most once per process; WARN-level fire every launch."""
@@ -193,3 +210,8 @@ def emit_coherence_warnings(opts, quiet=False, host_platform=None, build_major=N
             _seen_notes.add(w["code"])
         label = "warning" if w["severity"] == "warn" else "note"
         print("clearcote: %s: %s" % (label, w["message"]), file=sys.stderr, flush=True)
+    for code, message in _ENGINE_NOTES:
+        if code in _seen_notes:
+            continue
+        _seen_notes.add(code)
+        print("clearcote: note: %s" % message, file=sys.stderr, flush=True)
