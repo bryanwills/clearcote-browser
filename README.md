@@ -31,6 +31,8 @@
 
 <sub><i>Meet <b>Clyde</b> — chameleons blend in to stay unseen. So does your browser.</i> · 💬 <a href="https://discord.gg/WxvCjAnXZm"><b>Join us on Discord</b></a></sub>
 
+**🆕 The latest build is now free with GitHub for one browser at a time** — newest Chromium, recorded human motion and the private stealth patches. **[Get it free →](https://clearcotelabs.com/pricing#free)**
+
 </div>
 
 <table>
@@ -72,7 +74,7 @@ One real Chromium keeps the JS identity, the **UA / UA-CH** headers, and the **T
 [What it is](#what-it-is) · [Quick start](#quick-start) · [Why patch the engine](#why-patch-the-engine-not-the-page) ·
 [vs. the others](#why-clearcote-instead-of-the-others) · [Persona options](#configure-the-persona--what-you-control) ·
 [AI agents](#drive-a-page-with-an-ai-agent) · [Verify](#proof--verify) · [Build](#build-from-source) ·
-[Pro](#clearcote-pro--49month) · [Reference](#reference)
+[Free with GitHub & Pro](#free-with-github-and-pro) · [Reference](#reference)
 
 ---
 
@@ -323,39 +325,45 @@ cd clearcote-browser && WORK=~/clearcote-build ./build.sh
 
 - **[docs/BUILDING.md](docs/BUILDING.md)** — full build-from-source guide · **[patches/](patches/)** — the 32 diffs · **[docs/PATCHES.md](docs/PATCHES.md)** — what each one does.
 
-## Clearcote Pro — $49/month
+## Free with GitHub, and Pro
 
-Clearcote is free and open source, and the free build always will be — **fully functional, and reproducible from source.** Pro is simply how you support the project and get a maintained build.
+Clearcote is free and open source, and the open build always will be — **fully functional, reproducible from source, no account.** Beyond it there is one licensed build, and two ways to run it:
 
-Let me be blunt about what you're paying for. Keeping a Chromium fork current — tracking upstream, porting the anti-detection patches to every new Chromium version, testing, and building for Windows and Linux — is a lot of ongoing work, mostly mine. **$49/month funds that work.** In return you get:
+| | **Open source** | **Free with GitHub** | **Pro — $49/month** |
+|---|---|---|---|
+| Account | None | GitHub account, at least 30 days old | Clearcote account |
+| Build | Open, reproducible | Latest licensed build | Latest licensed build |
+| New Chromium majors | ~2 months after release | The day they ship | The day they ship |
+| Recorded human motion, private stealth patches, profile library | — | ✅ | ✅ |
+| Older builds and version pinning | Open builds | ✅ | ✅ |
+| Browsers at once | Unlimited | **1** | Unlimited during the beta |
+| Support | GitHub issues | GitHub issues | Email from the owner |
 
-- **Latest builds first.** When a new Chromium major (e.g. 150) is built, it goes to Pro users immediately. The free build gets that major **later — roughly 2 months after release.** It's an incentive to support the project, not a crippled free tier: when a major lands for free, it's the same fully open, reproducible build.
-- **A maintained, always-current build** — the latest Chromium and the newest anti-detection patches, kept up to date for you (no manual rebuilds).
-- **Stealth work I keep private** so it isn't trivially copied. This means the **Pro binary is *not* reproducible from public source** — unlike the free build, which is, and stays that way. Concretely, on 150 those are: real recorded human mouse trajectories (free uses synthetic bézier paths), coalesced pointer samples, a coherent WebRTC server-reflexive candidate, host-candidate concealment, and request-header hygiene on revalidation.
-- **Unlimited concurrent instances.**
-- **Direct email support from me, the owner.** You email, I answer.
+**Free with GitHub:** sign in at [clearcotelabs.com](https://clearcotelabs.com/pricing#free) with GitHub, open **Licenses** in the dashboard and click **Get it free**. The key lasts 30 days and renews for free. It counts every browser, so a second one waits until the first closes, and it needs **SDK 0.29.0 or newer** (`pip install -U clearcote`, `npm i clearcote@latest`, or the latest NuGet package).
 
-**What Pro is not:** it does not unlock more spoofing. The whole identity surface — personas, canvas/WebGL/audio farbling, all 18 native metadata overrides, `light_stealth`, TLS profiles, humanized input — is in the free build, in full. Pro adds behavioural realism that needs recorded data, plus earlier access to new Chromium majors. The per-feature table lives in the SDK READMEs ([Node](sdk/node/README.md#whats-in-each-tier) / [Python](sdk/python/README.md#whats-in-each-tier)), generated from `site/lib/tiers.ts`.
+**Pro** is for running many browsers at once, and it funds the work. Let me be blunt about that work: keeping a Chromium fork current — tracking upstream, porting the anti-detection patches to every new Chromium version, testing, and building for Windows and Linux — is a lot of ongoing effort, mostly mine. You also get **direct email support from me, the owner.**
 
-No lock-in, no dark patterns. The free build is not crippled to sell you Pro — it just gets the newest Chromium major on a delay. Pro is a maintained build shipped first, a handful of patches I don't publish, and a direct line to the person who makes it.
+**What the licensed build is:** stealth work I keep private so it isn't trivially copied, which means the licensed binary is ***not* reproducible from public source** — unlike the open build, which is, and stays that way. Concretely: real recorded human mouse trajectories (the open build uses synthetic bézier paths), coalesced pointer samples, a coherent WebRTC server-reflexive candidate, host-candidate concealment, and request-header hygiene on revalidation.
 
-**→ Get Pro at [clearcotelabs.com/pricing](https://clearcotelabs.com/pricing)**
+**What it is not:** it does not unlock more spoofing. The whole identity surface — personas, canvas/WebGL/audio farbling, all 18 native metadata overrides, `light_stealth`, TLS profiles, humanized input — is in the open build, in full. The per-feature table lives in the SDK READMEs ([Node](sdk/node/README.md#whats-in-each-tier) / [Python](sdk/python/README.md#whats-in-each-tier)), mirroring `site/lib/tiers.ts`.
+
+**→ [Get it free with GitHub](https://clearcotelabs.com/pricing#free) · [Get Pro](https://clearcotelabs.com/pricing)**
 
 ## Build availability
 
 Which Chromium majors are shipped or in progress, and when each tier gets them:
 
-| Chromium | Status | Pro | Free |
+| Chromium | Status | Free with GitHub & Pro | Open source |
 |---|---|---|---|
 | **152** (`152.0.7977.82`) | ✅ Available | ✅ **Available now** | ~Nov 2026 |
 | **151** (`151.0.7922.108`) | ✅ Available | ✅ Available | ~Oct 2026 |
 | **150** (`150.0.7871.114`) | ✅ Available | ✅ Available | ~Sep 2026 |
 | **149** (`149.0.7827.114`) | ✅ Available | ✅ Available | ✅ **Available now** |
 
-*A new major reaches Pro the day it's built; the free build gets that same fully open, reproducible
-major roughly two months later — the free dates above are estimates on that cadence, not promises.
-Pick one with the SDK — `launch(version="152", license_key=...)` for
-Pro, `version="149"` for free — or omit it for the latest of your tier. Earlier Pro majors stay
+*A new major reaches the licensed build (Free with GitHub and Pro) the day it's built; the open build gets
+that same fully open, reproducible major roughly two months later — the open-build dates above are estimates
+on that cadence, not promises. Pick one with the SDK — `launch(version="152", license_key=...)` with a key,
+`version="149"` without — or omit it for the latest your key allows. Earlier Pro majors stay
 selectable. Requires SDK ≥ 0.16.0.*
 
 ## Reference

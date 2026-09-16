@@ -480,25 +480,28 @@ contacts the license backend).
 <!-- The rows below mirror site/lib/tiers.ts, which is the single source of truth for the
      free/PRO split. If you change one, change the other (and the sibling SDK README). -->
 
-The identity surface is **free in full**. PRO does not unlock "more spoofing" — every fingerprint
-control below is in the free build. What PRO adds is behavioural realism that needs recorded data
-or engine work held out of the public tree, plus the licensing itself.
+The identity surface is **free in full**. A licence does not unlock "more spoofing" — every fingerprint
+control below is in the open build. The licensed build adds behavioural realism that needs recorded
+data or engine work held out of the public tree. **It is free with GitHub for one browser at a time**
+(sign in at [clearcotelabs.com](https://clearcotelabs.com/pricing#free), needs SDK 0.29.0+); **PRO**
+runs as many browsers at once as you need and adds email support.
 
-| Capability | Free | PRO |
-|---|:---:|:---:|
-| Seeded personas (`fingerprint`), per-site farbling | ✅ | ✅ |
-| Canvas / WebGL / audio / font identity controls | ✅ | ✅ |
-| All 18 metadata overrides (`screenWidth`, `deviceMemory`, `gpuVendor`, …) | ✅ | ✅ |
-| `light_stealth` preset | ✅ | ✅ |
-| TLS ClientHello profile (`tlsProfile`) | ✅ | ✅ |
-| Proxy + `geoip` locale/timezone coherence | ✅ | ✅ |
-| Humanized input (`humanize`) — synthetic bézier paths | ✅ | ✅ |
-| **Humanized input — real recorded human trajectories** | — | ✅ |
-| **Coalesced pointer samples** (`getCoalescedEvents` realism) | — | ✅ |
-| **Coherent WebRTC srflx fabrication** (`webrtcIp`) | — | ✅ |
-| **WebRTC host-candidate concealment** (`.local` names) | — | ✅ |
-| **Request-header hygiene** on revalidation | — | ✅ |
-| Floating-concurrency licensing + run-token gate | — | ✅ |
+| Capability | Open source | Free with GitHub | PRO |
+|---|:---:|:---:|:---:|
+| Seeded personas (`fingerprint`), per-site farbling | ✅ | ✅ | ✅ |
+| Canvas / WebGL / audio / font identity controls | ✅ | ✅ | ✅ |
+| All 18 metadata overrides (`screenWidth`, `deviceMemory`, `gpuVendor`, …) | ✅ | ✅ | ✅ |
+| `light_stealth` preset | ✅ | ✅ | ✅ |
+| TLS ClientHello profile (`tlsProfile`) | ✅ | ✅ | ✅ |
+| Proxy + `geoip` locale/timezone coherence | ✅ | ✅ | ✅ |
+| Humanized input (`humanize`) — synthetic bézier paths | ✅ | ✅ | ✅ |
+| **Humanized input — real recorded human trajectories** | — | ✅ | ✅ |
+| **Coalesced pointer samples** (`getCoalescedEvents` realism) | — | ✅ | ✅ |
+| **Coherent WebRTC srflx fabrication** (`webrtcIp`) | — | ✅ | ✅ |
+| **WebRTC host-candidate concealment** (`.local` names) | — | ✅ | ✅ |
+| **Request-header hygiene** on revalidation | — | ✅ | ✅ |
+| Floating-concurrency licensing + run-token gate | — | 1 browser | ✅ unlimited |
+| Email support from the owner | — | — | ✅ |
 
 The mouse tier is decided **at runtime** from a signed claim in the run-token — same SDK call,
 same `humanize: true`. With a valid PRO lease the motion comes from recorded human trajectories;
