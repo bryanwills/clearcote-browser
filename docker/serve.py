@@ -15,7 +15,9 @@ Modern Chrome binds the DevTools endpoint to 127.0.0.1 only (a security restrict
 --remote-debugging-address is ignored), so we run a tiny socat TCP proxy to publish it.
 """
 import os
+import signal
 import subprocess
+import sys
 import time
 from clearcote import executable_path
 from clearcote._fingerprint import fingerprint_args
@@ -170,11 +172,14 @@ if env.get("CLEARCOTE_SHADER_DIALECT"):
 
 # A PRO engine refuses to launch without a run token: the licence gate reads CLEARCOTE_RUN_TOKEN
 # once at startup and exits if it is missing or invalid. The SDK's own launch() mints one, but this
-# entrypoint exec's chrome directly, so check a lease out here and inject it.
+# entrypoint starts chrome itself, so check a lease out here and inject it.
 #
-# execvpe REPLACES this process, so the heartbeat thread and the atexit check-in do not survive.
-# That is fine: the gate only reads the token at startup, and the lease expires on its own TTL. On
-# a concurrency-limited plan it means the slot is held until that TTL rather than released at exit.
+# The lease has to live as long as the browser does. Chrome runs as a CHILD of this process (not
+# exec'd over it), so the lease's heartbeat keeps the slot while the browser runs and the slot is
+# released when it stops. Exec'ing chrome killed the heartbeat: the lease quietly expired a few
+# minutes after start while the browser kept running — on the free plan that let a second
+# container start alongside the first — and a stopped container kept its slot until the TTL.
+_lease = None
 if _license:
     try:
         from clearcote._license import acquire_lease
@@ -193,4 +198,38 @@ if _license:
         raise SystemExit(1)
 
 print(f"[clearcote] CDP endpoint on 0.0.0.0:{port} (proxy -> chrome 127.0.0.1:{internal}) | persona={opts}", flush=True)
-os.execvpe(cmd[0], cmd, env)
+
+chrome = subprocess.Popen(cmd, env=env)
+
+
+def _forward(signum, _frame):
+    # `docker stop` sends SIGTERM to this process (PID 1): pass it on so chrome shuts down cleanly,
+    # then fall through to the lease release below once it has exited.
+    try:
+        chrome.send_signal(signum)
+    except Exception:  # noqa: BLE001 -- chrome may already be gone
+        pass
+
+
+for _sig in (signal.SIGTERM, signal.SIGINT):
+    signal.signal(_sig, _forward)
+
+code = chrome.wait()
+
+
+def _release_lease():
+    if _lease is None:
+        return
+    try:
+        stop = getattr(_lease, "stop")
+        try:
+            stop(wait=True)  # a per-browser lease: check the slot in before exiting
+        except TypeError:
+            stop()  # a machine-shared lease: the SDK's exit hook checks it in
+        print("[clearcote] licence lease released", flush=True)
+    except Exception as exc:  # noqa: BLE001 -- best-effort; the lease TTL reclaims it
+        print("[clearcote] lease release failed (%r); the slot frees on its own shortly." % exc, flush=True)
+
+
+_release_lease()
+sys.exit(code if code >= 0 else 128 - code)
