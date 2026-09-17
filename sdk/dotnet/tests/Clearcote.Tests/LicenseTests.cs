@@ -26,6 +26,22 @@ public class LicenseTests
         Assert.Equal(a, File.ReadAllText(Path.Combine(home, ".clearcote", "instance_id")).Trim());
     }
 
+    // ── WithRunToken: token env always, file env only when a file is given ────
+    [Fact]
+    public void WithRunToken_sets_the_token_and_optional_file_env()
+    {
+        var baseEnv = new Dictionary<string, string> { ["KEEP"] = "1" };
+
+        var noFile = License.WithRunToken("tok-abc", baseEnv);
+        Assert.Equal("1", noFile["KEEP"]);
+        Assert.Equal("tok-abc", noFile["CLEARCOTE_RUN_TOKEN"]);
+        Assert.False(noFile.ContainsKey("CLEARCOTE_RUN_TOKEN_FILE")); // additive: absent unless requested
+
+        var withFile = License.WithRunToken("tok-abc", baseEnv, "/tmp/clearcote-rt-x.tok");
+        Assert.Equal("tok-abc", withFile["CLEARCOTE_RUN_TOKEN"]);
+        Assert.Equal("/tmp/clearcote-rt-x.tok", withFile["CLEARCOTE_RUN_TOKEN_FILE"]);
+    }
+
     // ── resolveLicenseKey: explicit > env > file ──────────────────────────────
     [Fact]
     public void ResolveLicenseKey_prefers_explicit_and_trims()

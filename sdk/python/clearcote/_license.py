@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -204,6 +205,71 @@ def _raise_for_status(status: int, body: dict):
 
 
 # ---------------------------------------------------------------------------
+# Run-token files (engine online-enforcement opt-in)
+# ---------------------------------------------------------------------------
+
+class _TokenFileSet:
+    """Mirror a lease's rotating run-token into one file per launch (CLEARCOTE_RUN_TOKEN_FILE).
+
+    A supporting engine (152 r23+) re-reads the run-token from this file and stops a running FREE
+    browser once the token stops advancing (the SDK can only advance it by heartbeating, which the
+    backend gates). This mirrors a lease's rotating token into one file per launch and removes it on
+    close. Older engines ignore the file (they read CLEARCOTE_RUN_TOKEN once at launch), so it is
+    purely additive — nothing breaks if the engine does not support it. Every write is best-effort:
+    a failure is non-fatal because the launch still carries CLEARCOTE_RUN_TOKEN.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._paths: set[str] = set()
+
+    def bind(self, current: str):
+        """Create a token file seeded with ``current``; returns ``(path, release)``. The file is kept
+        updated by :meth:`update` until ``release()`` removes it."""
+        path = os.path.join(tempfile.gettempdir(), f"clearcote-rt-{uuid.uuid4()}.tok")
+        self._write_one(path, current)
+        with self._lock:
+            self._paths.add(path)
+
+        def release() -> None:
+            with self._lock:
+                self._paths.discard(path)
+            try:
+                os.remove(path)
+            except OSError:
+                pass  # already gone
+
+        return path, release
+
+    def update(self, token: str) -> None:
+        """Rewrite every live file with the freshly-rotated token."""
+        with self._lock:
+            paths = list(self._paths)
+        for p in paths:
+            self._write_one(p, token)
+
+    def close_all(self) -> None:
+        """Remove every file (lease shutdown)."""
+        with self._lock:
+            paths = list(self._paths)
+            self._paths.clear()
+        for p in paths:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _write_one(path: str, token: str) -> None:
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(token)
+        except OSError:
+            pass  # the launch still has CLEARCOTE_RUN_TOKEN
+
+
+# ---------------------------------------------------------------------------
 # Process-shared, per-machine lease
 # ---------------------------------------------------------------------------
 
@@ -234,7 +300,9 @@ class _MachineLease:
         self._engine_resolved: str | None = None
         self._quiet = quiet
         self._lock = threading.RLock()
-        self.token: str | None = None
+        self._token: str | None = None
+        # Follows this lease's rotating token into one file per launch (CLEARCOTE_RUN_TOKEN_FILE).
+        self._token_files = _TokenFileSet()
         self.exp: float = 0.0
         self.lease_id: str | None = None
         self._hb_sec = 270
@@ -246,6 +314,23 @@ class _MachineLease:
         self.scope = "machine"
         self._pending_browser = None     # (checkout body, launch_id) made by ensure() for one launch
         self._browsers: set = set()      # live _BrowserLease objects, released at exit if still open
+
+    @property
+    def token(self) -> str | None:
+        return self._token
+
+    @token.setter
+    def token(self, v: str | None) -> None:
+        self._token = v
+        if v:
+            self._token_files.update(v)  # rotation follows the lease's token automatically
+
+    def bind_launch(self):
+        """Bind a per-launch run-token file that follows this lease's rotating token. Returns
+        ``(file_path, release)``; call ``release()`` when the browser closes. A supporting engine
+        (r23+) re-reads it so revoke/check-in/over-limit stops a running free browser; older engines
+        ignore it."""
+        return self._token_files.bind(self._token or "")
 
     def _send(self, url: str, body: dict):
         """POST a lease call: through the launch proxy when license_through_proxy is on, else the
@@ -409,6 +494,7 @@ class _MachineLease:
 
     def shutdown(self) -> None:
         """Stop the heartbeat and release the slot once, at process exit."""
+        self._token_files.close_all()  # remove any launch token files still bound
         # Per-browser leases still open at exit (a browser nobody closed): release their slots now.
         with self._lock:
             open_browsers = list(self._browsers)
@@ -435,6 +521,11 @@ class _LeaseHandle:
     def token(self) -> str | None:
         return self._ml.token
 
+    def bind_launch(self):
+        """Bind a per-launch run-token file that follows the shared machine lease's rotating token.
+        Returns ``(file_path, release)``."""
+        return self._ml.bind_launch()
+
     def stop(self) -> None:
         self._ml.release()
 
@@ -450,12 +541,28 @@ class _BrowserLease:
         self._owner = owner
         self._launch_id = launch_id
         self._lock = threading.Lock()
-        self.token: str = body["token"]
+        # Follows this browser's rotating token into one file per launch (CLEARCOTE_RUN_TOKEN_FILE).
+        self._token_files = _TokenFileSet()
+        self._token: str = body["token"]
         self.lease_id: str = body["lease_id"]
         self._stopped = threading.Event()
         interval = max(5, int(body.get("heartbeat_interval_sec") or 120))
         self._thread = threading.Thread(target=self._loop, args=(interval,), daemon=True)
         self._thread.start()
+
+    @property
+    def token(self) -> str:
+        return self._token
+
+    @token.setter
+    def token(self, v: str) -> None:
+        self._token = v
+        self._token_files.update(v)  # rotation follows the browser's token automatically
+
+    def bind_launch(self):
+        """Bind a per-launch run-token file that follows this browser's rotating token. Returns
+        ``(file_path, release)``."""
+        return self._token_files.bind(self._token)
 
     def _loop(self, interval: int) -> None:
         while not self._stopped.wait(interval):
@@ -486,6 +593,7 @@ class _BrowserLease:
                 return
             self._stopped.set()
             lease_id = self.lease_id
+        self._token_files.close_all()  # remove any launch token files still bound to this browser
         self._owner._forget_browser(self)
 
         def checkin():
@@ -559,10 +667,16 @@ def acquire_lease(license_key: str | None = None, api_base: str | None = None,
     return ml.acquire()  # network/checkout happens here, outside the registry lock
 
 
-def inject_run_token(pw_kwargs: dict, token: str) -> None:
-    """Merge CLEARCOTE_RUN_TOKEN into pw_kwargs['env'] (base defaults to os.environ)."""
+def inject_run_token(pw_kwargs: dict, token: str, token_file: str | None = None) -> None:
+    """Merge CLEARCOTE_RUN_TOKEN into pw_kwargs['env'] (base defaults to os.environ).
+
+    When ``token_file`` is given, also set CLEARCOTE_RUN_TOKEN_FILE. A supporting engine (r23+)
+    re-reads that file so revoke/check-in/over-limit stops a running free browser; older engines
+    ignore it. Additive: the launch-time token above is unchanged."""
     env = dict(pw_kwargs.get("env") or os.environ)
     env[_RUN_TOKEN_ENV] = token
+    if token_file:
+        env[f"{_RUN_TOKEN_ENV}_FILE"] = token_file
     pw_kwargs["env"] = env
 
 

@@ -10,7 +10,7 @@
 // backend and never gates. See clearcoat/PRIVATE-SDK-LICENSING-PLAN.md.
 
 import { existsSync, readFileSync, mkdirSync, writeFileSync, rmSync, chmodSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { proxiedRequest, toProxySpec, type ProxySpec, type SimpleResponse } from "./net.js";
@@ -202,11 +202,57 @@ export interface LeaseSession {
   leaseId: string;
   /** Release the slot + stop the heartbeat (best-effort; safe to call twice). */
   stop(): Promise<void>;
+  /**
+   * Bind a per-launch run-token file (CLEARCOTE_RUN_TOKEN_FILE). It follows this lease's rotating
+   * token so a supporting engine (r23+) can re-read it and stop a running free browser once the token
+   * stops advancing. Call release() when the browser closes. Older engines ignore the file.
+   */
+  bindLaunch(): { file: string; release(): void };
 }
 
 // Seconds of headroom kept before a token's exp: reuse it only while still valid
 // with this much slack, so an in-flight launch never ships an expiring token.
 const SKEW_SEC = 60;
+
+// ── run-token files (engine online-enforcement opt-in) ───────────────────────
+// A supporting engine (152 r23+) re-reads the run-token from CLEARCOTE_RUN_TOKEN_FILE and stops a
+// running FREE browser once the token stops advancing (the SDK can only advance it by heartbeating,
+// which the backend gates). This class mirrors a lease's rotating token into one file per launch and
+// removes it on close. Older engines ignore the file (they read CLEARCOTE_RUN_TOKEN once at launch),
+// so it is purely additive — nothing breaks if the engine does not support it.
+class TokenFileSet {
+  private readonly files = new Set<{ path: string }>();
+
+  /** Create a token file seeded with `current`, kept updated until release() removes it. */
+  bind(current: string): { file: string; release: () => void } {
+    const path = join(tmpdir(), `clearcote-rt-${randomUUID()}.tok`);
+    this.writeOne(path, current);
+    const entry = { path };
+    this.files.add(entry);
+    return {
+      file: path,
+      release: () => {
+        this.files.delete(entry);
+        try { rmSync(path, { force: true }); } catch { /* already gone */ }
+      },
+    };
+  }
+
+  /** Rewrite every live file with the freshly-rotated token. */
+  update(token: string): void {
+    for (const e of this.files) this.writeOne(e.path, token);
+  }
+
+  /** Remove every file (lease shutdown). */
+  closeAll(): void {
+    for (const e of this.files) { try { rmSync(e.path, { force: true }); } catch { /* ignore */ } }
+    this.files.clear();
+  }
+
+  private writeOne(path: string, token: string): void {
+    try { writeFileSync(path, token, { mode: 0o600 }); } catch { /* the launch still has CLEARCOTE_RUN_TOKEN */ }
+  }
+}
 
 /**
  * One shared lease per (process, license key).
@@ -219,7 +265,12 @@ const SKEW_SEC = 60;
  * reuses a still-valid on-disk token makes no backend calls at all.
  */
 class MachineLease {
-  token: string | null = null;
+  private _token: string | null = null;
+  private readonly tokenFiles = new TokenFileSet();
+  get token(): string | null { return this._token; }
+  set token(v: string | null) { this._token = v; if (v) this.tokenFiles.update(v); }
+  /** Bind a per-launch token file that follows this lease's rotating token. */
+  bindLaunch(): { file: string; release: () => void } { return this.tokenFiles.bind(this._token ?? ""); }
   exp = 0;
   leaseId: string | null = null;
   /** Learned from the first checkout: "browser" means every launch holds its own lease. */
@@ -403,6 +454,7 @@ class MachineLease {
       stop: async () => {
         self.release();
       },
+      bindLaunch: () => self.bindLaunch(),
     } as LeaseSession;
   }
 
@@ -436,6 +488,7 @@ class MachineLease {
   }
 
   async shutdown(): Promise<void> {
+    this.tokenFiles.closeAll();
     // Per-browser leases still open at exit (a browser nobody closed): release their slots too.
     await Promise.all([...this.browsers].map((b) => b.stop()));
     if (this.timer) {
@@ -459,7 +512,12 @@ class MachineLease {
  * Its token is never written to the shared cache and never handed to another launch.
  */
 class BrowserLease {
-  token: string;
+  private _token!: string;
+  private readonly tokenFiles = new TokenFileSet();
+  get token(): string { return this._token; }
+  set token(v: string) { this._token = v; this.tokenFiles.update(v); }
+  /** Bind a per-launch token file that follows this browser's rotating token. */
+  bindLaunch(): { file: string; release: () => void } { return this.tokenFiles.bind(this._token); }
   leaseId: string;
   private timer: NodeJS.Timeout | null = null;
   private stopped = false;
@@ -501,6 +559,7 @@ class BrowserLease {
   async stop(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
+    this.tokenFiles.closeAll();
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
@@ -523,6 +582,7 @@ class BrowserLease {
         return self.leaseId;
       },
       stop: () => self.stop(),
+      bindLaunch: () => self.bindLaunch(),
     } as LeaseSession;
   }
 }
@@ -581,11 +641,15 @@ export async function acquireLease(
 export function withRunToken(
   token: string,
   baseEnv: Record<string, string | undefined> | undefined,
+  tokenFile?: string,
 ): Record<string, string> {
   const src = baseEnv ?? process.env;
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(src)) if (v !== undefined) out[k] = v;
   out[RUN_TOKEN_ENV] = token;
+  // A supporting engine (r23+) re-reads this file so revoke/check-in/over-limit stops a running free
+  // browser. Older engines ignore it. Additive: the launch-time token above is unchanged.
+  if (tokenFile) out[`${RUN_TOKEN_ENV}_FILE`] = tokenFile;
   return out;
 }
 

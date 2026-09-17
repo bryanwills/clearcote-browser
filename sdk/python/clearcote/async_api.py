@@ -231,8 +231,9 @@ async def launch(**kwargs):
     lease = await asyncio.to_thread(_acquire_lease_from_kwargs, kwargs)  # opt-in; None in free mode
     exe, args, pw_kwargs, humanize, show_cursor, seed = await asyncio.to_thread(
         _prepare_releasing, kwargs, lease)
-    if lease:  # inject CLEARCOTE_RUN_TOKEN so the PRO engine gate lets the browser launch
-        inject_run_token(pw_kwargs, lease.token)
+    launch_token = lease.bind_launch() if lease else None  # (file, release) or None; r23+ opt-in
+    if lease:  # inject CLEARCOTE_RUN_TOKEN (+ the r23+ opt-in token FILE) so the gate lets it launch
+        inject_run_token(pw_kwargs, lease.token, launch_token[0])
     await asyncio.to_thread(apply_font_env, exe, pw_kwargs)  # Linux: bundled font clones (mirror sync)
     apply_shader_dialect(shader_dialect, pw_kwargs)  # after fonts: that helper rebuilds the env
     headed = _headed_no_viewport(pw_kwargs)  # launch() takes no viewport kwarg -> wrap new_page/context
@@ -248,8 +249,11 @@ async def launch(**kwargs):
         await pw.stop()
         raise
     _bind_driver(browser, pw)
-    if lease:  # release the concurrency slot when the browser closes
-        browser.on("disconnected", lambda _b=None: lease.stop())
+    if lease:  # release the concurrency slot + remove the run-token file when the browser closes
+        def _on_disconnect(_b=None, _lease=lease, _lt=launch_token):
+            _lease.stop()
+            _lt[1]()
+        browser.on("disconnected", _on_disconnect)
     if headed:
         _install_headed_viewport(browser)
     elif geom:
@@ -274,8 +278,9 @@ async def launch_persistent_context(user_data_dir, **kwargs):
     lease = await asyncio.to_thread(_acquire_lease_from_kwargs, kwargs)  # opt-in; None in free mode
     exe, args, pw_kwargs, humanize, show_cursor, seed = await asyncio.to_thread(
         _prepare_releasing, kwargs, lease)
-    if lease:  # inject CLEARCOTE_RUN_TOKEN so the PRO engine gate lets the browser launch
-        inject_run_token(pw_kwargs, lease.token)
+    launch_token = lease.bind_launch() if lease else None  # (file, release) or None; r23+ opt-in
+    if lease:  # inject CLEARCOTE_RUN_TOKEN (+ the r23+ opt-in token FILE) so the gate lets it launch
+        inject_run_token(pw_kwargs, lease.token, launch_token[0])
     await asyncio.to_thread(apply_font_env, exe, pw_kwargs)  # Linux: bundled font clones (mirror sync)
     apply_shader_dialect(shader_dialect, pw_kwargs)  # after fonts: that helper rebuilds the env
     geom = None
@@ -294,8 +299,11 @@ async def launch_persistent_context(user_data_dir, **kwargs):
         await pw.stop()
         raise
     _bind_driver(context, pw)
-    if lease:  # release the concurrency slot when the context closes
-        context.on("close", lambda _c=None: lease.stop())
+    if lease:  # release the concurrency slot + remove the run-token file when the context closes
+        def _on_close(_c=None, _lease=lease, _lt=launch_token):
+            _lease.stop()
+            _lt[1]()
+        context.on("close", _on_close)
     if geom:
         await _install_window_fixup(context, args, geom.get("mode") == "persona")
     await install_humanize_on_context(context, humanize, show_cursor, seed=seed)

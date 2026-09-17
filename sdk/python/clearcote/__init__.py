@@ -147,7 +147,7 @@ __all__ = [
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.29.0"
+__version__ = "0.30.0"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -806,8 +806,9 @@ def launch(**kwargs):
     exe, args, pw_kwargs, humanize, show_cursor, seed = _prepare_or_release(kwargs, lease)
     apply_font_env(exe, pw_kwargs)  # Linux: point FONTCONFIG_FILE at the bundled font clones
     apply_shader_dialect(shader_dialect, pw_kwargs)  # after fonts: that helper rebuilds the env
-    if lease:  # inject CLEARCOTE_RUN_TOKEN so the PRO engine gate lets the browser launch
-        inject_run_token(pw_kwargs, lease.token)
+    launch_token = lease.bind_launch() if lease else None  # (file, release) or None; r23+ opt-in
+    if lease:  # inject CLEARCOTE_RUN_TOKEN (+ the r23+ opt-in token FILE) so the gate lets it launch
+        inject_run_token(pw_kwargs, lease.token, launch_token[0])
     headed = _headed_no_viewport(pw_kwargs)  # launch() takes no viewport kwarg -> wrap new_page/context
     # Headless: screen.* has to be overridden alongside the viewport or the window reports
     # outer > screen (see _geometry). Also a context option, so it rides on new_page/new_context.
@@ -815,8 +816,11 @@ def launch(**kwargs):
     browser = _release_lease_on_failure(lease, lambda: _win_av_retry(
         lambda e: _playwright().chromium.launch(executable_path=e, args=args, **pw_kwargs), exe
     ))
-    if lease:  # release the concurrency slot when the browser closes
-        browser.on("disconnected", lambda _b=None: lease.stop())
+    if lease:  # release the concurrency slot + remove the run-token file when the browser closes
+        def _on_disconnect(_b=None, _lease=lease, _lt=launch_token):
+            _lease.stop()
+            _lt[1]()
+        browser.on("disconnected", _on_disconnect)
     if headed:
         _install_headed_viewport(browser)
     elif geom:
@@ -844,8 +848,9 @@ def launch_persistent_context(user_data_dir, **kwargs):
     exe, args, pw_kwargs, humanize, show_cursor, seed = _prepare_or_release(kwargs, lease)
     apply_font_env(exe, pw_kwargs)  # Linux: point FONTCONFIG_FILE at the bundled font clones
     apply_shader_dialect(shader_dialect, pw_kwargs)  # after fonts: that helper rebuilds the env
-    if lease:  # inject CLEARCOTE_RUN_TOKEN so the PRO engine gate lets the browser launch
-        inject_run_token(pw_kwargs, lease.token)
+    launch_token = lease.bind_launch() if lease else None  # (file, release) or None; r23+ opt-in
+    if lease:  # inject CLEARCOTE_RUN_TOKEN (+ the r23+ opt-in token FILE) so the gate lets it launch
+        inject_run_token(pw_kwargs, lease.token, launch_token[0])
     geom = None
     if _headed_no_viewport(pw_kwargs):  # no_viewport IS a valid persistent-context option
         pw_kwargs["no_viewport"] = True
@@ -857,8 +862,11 @@ def launch_persistent_context(user_data_dir, **kwargs):
         ),
         exe,
     ))
-    if lease:  # release the concurrency slot when the context closes
-        context.on("close", lambda _c=None: lease.stop())
+    if lease:  # release the concurrency slot + remove the run-token file when the context closes
+        def _on_close(_c=None, _lease=lease, _lt=launch_token):
+            _lease.stop()
+            _lt[1]()
+        context.on("close", _on_close)
     if geom:
         _install_window_fixup(context, args, geom.get("mode") == "persona")
     install_humanize_on_context(context, humanize, show_cursor, seed=seed)

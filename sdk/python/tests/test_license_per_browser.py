@@ -4,6 +4,7 @@ free key gets lease_scope "browser" and one live lease per launch_id, a paid key
 machine-shared lease — and HOME is a temp dir so the on-disk cache and instance_id are isolated."""
 import base64
 import json
+import os
 import re
 import threading
 import time
@@ -353,3 +354,75 @@ def test_paid_checkout_body_only_adds_launch_id(env):
     body = be.eps("checkout")[0]
     assert set(body) == {"instance_id", "launch_id", "os", "sdk_version", "engine_version"}
     assert body["sdk_version"] == "9.9.9"
+
+
+# ── run-token file (engine online-enforcement opt-in) ──────────────────────
+
+def _read(path):
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def test_run_token_file_bind_writes_current_token_and_release_removes(env):
+    _, _be = env("free")
+    b1 = L.acquire_lease(quiet=True)
+    try:
+        path, release = b1.bind_launch()
+        assert os.path.exists(path)
+        assert _read(path) == b1.token  # seeded with the current token
+        release()
+        assert not os.path.exists(path)
+    finally:
+        b1.stop(wait=True)
+
+
+def test_run_token_file_stop_removes_still_bound_files(env):
+    _, _be = env("free")
+    b1 = L.acquire_lease(quiet=True)
+    path, _release = b1.bind_launch()
+    assert os.path.exists(path)
+    b1.stop(wait=True)
+    assert not os.path.exists(path)  # close_all on stop
+
+
+def test_run_token_file_follows_token_rotation(env):
+    _, _be = env("free")
+    b1 = L.acquire_lease(quiet=True)
+    try:
+        path, release = b1.bind_launch()
+        b1.token = tok("free", 42)  # a heartbeat rotates the lease's token
+        assert _read(path) == tok("free", 42)  # the file follows automatically
+        release()
+    finally:
+        b1.stop(wait=True)
+
+
+def test_run_token_file_two_launches_independent_and_follow_token(env):
+    _, _be = env("pro", limit=5)
+    h = L.acquire_lease(quiet=True)
+    try:
+        a_path, a_rel = h.bind_launch()
+        b_path, b_rel = h.bind_launch()
+        assert a_path != b_path
+        assert _read(a_path) == h.token
+        assert _read(b_path) == h.token
+        a_rel()
+        assert not os.path.exists(a_path)
+        assert os.path.exists(b_path)  # b is independent
+        b_rel()
+        assert not os.path.exists(b_path)
+    finally:
+        h.stop()
+
+
+def test_run_token_file_env_carries_file_alongside_token():
+    pw = {"env": {"BASE": "1"}}  # controlled base so the assertions are hermetic
+    L.inject_run_token(pw, "tok.sig", "/tmp/clearcote-rt-xyz.tok")
+    assert pw["env"]["CLEARCOTE_RUN_TOKEN"] == "tok.sig"
+    assert pw["env"]["CLEARCOTE_RUN_TOKEN_FILE"] == "/tmp/clearcote-rt-xyz.tok"
+    assert pw["env"]["BASE"] == "1"  # base env preserved
+    # additive: with no file arg the FILE env is absent (older-engine / no-opt-in behaviour)
+    pw2 = {"env": {"BASE": "1"}}
+    L.inject_run_token(pw2, "tok.sig")
+    assert pw2["env"]["CLEARCOTE_RUN_TOKEN"] == "tok.sig"
+    assert "CLEARCOTE_RUN_TOKEN_FILE" not in pw2["env"]

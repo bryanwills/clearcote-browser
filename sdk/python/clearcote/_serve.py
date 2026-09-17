@@ -49,13 +49,14 @@ def _free_port() -> int:
 class Server:
     """Handle for a standing clearcote CDP endpoint. Use ``.cdp_url`` with any CDP client."""
 
-    def __init__(self, process, host, port, user_data_dir, own_udd, lease=None):
+    def __init__(self, process, host, port, user_data_dir, own_udd, lease=None, launch_token=None):
         self.process = process
         self.host = host
         self.port = port
         self.user_data_dir = user_data_dir
         self._own_udd = own_udd
         self._lease = lease  # licence handle, released in close(); None in free mode
+        self._launch_token = launch_token  # (file, release) for CLEARCOTE_RUN_TOKEN_FILE, or None
         self._closed = False
 
     @property
@@ -96,6 +97,11 @@ class Server:
             try:
                 self._lease.stop()  # release the concurrency slot back to the plan
             except Exception:  # noqa: BLE001 -- licence teardown must never break shutdown
+                pass
+        if self._launch_token:
+            try:
+                self._launch_token[1]()  # remove the run-token file
+            except Exception:  # noqa: BLE001 -- best-effort; the file is in a temp dir
                 pass
         if self._own_udd:
             shutil.rmtree(self.user_data_dir, ignore_errors=True)
@@ -165,11 +171,16 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     if serve_needs_no_sandbox(sys.platform, getattr(os, "getuid", lambda: None)(), args):
         cdp.append("--no-sandbox")
 
+    launch_token = lease.bind_launch() if lease else None  # (file, release) or None; r23+ opt-in
     env = dict(os.environ)
     env.update(linux_font_env(exe))  # Linux: FONTCONFIG_FILE -> bundled font clones (no-op elsewhere)
     if lease and lease.token:
         # The PRO engine's gate reads this once at startup and exits if it is missing or invalid.
         env["CLEARCOTE_RUN_TOKEN"] = lease.token
+        if launch_token:
+            # A supporting engine (r23+) re-reads this file so revoke/check-in/over-limit stops a
+            # running free browser. Older engines ignore it. Additive: the token above is unchanged.
+            env["CLEARCOTE_RUN_TOKEN_FILE"] = launch_token[0]
 
     # Launched DIRECTLY (no automation framework) -> no --enable-automation -> webdriver stays false.
     # Wrap in _win_av_retry so a just-extracted binary survives the Windows SxS/AV first-launch race
@@ -200,13 +211,18 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
                 lease.stop()  # release the concurrency slot; the machine lease checks in at exit
             except Exception:  # noqa: BLE001 -- never let licence teardown break server shutdown
                 pass
+        if launch_token:
+            try:
+                launch_token[1]()  # remove the run-token file
+            except Exception:  # noqa: BLE001
+                pass
         if own_udd:
             shutil.rmtree(user_data_dir, ignore_errors=True)
         raise RuntimeError(
             "clearcote serve: CDP endpoint at http://%s:%d did not come up within %.0fs"
             % (host, port, ready_timeout))
 
-    srv = Server(proc, host, port, user_data_dir, own_udd, lease=lease)
+    srv = Server(proc, host, port, user_data_dir, own_udd, lease=lease, launch_token=launch_token)
     atexit.register(srv.close)
     if not quiet:
         sys.stderr.write(

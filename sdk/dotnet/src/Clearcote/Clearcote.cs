@@ -15,7 +15,7 @@ namespace Clearcote;
 public static class Clearcote
 {
     /// This SDK's version (kept in lockstep with the npm/PyPI SDKs).
-    public const string Version = "0.29.0";
+    public const string Version = "0.30.0";
 
     private static readonly SemaphoreSlim PwLock = new(1, 1);
     private static IPlaywright? _pw;
@@ -94,7 +94,10 @@ public static class Clearcote
             new LicenseOptions { LicenseKey = options.LicenseKey, LicenseApiBase = options.LicenseApiBase, LicenseThroughProxy = options.LicenseThroughProxy },
             Version, options.Quiet,   // sdk_version = the SDK PACKAGE version
             () => Download.ResolvedEngineVersionAsync(licVersion, licKey is not null), options.Proxy).ConfigureAwait(false);
-        var env = lease is not null ? License.WithRunToken(lease.Token, options.Env) : options.Env;
+        // Bind a per-launch run-token file so a supporting engine (r23+) can stop a running free
+        // browser once the token stops advancing; passed ALONGSIDE CLEARCOTE_RUN_TOKEN. Inert in free mode.
+        var launchToken = lease?.BindLaunch();
+        var env = lease is not null ? License.WithRunToken(lease.Token, options.Env, launchToken?.File) : options.Env;
         env = ShaderDialect.Apply(options.ShaderDialect, env);  // opt-in; no-op when unset
 
         var pw = await PlaywrightAsync().ConfigureAwait(false);
@@ -110,7 +113,8 @@ public static class Clearcote
             Proxy = ToPwProxy(proxy),
         }), exe)).ConfigureAwait(false);
 
-        if (lease is not null) browser.Disconnected += (_, _) => { _ = lease.StopAsync(); };
+        // Release the concurrency slot + remove the run-token file when the browser closes.
+        if (lease is not null) browser.Disconnected += (_, _) => { _ = lease.StopAsync(); launchToken?.Release(); };
         return browser;
     }
 
@@ -187,7 +191,10 @@ public static class Clearcote
             new LicenseOptions { LicenseKey = options.LicenseKey, LicenseApiBase = options.LicenseApiBase, LicenseThroughProxy = options.LicenseThroughProxy },
             Version, options.Quiet,   // sdk_version = the SDK PACKAGE version
             () => Download.ResolvedEngineVersionAsync(licVersion, licKey is not null), options.Proxy).ConfigureAwait(false);
-        var env = lease is not null ? License.WithRunToken(lease.Token, options.Env) : options.Env;
+        // Bind a per-launch run-token file (r23+ engine online-enforcement opt-in); passed ALONGSIDE
+        // CLEARCOTE_RUN_TOKEN. Inert in free mode.
+        var launchToken = lease?.BindLaunch();
+        var env = lease is not null ? License.WithRunToken(lease.Token, options.Env, launchToken?.File) : options.Env;
         env = ShaderDialect.Apply(options.ShaderDialect, env);  // opt-in; no-op when unset
 
         var geometry = Geometry.Resolve(
@@ -216,7 +223,8 @@ public static class Clearcote
                 ScreenSize = options.ScreenSize ?? geometry.Screen,
             }), exe)).ConfigureAwait(false);
 
-        if (lease is not null) context.Close += (_, _) => { _ = lease.StopAsync(); };
+        // Release the concurrency slot + remove the run-token file when the context closes.
+        if (lease is not null) context.Close += (_, _) => { _ = lease.StopAsync(); launchToken?.Release(); };
         // Regime 2 needs its screen override issued by hand: Playwright .NET drops ScreenSize on a
         // persistent context (see InstallScreenOverrideAsync). Python/Node get it from the context
         // option and need nothing here.
@@ -272,12 +280,16 @@ public static class Clearcote
             new LicenseOptions { LicenseKey = options.LicenseKey, LicenseApiBase = options.LicenseApiBase, LicenseThroughProxy = options.LicenseThroughProxy },
             Version, options.Quiet,   // sdk_version = the SDK PACKAGE version
             () => Download.ResolvedEngineVersionAsync(licVersion, licKey is not null), options.Proxy).ConfigureAwait(false);
+        // Bind a per-launch run-token file (r23+ engine online-enforcement opt-in); passed ALONGSIDE
+        // CLEARCOTE_RUN_TOKEN. Inert in free mode.
+        var launchToken = lease?.BindLaunch();
 
         var proc = await License.ReleaseLeaseOnFailureAsync(lease, () => WinLaunch.WinAvRetryAsync(exePath =>
         {
             var psi = new ProcessStartInfo(exePath) { UseShellExecute = false };
             foreach (var a in engineArgs.Concat(cdpArgs)) psi.ArgumentList.Add(a);
             if (lease is not null) psi.Environment[License.RunTokenEnv] = lease.Token;
+            if (launchToken is not null) psi.Environment[License.RunTokenFileEnv] = launchToken.File;
             // serve() starts the engine itself, so the child inherits this process's environment;
             // only the one variable needs setting.
             var dialect = ShaderDialect.Normalize(options.ShaderDialect);
@@ -302,11 +314,12 @@ public static class Clearcote
         {
             try { proc.Kill(true); } catch { }
             if (lease is not null) { try { await lease.StopAsync().ConfigureAwait(false); } catch { } }
+            launchToken?.Release();
             if (ownUdd) { try { Directory.Delete(userDataDir, true); } catch { } }
             throw new Exception($"clearcote serve: CDP endpoint at http://{host}:{port} did not come up within {options.ReadyTimeoutMs}ms");
         }
 
-        var srv = new Server(proc, host, port, userDataDir, ownUdd, lease);
+        var srv = new Server(proc, host, port, userDataDir, ownUdd, lease, launchToken);
         AppDomain.CurrentDomain.ProcessExit += (_, _) => { try { srv.CloseAsync().GetAwaiter().GetResult(); } catch { } };
         if (!options.Quiet) Console.Error.WriteLine($"[clearcote] serve: CDP endpoint ready at {srv.CdpUrl}");
         return srv;
@@ -398,10 +411,11 @@ public sealed class Server
     private readonly string _userDataDir;
     private readonly bool _ownUdd;
     private readonly LeaseSession? _lease;
+    private readonly LaunchToken? _launchToken;
 
-    internal Server(Process proc, string host, int port, string userDataDir, bool ownUdd, LeaseSession? lease)
+    internal Server(Process proc, string host, int port, string userDataDir, bool ownUdd, LeaseSession? lease, LaunchToken? launchToken = null)
     {
-        _proc = proc; Host = host; Port = port; _userDataDir = userDataDir; _ownUdd = ownUdd; _lease = lease;
+        _proc = proc; Host = host; Port = port; _userDataDir = userDataDir; _ownUdd = ownUdd; _lease = lease; _launchToken = launchToken;
     }
 
     public string Host { get; }
@@ -428,7 +442,9 @@ public sealed class Server
     public async Task CloseAsync()
     {
         try { if (!_proc.HasExited) _proc.Kill(true); } catch { }
+        // Release the concurrency slot (best-effort) + remove the run-token file.
         if (_lease is not null) { try { await _lease.StopAsync().ConfigureAwait(false); } catch { } }
+        _launchToken?.Release();
         if (_ownUdd) { try { Directory.Delete(_userDataDir, true); } catch { } }
     }
 }

@@ -390,4 +390,90 @@ public class LicensePerBrowserTests
             Assert.Equal(new[] { "engine_version", "instance_id", "launch_id", "os", "sdk_version" }, keys);
         }
     }
+
+    // ── run-token file (engine online-enforcement opt-in) ────────────────────
+    // Mirrors the Node "run-token file" suite (test/license-per-browser.test.ts): BindLaunch writes
+    // the current token to a per-launch file, Release removes it, StopAsync removes still-bound files,
+    // and two launches on one lease get independent files.
+
+    [Fact]
+    public async Task BindLaunch_writes_the_current_token_to_a_file_and_release_removes_it()
+    {
+        var be = new Backend("free");
+        var (s, _, _) = Setup(be);
+        using (s)
+        {
+            var lease = await Acquire();
+            try
+            {
+                var lt = lease!.BindLaunch();
+                Assert.True(File.Exists(lt.File));
+                Assert.Equal(lease.Token, File.ReadAllText(lt.File)); // seeded with the current token
+                lt.Release();
+                Assert.False(File.Exists(lt.File));
+            }
+            finally { await lease!.StopAsync(); }
+        }
+    }
+
+    [Fact]
+    public async Task Stop_removes_any_still_bound_token_files()
+    {
+        var be = new Backend("free");
+        var (s, _, _) = Setup(be);
+        using (s)
+        {
+            var lease = await Acquire();
+            var lt = lease!.BindLaunch();
+            Assert.True(File.Exists(lt.File));
+            await lease.StopAsync();
+            Assert.False(File.Exists(lt.File)); // CloseAll on stop
+        }
+    }
+
+    [Fact]
+    public async Task Two_launches_on_one_lease_get_independent_files_that_each_follow_the_token()
+    {
+        var be = new Backend("pro", limit: 5);
+        var (s, _, _) = Setup(be);
+        using (s)
+        {
+            var lease = await Acquire();
+            try
+            {
+                var a = lease!.BindLaunch();
+                var b = lease.BindLaunch();
+                Assert.NotEqual(a.File, b.File);
+                Assert.Equal(lease.Token, File.ReadAllText(a.File));
+                Assert.Equal(lease.Token, File.ReadAllText(b.File));
+                a.Release();
+                Assert.False(File.Exists(a.File));
+                Assert.True(File.Exists(b.File)); // b is independent
+                b.Release();
+            }
+            finally { await lease!.StopAsync(); }
+        }
+    }
+
+    [Fact]
+    public async Task Release_is_idempotent_and_leaves_other_files_intact()
+    {
+        var be = new Backend("pro", limit: 5);
+        var (s, _, _) = Setup(be);
+        using (s)
+        {
+            var lease = await Acquire();
+            try
+            {
+                var a = lease!.BindLaunch();
+                var b = lease.BindLaunch();
+                a.Release();
+                a.Release(); // safe to call twice
+                Assert.False(File.Exists(a.File));
+                Assert.True(File.Exists(b.File));
+                b.Release();
+            }
+            finally { await lease!.StopAsync(); }
+        }
+    }
 }

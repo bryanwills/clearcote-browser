@@ -731,7 +731,8 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   });
   // On Linux, point FONTCONFIG_FILE at the bundled metric-compatible clones (Segoe UI, Arial, …).
   const launchEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (pwOptions as PlaywrightLaunchOptions).env));
-  const runtimeEnv = lease ? withRunToken(lease.token, launchEnv) : launchEnv;
+  const launchToken = lease?.bindLaunch();
+  const runtimeEnv = lease ? withRunToken(lease.token, launchEnv, launchToken?.file) : launchEnv;
   const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? [], proxyOpt as PwProxy | undefined, socks5Udp,
     { exe, headed, quiet, allowThirdPartyCookies, transparentProxy });
   // Headless: screen.* has to be handled alongside the viewport or the window reports a geometry no
@@ -750,8 +751,8 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
     ...(runtimeEnv ? { env: runtimeEnv } : {}),
     args: engineArgs,
   }), exe));
-  // Release the concurrency slot when the browser closes.
-  if (lease) browser.on("disconnected", () => { void lease.stop(); });
+  // Release the concurrency slot + remove the run-token file when the browser closes.
+  if (lease) browser.on("disconnected", () => { void lease.stop(); launchToken?.release(); });
   if (headed) installHeadedViewport(browser); // launch() takes no viewport option -> wrap newPage/newContext
   else if (geom) installHeadlessGeometry(browser, geom, engineArgs);
   installHumanize(browser, { humanize, showCursor, seed: fingerprint.fingerprint }); // seed => stable motor persona
@@ -815,7 +816,8 @@ export async function launchPersistentContext(
     engineVersion: () => resolvedEngineVersion(version, !!resolveLicenseKey(licenseKey)),
   });
   const ctxEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (opts as PlaywrightLaunchOptions).env));
-  const runtimeEnv = lease ? withRunToken(lease.token, ctxEnv) : ctxEnv;
+  const launchToken = lease?.bindLaunch();
+  const runtimeEnv = lease ? withRunToken(lease.token, ctxEnv, launchToken?.file) : ctxEnv;
   const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs, proxyOpt as PwProxy | undefined, socks5Udp,
     { exe, headed: opts.headless === false, quiet, allowThirdPartyCookies, transparentProxy });
   // headless: the persona owns screen when it is running, so only the window needs fitting; with no
@@ -830,7 +832,7 @@ export async function launchPersistentContext(
     ...(runtimeEnv ? { env: runtimeEnv } : {}),
     args: engineArgs,
   }), exe));
-  if (lease) context.on("close", () => { void lease.stop(); });
+  if (lease) context.on("close", () => { void lease.stop(); launchToken?.release(); });
   if (geom) await installWindowFixup(context, engineArgs, geom.mode === "persona");
   installHumanizeOnContext(context, { humanize, showCursor, seed: fingerprint.fingerprint }); // seed => stable motor persona
   return context;
@@ -902,6 +904,7 @@ export class Server {
     private readonly userDataDir: string,
     private readonly ownUdd: boolean,
     private readonly lease?: LeaseSession | null,
+    private readonly launchToken?: { file: string; release(): void } | null,
   ) {}
   /** HTTP CDP base — pass to `connectOverCDP` / `puppeteer.connect({ browserURL })`. */
   get cdpUrl(): string {
@@ -929,8 +932,9 @@ export class Server {
     } catch {
       /* ignore */
     }
-    // Release the concurrency slot (best-effort).
+    // Release the concurrency slot (best-effort) + remove the run-token file.
     try { await this.lease?.stop(); } catch { /* ignore */ }
+    this.launchToken?.release();
     if (this.ownUdd) {
       try {
         rmSync(this.userDataDir, { recursive: true, force: true });
@@ -1025,7 +1029,8 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
     // resolved lazily on cold checkout only (never per launch); telemetry, never gates the lease
     engineVersion: () => resolvedEngineVersion(version, !!resolveLicenseKey(licenseKey)),
   });
-  const env = { ...process.env, ...(withShaderDialect(shaderDialect, fontLaunchEnv(exe, undefined)) ?? {}), ...(lease ? { CLEARCOTE_RUN_TOKEN: lease.token } : {}) };
+  const launchToken = lease?.bindLaunch();
+  const env = { ...process.env, ...(withShaderDialect(shaderDialect, fontLaunchEnv(exe, undefined)) ?? {}), ...(lease ? { CLEARCOTE_RUN_TOKEN: lease.token, ...(launchToken ? { CLEARCOTE_RUN_TOKEN_FILE: launchToken.file } : {}) } : {}) };
   // Launched DIRECTLY (no Playwright) => no --enable-automation => navigator.webdriver stays false.
   // Wrap in winAvRetry so a just-extracted binary survives the Windows SxS/AV first-launch race
   // ("spawn UNKNOWN"), same as launch(): warm + back off + retry, then recover from a fresh copy.
@@ -1055,11 +1060,12 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   if (!ready) {
     try { proc.kill(); } catch { /* ignore */ }
     try { await lease?.stop(); } catch { /* ignore */ }
+    launchToken?.release();
     if (ownUdd) { try { rmSync(userDataDir, { recursive: true, force: true }); } catch { /* ignore */ } }
     throw new Error(
       `clearcote serve: CDP endpoint at http://${host}:${resolvedPort} did not come up within ${readyTimeoutMs}ms`);
   }
-  const srv = new Server(proc, host, resolvedPort, userDataDir, ownUdd, lease);
+  const srv = new Server(proc, host, resolvedPort, userDataDir, ownUdd, lease, launchToken);
   process.once("exit", () => { void srv.close(); });
   if (!quiet) {
     process.stderr.write(

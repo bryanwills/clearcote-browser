@@ -54,18 +54,45 @@ public enum SeatsState
 /// <see cref="SeatsState.Ok"/> means unlimited.
 public sealed record SessionSeats(SeatsState State, int? Used = null, int? Limit = null, string? Plan = null, string? Reason = null);
 
+/// A per-launch run-token file (CLEARCOTE_RUN_TOKEN_FILE). It follows the owning lease's rotating
+/// token so a supporting engine (152 r23+) can re-read it and stop a running FREE browser once the
+/// token stops advancing. Call <see cref="Release"/> when the browser closes. Older engines ignore it.
+public sealed class LaunchToken
+{
+    private readonly Action _release;
+    private int _released;
+
+    internal LaunchToken(string file, Action release)
+    {
+        File = file;
+        _release = release;
+    }
+
+    /// The token file path to pass to the engine as CLEARCOTE_RUN_TOKEN_FILE.
+    public string File { get; }
+
+    /// Stop following the lease's token and remove the file (best-effort; safe to call twice).
+    public void Release()
+    {
+        if (Interlocked.Exchange(ref _released, 1) != 0) return;
+        _release();
+    }
+}
+
 /// A live floating-concurrency lease. Keep it until the browser closes, then call <see cref="StopAsync"/>.
 public sealed class LeaseSession
 {
     private readonly Func<string> _token;
     private readonly Func<Task> _stop;
+    private readonly Func<LaunchToken> _bindLaunch;
     private int _stopped;
 
-    internal LeaseSession(Func<string> token, string leaseId, Func<Task> stop)
+    internal LeaseSession(Func<string> token, string leaseId, Func<Task> stop, Func<LaunchToken> bindLaunch)
     {
         _token = token;
         LeaseId = leaseId;
         _stop = stop;
+        _bindLaunch = bindLaunch;
     }
 
     /// The current (rotating) run-token injected as CLEARCOTE_RUN_TOKEN. Reads the shared
@@ -79,6 +106,68 @@ public sealed class LeaseSession
     {
         if (Interlocked.Exchange(ref _stopped, 1) != 0) return Task.CompletedTask;
         return _stop();
+    }
+
+    /// Bind a per-launch run-token file (CLEARCOTE_RUN_TOKEN_FILE) that follows this lease's rotating
+    /// token, so a supporting engine (r23+) can re-read it and stop a running free browser once the
+    /// token stops advancing. Call <see cref="LaunchToken.Release"/> when the browser closes; older
+    /// engines ignore the file, so this is purely additive.
+    public LaunchToken BindLaunch() => _bindLaunch();
+}
+
+/// A set of per-launch run-token files that a lease keeps in step with its rotating token (engine
+/// online-enforcement opt-in). A supporting engine (152 r23+) re-reads the run-token from
+/// CLEARCOTE_RUN_TOKEN_FILE and stops a running FREE browser once the token stops advancing (the SDK
+/// can only advance it by heartbeating, which the backend gates). This mirrors a lease's rotating
+/// token into one file per launch and removes it on close. Older engines ignore the file (they read
+/// CLEARCOTE_RUN_TOKEN once at launch), so it is purely additive — nothing breaks without support.
+/// Write failures are non-fatal: the launch still carries CLEARCOTE_RUN_TOKEN. Mirrors license.ts.
+internal sealed class TokenFileSet
+{
+    private sealed class Entry { public required string Path; }
+    private readonly HashSet<Entry> _files = new();
+    private readonly object _lock = new();
+
+    /// Create a token file seeded with <paramref name="current"/>, kept updated until Release removes it.
+    public LaunchToken Bind(string current)
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"clearcote-rt-{Guid.NewGuid():N}.tok");
+        WriteOne(path, current);
+        var entry = new Entry { Path = path };
+        lock (_lock) _files.Add(entry);
+        return new LaunchToken(path, () =>
+        {
+            lock (_lock) _files.Remove(entry);
+            try { System.IO.File.Delete(path); } catch { /* already gone */ }
+        });
+    }
+
+    /// Rewrite every live file with the freshly-rotated token.
+    public void Update(string token)
+    {
+        Entry[] snapshot;
+        lock (_lock) snapshot = _files.ToArray();
+        foreach (var e in snapshot) WriteOne(e.Path, token);
+    }
+
+    /// Remove every file (lease shutdown).
+    public void CloseAll()
+    {
+        Entry[] snapshot;
+        lock (_lock) { snapshot = _files.ToArray(); _files.Clear(); }
+        foreach (var e in snapshot) { try { System.IO.File.Delete(e.Path); } catch { /* ignore */ } }
+    }
+
+    private static void WriteOne(string path, string token)
+    {
+        try
+        {
+            System.IO.File.WriteAllText(path, token);
+            // Restrictive perms where the OS supports it (0600). Unsupported on Windows.
+            if (!OperatingSystem.IsWindows())
+                try { System.IO.File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite); } catch { }
+        }
+        catch { /* the launch still has CLEARCOTE_RUN_TOKEN */ }
     }
 }
 
@@ -259,6 +348,7 @@ public static class License
         private readonly bool _quiet;
         private readonly ProxySpec? _proxy;
         private readonly SemaphoreSlim _gate = new(1, 1);
+        private readonly TokenFileSet _tokenFiles = new();
         private volatile string? _token;
         private long _exp;
         private string? _leaseId;
@@ -279,6 +369,17 @@ public static class License
         }
 
         private bool Valid() => _token != null && _exp > NowSec() + 60;
+
+        // Set the shared rotating token AND push it into every bound run-token file, so a supporting
+        // engine sees the rotation. Mirrors the license.ts token setter.
+        private void SetToken(string? v)
+        {
+            _token = v;
+            if (v != null) _tokenFiles.Update(v);
+        }
+
+        /// Bind a per-launch token file that follows this lease's rotating token.
+        public LaunchToken BindLaunch() => _tokenFiles.Bind(_token ?? "");
 
         // Resolved engine version for telemetry — memoized, resolved at most once (cold checkout only).
         private async Task<string?> EngineVerAsync()
@@ -305,7 +406,7 @@ public static class License
                     if (cached is { } c && c.exp > NowSec() + 60)
                     {
                         // cross-process reuse: another process's owner keeps the slot alive.
-                        _token = c.token; _exp = c.exp; _leaseId = c.leaseId; _owner = false;
+                        SetToken(c.token); _exp = c.exp; _leaseId = c.leaseId; _owner = false;
                     }
                     else
                     {
@@ -337,7 +438,7 @@ public static class License
             {
                 Interlocked.Decrement(ref _refs);
                 return Task.CompletedTask;
-            });
+            }, BindLaunch);
         }
 
         /// POST a checkout for one launch. Throws the backend's verdict; network errors propagate.
@@ -372,11 +473,11 @@ public static class License
             {
                 var d = await CheckoutForAsync(launchId).ConfigureAwait(false);
                 if (d.BrowserScope) return d;
-                _token = d.Token;
+                SetToken(d.Token);
                 _exp = d.Exp;
                 _leaseId = d.LeaseId;
                 _hbSec = d.HeartbeatSec;
-                WriteCache(_key, _token, _exp, _leaseId);
+                WriteCache(_key, _token!, _exp, _leaseId);
                 return null;
             }
             catch (LicenseError) { throw; } // a definitive verdict must surface (never silently downgrade)
@@ -386,7 +487,7 @@ public static class License
                 if (cached is { } c && c.exp > NowSec() + 60)
                 {
                     if (!_quiet) Console.Error.WriteLine($"[clearcote] [license] backend unreachable ({e.Message}); using cached run-token.");
-                    _token = c.token; _exp = c.exp; _leaseId = c.leaseId;
+                    SetToken(c.token); _exp = c.exp; _leaseId = c.leaseId;
                     return null;
                 }
                 throw new LicenseError($"Could not reach the license server and no valid cached token: {e.Message}");
@@ -442,18 +543,18 @@ public static class License
                             {
                                 using var d = JsonDocument.Parse(await co.Content.ReadAsStringAsync().ConfigureAwait(false));
                                 _leaseId = d.RootElement.GetProperty("lease_id").GetString()!;
-                                _token = d.RootElement.GetProperty("token").GetString()!;
+                                SetToken(d.RootElement.GetProperty("token").GetString()!);
                                 _exp = d.RootElement.GetProperty("exp").GetInt64();
-                                WriteCache(_key, _token, _exp, _leaseId);
+                                WriteCache(_key, _token!, _exp, _leaseId);
                             }
                             continue;
                         }
                         if (res.IsSuccessStatusCode)
                         {
                             using var d = JsonDocument.Parse(await res.Content.ReadAsStringAsync().ConfigureAwait(false));
-                            _token = d.RootElement.GetProperty("token").GetString()!;
+                            SetToken(d.RootElement.GetProperty("token").GetString()!);
                             _exp = d.RootElement.GetProperty("exp").GetInt64();
-                            WriteCache(_key, _token, _exp, _leaseId);
+                            WriteCache(_key, _token!, _exp, _leaseId);
                         }
                     }
                     catch { /* transient — offline grace until token exp */ }
@@ -464,6 +565,7 @@ public static class License
         // Single checkin at process exit (owner only). Frees the slot without waiting for the TTL.
         public async Task ShutdownAsync()
         {
+            _tokenFiles.CloseAll();
             // Per-browser leases still open at exit (a browser nobody closed): release their slots too.
             foreach (var b in _browsers.Keys.ToArray())
                 try { await b.StopAsync().ConfigureAwait(false); } catch { /* best-effort */ }
@@ -490,16 +592,27 @@ public static class License
         private readonly MachineLease _owner;
         private readonly string _launchId;
         private readonly CancellationTokenSource _cts = new();
+        private readonly TokenFileSet _tokenFiles = new();
         private volatile string _token;
         private int _stopped;
         public LeaseSession Session { get; }
+
+        // Set this browser's rotating token AND push it into every bound run-token file.
+        private void SetToken(string v)
+        {
+            _token = v;
+            _tokenFiles.Update(v);
+        }
+
+        /// Bind a per-launch token file that follows this browser's rotating token.
+        private LaunchToken BindLaunch() => _tokenFiles.Bind(_token);
 
         public BrowserLease(MachineLease owner, CheckoutData d, string launchId)
         {
             _owner = owner;
             _launchId = launchId;
             _token = d.Token;
-            Session = new LeaseSession(() => _token, d.LeaseId, StopAsync);
+            Session = new LeaseSession(() => _token, d.LeaseId, StopAsync, BindLaunch);
             var hbMs = Math.Max(5, d.HeartbeatSec) * 1000;
             var ct = _cts.Token;
             _ = Task.Run(async () =>
@@ -518,14 +631,14 @@ public static class License
                             // Reclaimed: re-take the slot as the SAME launch (the backend's own-lease takeover).
                             var again = await _owner.CheckoutForAsync(_launchId).ConfigureAwait(false);
                             Session.LeaseId = again.LeaseId;
-                            _token = again.Token;
+                            SetToken(again.Token);
                             continue;
                         }
                         if (res.IsSuccessStatusCode)
                         {
                             using var d2 = JsonDocument.Parse(await res.Content.ReadAsStringAsync().ConfigureAwait(false));
                             if (d2.RootElement.TryGetProperty("token", out var t) && t.ValueKind == JsonValueKind.String)
-                                _token = t.GetString()!;
+                                SetToken(t.GetString()!);
                         }
                     }
                     catch { /* transient; the next beat retries, and the lease TTL is the backstop */ }
@@ -537,6 +650,7 @@ public static class License
         {
             if (Interlocked.Exchange(ref _stopped, 1) != 0) return;
             _cts.Cancel();
+            _tokenFiles.CloseAll();
             _owner.Forget(this);
             try
             {
@@ -653,8 +767,13 @@ public static class License
         }
     }
 
-    /// Merge the run-token into an env dictionary (base defaults to the current process env).
-    public static Dictionary<string, string> WithRunToken(string token, IDictionary<string, string>? baseEnv)
+    internal const string RunTokenFileEnv = "CLEARCOTE_RUN_TOKEN_FILE";
+
+    /// Merge the run-token into an env dictionary (base defaults to the current process env). When
+    /// <paramref name="tokenFile"/> is given it is also passed as CLEARCOTE_RUN_TOKEN_FILE: a
+    /// supporting engine (r23+) re-reads that file so revoke/check-in/over-limit stops a running free
+    /// browser. Older engines ignore it, so it is purely additive — the launch-time token is unchanged.
+    public static Dictionary<string, string> WithRunToken(string token, IDictionary<string, string>? baseEnv, string? tokenFile = null)
     {
         var outEnv = new Dictionary<string, string>();
         if (baseEnv is not null)
@@ -667,6 +786,7 @@ public static class License
                 if (e.Value is string sv) outEnv[(string)e.Key] = sv;
         }
         outEnv[RunTokenEnv] = token;
+        if (tokenFile is not null) outEnv[RunTokenFileEnv] = tokenFile;
         return outEnv;
     }
 }

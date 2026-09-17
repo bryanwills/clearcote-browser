@@ -366,3 +366,49 @@ describe("releaseLeaseOnFailure (a browser that fails to start gives its slot ba
     await next!.stop();
   });
 });
+
+describe("run-token file (engine online-enforcement opt-in)", () => {
+  it("bindLaunch writes the current token to a file and release() removes it", async () => {
+    isolate("free");
+    backend("free");
+    const lease = (await acquireLease({ quiet: true }))!;
+    try {
+      const lt = lease.bindLaunch();
+      expect(existsSync(lt.file)).toBe(true);
+      expect(readFileSync(lt.file, "utf8")).toBe(lease.token); // seeded with the current token
+      lt.release();
+      expect(existsSync(lt.file)).toBe(false);
+    } finally {
+      await lease.stop();
+    }
+  });
+
+  it("stop() removes any still-bound token files", async () => {
+    isolate("free");
+    backend("free");
+    const lease = (await acquireLease({ quiet: true }))!;
+    const lt = lease.bindLaunch();
+    expect(existsSync(lt.file)).toBe(true);
+    await lease.stop();
+    expect(existsSync(lt.file)).toBe(false); // closeAll on stop
+  });
+
+  it("two launches on one lease get independent files that each follow the token", async () => {
+    isolate("pro");
+    backend("pro", { limit: 5 });
+    const lease = (await acquireLease({ quiet: true }))!;
+    try {
+      const a = lease.bindLaunch();
+      const b = lease.bindLaunch();
+      expect(a.file).not.toBe(b.file);
+      expect(readFileSync(a.file, "utf8")).toBe(lease.token);
+      expect(readFileSync(b.file, "utf8")).toBe(lease.token);
+      a.release();
+      expect(existsSync(a.file)).toBe(false);
+      expect(existsSync(b.file)).toBe(true); // b is independent
+      b.release();
+    } finally {
+      await lease.stop();
+    }
+  });
+});
