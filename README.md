@@ -339,7 +339,7 @@ Clearcote is free and open source, and the open build always will be — **fully
 | Browsers at once | Unlimited | **1** | Unlimited during the beta |
 | Support | GitHub issues | GitHub issues | Email from the owner |
 
-**Free with GitHub:** sign in at [clearcotelabs.com](https://clearcotelabs.com/pricing#free) with GitHub, open **Licenses** in the dashboard and click **Get it free**. The key lasts 30 days and renews for free. It counts every browser, so a second one waits until the first closes, and it needs **SDK 0.29.0 or newer** (`pip install -U clearcote`, `npm i clearcote@latest`, or the latest NuGet package).
+**Free with GitHub:** sign in at [clearcotelabs.com](https://clearcotelabs.com/pricing#free) with GitHub, open **Licenses** in the dashboard and click **Get it free**. The key lasts 30 days and renews for free. It counts every browser, so a second one waits until the first closes, and it always runs the latest build — picking an older build or the preview channel is a Pro feature. It needs **SDK 0.30.0 or newer** (`pip install -U clearcote`, `npm i clearcote@latest`, or the latest NuGet package); an older SDK is refused, because the browser expects the SDK to keep the licence current while it runs.
 
 **Pro** is for running many browsers at once, and it funds the work. Let me be blunt about that work: keeping a Chromium fork current — tracking upstream, porting the anti-detection patches to every new Chromium version, testing, and building for Windows and Linux — is a lot of ongoing effort, mostly mine. You also get **direct email support from me, the owner.**
 
