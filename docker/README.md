@@ -40,6 +40,8 @@ headless-mode tells some detectors probe. Set `CC_HEADLESS=1` for the old pure-h
 | `CC_PORT` | `9222` | exposed CDP port |
 | `CC_WIDEVINE` | `1` \| `0` | seed the Widevine CDM — **auto-on for `CC_PLATFORM=windows`** |
 | `CC_SHADER_DIALECT` | `hlsl` \| `0` | report ANGLE's translated shader as HLSL — **auto-on for `CC_PLATFORM=windows`** |
+| `CLEARCOTE_LICENSE_KEY` | `cc_lic_...` | use the licensed engine instead of the bundled open one — see below |
+| `CC_VERSION` | `152` \| `152.0.7977.82` \| `r22` | with a key: pin a major, an exact build or a revision (default: the newest your key allows) |
 
 ```bash
 docker run -d -p 9222:9222 \
@@ -63,6 +65,30 @@ Neither applies to a Linux persona, so the default container is unchanged. Overr
 debug-extension query changes — and engines older than **151 r15** ignore it. See
 [/docs/shader-dialect](https://www.clearcotelabs.com/docs/shader-dialect).
 
+## Licensed engine (Free with GitHub or Pro)
+
+The image bakes in the **open** engine. Set `CLEARCOTE_LICENSE_KEY` and the container resolves the
+**licensed** engine instead (Chromium 152 today), downloading it once into the cache volume:
+
+```bash
+docker run -d -p 127.0.0.1:9222:9222 \
+  -e CLEARCOTE_LICENSE_KEY=cc_lic_... \
+  -v clearcote-cache:/opt/xdg-cache \
+  teamflatearth/clearcote
+```
+
+- **Mount the cache volume.** Without it every new container downloads the engine again.
+- **One licence seat per running container.** The container takes a seat when its browser starts,
+  keeps it while the browser runs, and gives it back on `docker stop`. If the seat can't be taken
+  (limit reached, key revoked, no network), the container exits with the reason instead of starting
+  a browser that can't run.
+- **Free keys** (sign in with GitHub at [clearcotelabs.com](https://clearcotelabs.com/pricing#free))
+  run **one browser at a time** across all your containers: a second container exits with
+  `The free tier runs one browser at a time` until the first is stopped. They need an image built
+  from **SDK 0.29.0 or newer** — `docker pull teamflatearth/clearcote` to refresh.
+- **Pro keys** have no cap on containers during the beta.
+- The container needs outbound HTTPS to `clearcotelabs.com` for the licence.
+
 ## Security
 
 The CDP endpoint is **full browser control**. Publish it only to trusted networks — bind it
@@ -71,8 +97,9 @@ host-local with `-p 127.0.0.1:9222:9222`, or keep it on an internal Docker netwo
 
 ## Notes
 
-- Requires the clearcote SDK **≥ 0.13.1** (pins the `v0.1.0-pre.19` binary). Rebuild + verify this
-  image yourself: `docker build -t clearcote .` — every layer is auditable.
+- Each image tag is built from one SDK release: `sdk-<version>` (e.g. `sdk-0.29.0`), `<browser>` (the
+  open binary it bakes in, e.g. `0.1.0-pre.22`) and `latest`. Rebuild + verify this image yourself:
+  `docker build -t clearcote .` — every layer is auditable.
 - `--disable-dev-shm-usage` is set; add `--shm-size=1g` on very heavy pages if needed.
 - WebGL/WebGPU render via ANGLE/SwiftShader (no GPU in the container); pair with the
   [canvas bridge](../docs/CANVAS-BRIDGE.md) for real-GPU pixel coherence.

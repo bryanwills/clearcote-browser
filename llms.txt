@@ -1,34 +1,55 @@
 # Clearcote Browser
 
-> An open-source, reproducible Chromium build with engine-level privacy and identity controls. De-Googled base (ungoogled-chromium) plus a transparent, readable patch set. Designed as a drop-in for Playwright/Puppeteer automation. **Windows x64 only for now** — that is the single platform currently focused on (the Windows binary is cross-compiled on Linux); macOS and Linux targets are on the roadmap, not yet available. 100% open — every change is a patch, every build is reproducible and checksummed.
+> An open-source, de-Googled Chromium with fingerprint controls compiled into the C++ engine, so a browser presents as one ordinary, coherent Chrome install — down to the TLS handshake. A drop-in for Playwright and Puppeteer: `launch()` returns a standard Playwright Browser. Windows x64 and Linux x64. Every change is a readable patch; every open build is reproducible, checksummed and GPG-signed.
+
+Site: https://clearcotelabs.com · Full docs for agents: https://clearcotelabs.com/llms-full.txt · Short summary: https://clearcotelabs.com/llms.txt
 
 ## Status
-Pre-release, building in the open. Latest signed browser build: v0.1.0-pre.6 (Chromium 149, Windows x64) on GitHub Releases. Python + Node SDKs published as `clearcote` (PyPI + npm). See /ROADMAP.md.
+Pre-release, building in the open.
+- Open build: Chromium 149 (149.0.7827.114, v0.1.0-pre.22) on GitHub Releases, Windows x64 + Linux x64. New Chromium majors reach it roughly 2 months after release.
+- Licensed build (Free with GitHub and Pro): Chromium 152 (152.0.7977.82 r22); 151 and 150 stay selectable.
+- SDK: `clearcote` 0.29.0 on PyPI, npm and NuGet (Python, Node, .NET).
+- Docker: `teamflatearth/clearcote` (SDK 0.29.0) — a stealth CDP endpoint on :9222.
+- MCP server: `clearcote-mcp` (PyPI / npm). Profile Manager desktop app 0.12.2 (Windows + Linux): https://github.com/clearcotelabs/clearcote-profile-manager
+
+## Quick start
+    pip install clearcote            # or: npm install clearcote / dotnet add package Clearcote
+
+    from clearcote import launch
+    browser = launch(fingerprint="seed-123", platform="windows", geoip=True, humanize=True,
+                     proxy={"server": "http://host:8080", "username": "u", "password": "p"})
+    page = browser.new_page(); page.goto("https://example.com")
+
+Command line (SDK 0.29.0, Python and Node): `clearcote install`, `clearcote info` (checks the install, engine features, a launch test, licence seats), `clearcote login [key]`, `clearcote clear-cache`, `clearcote serve` (one CDP endpoint, many identities chosen per connection).
+
+## Tiers
+- Open source: no account, reproducible from public source, full engine-level fingerprint control.
+- Free with GitHub: the licensed build — newest Chromium, recorded human motion, private stealth patches, profile library, older builds and pinning — free for ONE browser at a time. Sign in at https://clearcotelabs.com with a GitHub account at least 30 days old and claim a key under Licenses; it renews every 30 days. Needs SDK 0.29.0+.
+- Pro ($49/month): the same licensed build with as many browsers at once as you need, plus email support from the owner.
+Use a key with `CLEARCOTE_LICENSE_KEY=cc_lic_...`, `license_key=` / `licenseKey`, or `clearcote login`. The licensed build is not reproducible from public source; no tier unlocks more spoofing. Pricing: https://clearcotelabs.com/pricing
 
 ## Principles
-- Open by default (no proprietary blobs; readable patches only)
-- Engine-level controls, not injected JavaScript
-- Coherent, per-site-consistent identity (farbling-style model)
-- Engine-level coherence pass: secondary surfaces (WebGL limits/unmasked GPU, getBattery, navigator.connection, keyboard layout, AudioContext, screen details) stay consistent with the persona and a real Chrome-on-Windows desktop
-- In-browser AI agent: a native, in-process agent (perceive the page -> ask an LLM -> act via Chrome's Actor framework with real trusted input, not injected JS), usable with OpenRouter or any OpenAI-compatible endpoint; switch models with a single slug. SDK: launch_agent()/launchAgent() + run_agent_task()/runAgentTask()
-- Reproducible and verifiable (pinned upstream, checksums, planned attestation)
-- Lawful, responsible use
+- Open by default: readable patches, no proprietary blobs (the Widevine CDM is fetched on demand, never bundled).
+- Engine-level controls, not injected JavaScript or CDP hooks.
+- One coherent identity per seed (hardware, screen, GPU, fonts, locale, timezone, TLS), with per-site farbling for render surfaces.
+- Reproducible and verifiable: pinned upstream, SHA-256 checksums, GPG-signed releases.
+- Lawful, responsible use.
 
 ## Key docs
-- /README.md — what it is, why, quickstart, credits
-- /ROADMAP.md — phased plan and future
-- /docs/BUILDING.md — build from source
-- /docs/VERIFY.md — verify a release (don't trust, verify)
-- /docs/CANVAS-BRIDGE.md — run the optional real-GPU canvas bridge (forward canvas/WebGL ops to a remote GPU host so readbacks are coherent with the GPU you present; opt-in via --canvas-bridge-url)
-- /AGENTS.md — contributor & automation guide
-- /CREDITS.md — upstream attributions and licenses
-- /DISCLAIMER.md — responsible use and legal
+- /README.md — what it is, quick start, tiers, build availability
+- /sdk/python/README.md, /sdk/node/README.md — SDK reference (options, CLI, licensing, per-feature tier table)
+- /docker/README.md — the Docker image (persona env vars, licensed containers)
+- /mcp — the MCP server for Claude / Cursor / Cline
+- /docs/BUILDING.md — build from source · /docs/PATCHES.md — what each patch does
+- /docs/VERIFY.md — verify a release · /docs/UPGRADING.md — upgrading
+- /docs/CANVAS-BRIDGE.md — optional real-GPU canvas bridge
+- /AGENTS.md — contributor and automation guide · /ROADMAP.md · /CREDITS.md · /DISCLAIMER.md
 
 ## Inspiration (all open source)
 - Chromium (BSD-3)
 - ungoogled-chromium (BSD-3) — de-Googled base
 - fingerprint-chromium by adryfish (BSD-3) — engine-level fingerprint controls
-- chromiumfish by arman-bd (MIT) — coherence-surface reference (battery, navigator.connection, keyboard, display, WebGL limits), the in-browser AI-agent layer Clearcote ports + adapts to OpenRouter, and the canvas-bridge concept (remote real-GPU rendering) Clearcote re-implements clean-room
+- chromiumfish by arman-bd (MIT) — coherence-surface reference, the in-browser AI-agent layer Clearcote ports, and the canvas-bridge concept Clearcote re-implements clean-room
 - Brave — per-site deterministic "farbling" model
 - Camoufox — sibling open anti-detect browser (Firefox), design reference
 
