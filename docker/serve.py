@@ -179,7 +179,14 @@ if env.get("CLEARCOTE_SHADER_DIALECT"):
 # released when it stops. Exec'ing chrome killed the heartbeat: the lease quietly expired a few
 # minutes after start while the browser kept running — on the free plan that let a second
 # container start alongside the first — and a stopped container kept its slot until the TTL.
+#
+# The token is ALSO mirrored into a per-launch file (CLEARCOTE_RUN_TOKEN_FILE) that follows the
+# lease's rotation. A supporting engine (152 r23+) re-reads that file and stops a running FREE
+# browser once the token stops advancing, so revoke / check-in / over-limit reach this container
+# instead of only being checked at startup — and a free container WITHOUT the file is refused
+# outright by the engine. Older engines ignore the file, so this is additive.
 _lease = None
+_release_token_file = None
 if _license:
     try:
         from clearcote._license import acquire_lease
@@ -187,6 +194,13 @@ if _license:
         _lease = acquire_lease(_license, quiet=False)
         if _lease and _lease.token:
             env["CLEARCOTE_RUN_TOKEN"] = _lease.token
+            try:
+                token_file, _release_token_file = _lease.bind_launch()
+                env["CLEARCOTE_RUN_TOKEN_FILE"] = token_file
+            except Exception as exc:  # noqa: BLE001 -- an older SDK has no bind_launch; PRO still runs
+                print("[clearcote] WARNING: this SDK cannot keep the run-token fresh (%s: %s); a "
+                      "FREE licence needs a newer clearcote package." % (type(exc).__name__, exc),
+                      flush=True)
             print("[clearcote] licence lease acquired", flush=True)
         else:
             print("[clearcote] WARNING: no lease returned for this key; the PRO engine will "
@@ -218,6 +232,11 @@ code = chrome.wait()
 
 
 def _release_lease():
+    if _release_token_file is not None:
+        try:
+            _release_token_file()  # remove the per-launch run-token file
+        except Exception:  # noqa: BLE001 -- best-effort; it lives in the container's tmpdir
+            pass
     if _lease is None:
         return
     try:
