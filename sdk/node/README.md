@@ -269,6 +269,7 @@ await ctx.close();
 - `agentLlmUrl` points at any OpenAI-compatible endpoint (default OpenRouter); `agentToolMode` is `"tools"` (function-calling) or `"json"`.
 - Override the model per task: `runAgentTask(page, goal, { model: "anthropic/claude-3.5-sonnet" })`.
 - The agent needs a **regular profile** — use `launchAgent` / `launchPersistentContext`, not the incognito `launch()`.
+- Without `userDataDir`, `launchAgent` uses a temp profile and deletes it when the context closes; pass `userDataDir` to keep logins between runs.
 
 ### Capture or import a profile
 
@@ -333,7 +334,7 @@ All optional. Anything not listed here is passed straight through to Playwright
 > taskbar on Windows) and sizes the window to its work area the same way. It is applied at launch,
 > before your first navigation. Pass an explicit `viewport` or `screen` to opt out entirely.
 >
-> **Proxies:** a `socks5://user:pass@host:port` proxy is routed via `--proxy-server` (Playwright rejects credentials in its SOCKS descriptor). Chromium can't authenticate SOCKS5, so the credentials are dropped with a warning — put the auth on a local relay.
+> **Proxies:** a SOCKS5 proxy with credentials — written in the URL (`socks5://user:pass@host:port`) or passed as `username`/`password` — is routed via `--proxy-server` (Playwright rejects credentials in its SOCKS descriptor), and the credentials are passed to the engine, which implements SOCKS5 username/password authentication (RFC 1929). Stock Chromium does not, so no local relay is needed.
 
 ## Personas & Client Hints coherence
 

@@ -43,6 +43,9 @@ export interface SimpleResponse {
   json(): Promise<unknown>;
 }
 
+/** The proxy schemes {@link proxiedRequest} can tunnel through. */
+export const PROXIED_REQUEST_SCHEMES: ReadonlySet<string> = new Set(["http", "https", "socks5", "socks5h"]);
+
 /** Normalise a proxy given as a URL string (credentials inline) or a Playwright-style object. */
 export function toProxySpec(
   proxy: string | { server?: string; username?: string; password?: string } | null | undefined,

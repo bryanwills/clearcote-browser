@@ -43,6 +43,10 @@ class SimpleResponse:
         return json.loads(self.text())
 
 
+# The proxy schemes proxied_request can tunnel through.
+PROXIED_REQUEST_SCHEMES = frozenset(("http", "https", "socks5", "socks5h"))
+
+
 def _default_proxy_port(scheme: str) -> int:
     if scheme.startswith("socks"):
         return 1080

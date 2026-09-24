@@ -20,10 +20,6 @@ function proxyServer(proxy: unknown): string {
   if (typeof proxy === "object" && proxy && "server" in proxy) return String((proxy as { server?: unknown }).server ?? "");
   return String(proxy);
 }
-function isSocks(s: string): boolean {
-  const l = s.toLowerCase();
-  return l.startsWith("socks") || l.includes("://socks");
-}
 function hostFamily(host: string): string | null {
   if (host.startsWith("win")) return "windows";
   if (host === "darwin" || host.startsWith("mac")) return "macos";
@@ -68,10 +64,8 @@ export function coherenceWarnings(
       "proxy set without geoip and no timezone/acceptLanguage - the browser's timezone and language " +
       "will reflect THIS host, not the proxy's exit region (a geo-mismatch tell). Pass geoip:true, or " +
       "set timezone + acceptLanguage.");
-  if (server && geoip && isSocks(server))
-    warn("socks-geoip",
-      "geoip cannot resolve a SOCKS proxy's exit IP - timezone/language will NOT auto-match. Set " +
-      "timezone + acceptLanguage (+ webrtcIp) manually for SOCKS proxies.");
+  // No SOCKS + geoip warning: geoip resolves through socks5 (with credentials) since 0.29.0, and a
+  // scheme it cannot use fails the launch with a GeoipError that names it.
 
   const fam = hostFamily(host);
   if (platform && fam && platform !== fam && !profile)

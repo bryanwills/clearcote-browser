@@ -122,6 +122,56 @@ describe("resolveProxy", () => {
     expect(resolveProxy(proxy, false)).toEqual({ args: [], proxy });
   });
 
+  // Regression (found 2026-09-24, proven at runtime on r27): credentials written INTO the URL were
+  // ignored, because only the fields were read. The proxy went to Playwright, which rebuilds the
+  // server as scheme://host:port, and the browser's SOCKS5 greeting offered only "no auth".
+  it("routes credentials written in a SOCKS5 URL to the engine, like the fields", () => {
+    const r = resolveProxy({ server: "socks5://user:pass@h:1080" });
+    expect(r.args).toEqual(["--proxy-server=socks5://h:1080", "--socks5-credentials=user:pass"]);
+    expect(r.proxy).toBeUndefined();
+  });
+
+  it("percent-decodes URL credentials and splits at the last '@'", () => {
+    expect(resolveProxy({ server: "socks5://us%40er:p%3Ass%2Fw@h:1080" }).args)
+      .toEqual(["--proxy-server=socks5://h:1080", "--socks5-credentials=us@er:p:ss/w"]);
+    // an unescaped '@' in the password (URL parsers split userinfo at the LAST '@')
+    expect(resolveProxy({ server: "socks5://user:p@ss@h:1080" }).args)
+      .toEqual(["--proxy-server=socks5://h:1080", "--socks5-credentials=user:p@ss"]);
+    // a malformed escape is taken literally rather than throwing
+    expect(resolveProxy({ server: "socks5://user:100%@h:1080" }).args)
+      .toEqual(["--proxy-server=socks5://h:1080", "--socks5-credentials=user:100%"]);
+  });
+
+  it("routes credentials written in an http URL to --proxy-auth on engines that have it", () => {
+    const r = resolveProxy({ server: "http://u:p@h:3128", bypass: "*.internal" }, true);
+    expect(r.args).toEqual(["--proxy-server=http://h:3128", "--proxy-auth=u:p", "--proxy-bypass-list=*.internal"]);
+    expect(r.proxy).toBeUndefined();
+  });
+
+  it("hands URL credentials to Playwright as fields when it keeps an http proxy", () => {
+    // Playwright drops userinfo from `server`: left there, every request would 407.
+    const r = resolveProxy({ server: "http://u:p%21@h:3128", bypass: "*.internal" }, false);
+    expect(r.args).toEqual([]);
+    expect(r.proxy).toEqual({ server: "http://h:3128", username: "u", password: "p!", bypass: "*.internal" });
+  });
+
+  it("lets the fields win over userinfo, per field", () => {
+    expect(resolveProxy({ server: "socks5://urluser:urlpass@h:1080", password: "field" }).args)
+      .toEqual(["--proxy-server=socks5://h:1080", "--socks5-credentials=urluser:field"]);
+  });
+
+  it("warns about an engine without SOCKS5 auth when the credentials are in the URL", async () => {
+    const fs = await import("node:fs"); const os = await import("node:os"); const path = await import("node:path");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-warn-"));
+    try {
+      const noSocksAuth = path.join(dir, "r16"); fs.writeFileSync(noSocksAuth, Buffer.from("\0proxy-server\0", "latin1"));
+      const msgs = warnUnsupportedEngineOptions(noSocksAuth, {}, { server: "socks5://u:p@h:1080" }, true);
+      expect(msgs.some((m) => m.includes("cannot authenticate to a SOCKS5 proxy"))).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("socks5 routing does not depend on the --proxy-auth capability", () => {
     const proxy = { server: "socks5://h:1080", username: "u", password: "p" };
     expect(resolveProxy(proxy).args).toEqual(resolveProxy(proxy, true).args);

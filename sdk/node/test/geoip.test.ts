@@ -23,9 +23,9 @@ describe("acceptLanguageForCountry", () => {
 });
 
 describe("resolveGeo", () => {
-  it("returns null for a SOCKS proxy without any network call", async () => {
-    // SOCKS can't be used for the geo lookup, and we must NOT fall back to the local IP
-    // under a proxy (wrong region). Resolves to null synchronously after the scheme check.
+  it("returns null for a dead SOCKS5 proxy, never the local IP's region", async () => {
+    // The lookup goes THROUGH the proxy (SOCKS5 included); with the proxy down it must NOT fall
+    // back to the local IP (wrong region).
     expect(await resolveGeo({ server: "socks5://127.0.0.1:9050" }, { quiet: true })).toBeNull();
   });
 });

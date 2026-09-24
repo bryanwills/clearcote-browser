@@ -129,6 +129,56 @@ public class LaunchOptsTests
         Assert.Empty(a3); Assert.Same(httpAuth, p3);
     }
 
+    // Regression (found 2026-09-24, proven at runtime on r27): credentials written INTO the URL were
+    // ignored, because only the fields were read. The proxy went to Playwright, which rebuilds the
+    // server as scheme://host:port, and the browser's SOCKS5 greeting offered only "no auth".
+    [Fact]
+    public void ResolveProxy_routes_socks5_url_credentials_to_the_engine()
+    {
+        var (args, pw) = LaunchOpts.ResolveProxy(new ProxyOptions { Server = "socks5://user:pass@h:1080" });
+        Assert.Equal(new[] { "--proxy-server=socks5://h:1080", "--socks5-credentials=user:pass" }, args);
+        Assert.Null(pw);
+    }
+
+    [Theory]
+    [InlineData("socks5://us%40er:p%3Ass%2Fw@h:1080", "us@er:p:ss/w")] // percent-decoded
+    [InlineData("socks5://user:p@ss@h:1080", "user:p@ss")]             // split at the LAST '@'
+    [InlineData("socks5://user:100%@h:1080", "user:100%")]             // a malformed escape stays literal
+    public void ResolveProxy_decodes_url_credentials(string server, string creds)
+    {
+        var (args, _) = LaunchOpts.ResolveProxy(new ProxyOptions { Server = server });
+        Assert.Equal(new[] { "--proxy-server=socks5://h:1080", $"--socks5-credentials={creds}" }, args);
+    }
+
+    [Fact]
+    public void ResolveProxy_hands_url_credentials_to_playwright_as_fields()
+    {
+        // Playwright drops userinfo from Server: left there, every request would 407.
+        var (args, pw) = LaunchOpts.ResolveProxy(new ProxyOptions { Server = "http://u:p%21@h:3128", Bypass = "*.internal" });
+        Assert.Empty(args);
+        Assert.NotNull(pw);
+        Assert.Equal("http://h:3128", pw!.Server);
+        Assert.Equal("u", pw.Username);
+        Assert.Equal("p!", pw.Password);
+        Assert.Equal("*.internal", pw.Bypass);
+    }
+
+    [Fact]
+    public void ResolveProxy_lets_the_fields_win_over_userinfo_per_field()
+    {
+        var (args, _) = LaunchOpts.ResolveProxy(new ProxyOptions { Server = "socks5://urluser:urlpass@h:1080", Password = "field" });
+        Assert.Equal(new[] { "--proxy-server=socks5://h:1080", "--socks5-credentials=urluser:field" }, args);
+    }
+
+    [Fact]
+    public void ResolveProxy_keeps_the_bypass_list_when_it_owns_a_socks5_proxy()
+    {
+        // Parity with the Node and Python SDKs: the proxy no longer reaches Playwright, so its bypass
+        // list has to travel with the engine switches or it is silently dropped.
+        var (args, _) = LaunchOpts.ResolveProxy(new ProxyOptions { Server = "socks5://h:1080", Username = "u", Password = "p", Bypass = " *.internal " });
+        Assert.Equal(new[] { "--proxy-server=socks5://h:1080", "--socks5-credentials=u:p", "--proxy-bypass-list=*.internal" }, args);
+    }
+
     [Fact]
     public void PortableArgs_covers_both_modes()
     {

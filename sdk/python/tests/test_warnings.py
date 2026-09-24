@@ -19,9 +19,11 @@ def test_proxy_without_geo():
         {"proxy": "http://h:8080", "timezone": "America/New_York", "accept_language": "en-US,en", "headless": False})
 
 
-def test_socks_geoip_cannot_resolve():
-    assert "socks-geoip" in codes({"proxy": "socks5://u:p@h:1", "geoip": True, "headless": False})
-    assert "socks-geoip" not in codes({"proxy": "http://h:1", "geoip": True, "headless": False})
+def test_socks_geoip_is_not_flagged():
+    # This warned "geoip cannot resolve a SOCKS proxy's exit IP" on every SOCKS launch, long after
+    # the lookup learned to tunnel through SOCKS5 with credentials (0.29.0).
+    assert "socks-geoip" not in codes({"proxy": "socks5://u:p@h:1", "geoip": True, "headless": False})
+    assert codes({"proxy": {"server": "socks5://h:1"}, "geoip": True, "headless": False}) == set()
 
 
 def test_platform_vs_host_fonts():

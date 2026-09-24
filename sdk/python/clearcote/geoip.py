@@ -25,7 +25,7 @@ import time
 import urllib.request
 import zipfile
 
-from ._net import proxied_request, to_proxy_spec
+from ._net import PROXIED_REQUEST_SCHEMES, proxied_request, to_proxy_spec
 
 try:
     import maxminddb  # type: ignore
@@ -264,6 +264,10 @@ def resolve_geo_detailed(proxy=None, quiet=False, timeout=None):
         spec = to_proxy_spec(proxy) if proxy else None
     except Exception as e:  # noqa: BLE001
         return None, f"invalid proxy ({e})", elapsed()
+    # Say which scheme, rather than the "could not determine the exit IP" every lookup would end in.
+    scheme = spec["server"].split(":", 1)[0].lower() if spec else ""
+    if spec and scheme not in PROXIED_REQUEST_SCHEMES:
+        return None, f"{scheme}:// proxies are not supported; use http, https or socks5", elapsed()
     ip = _exit_ip(spec, deadline, quiet)
     geo = _mmdb_lookup(ip, deadline, quiet) if ip else None
     if not geo:

@@ -345,6 +345,7 @@ ctx.close()
 - `agent_llm_url` points at any OpenAI-compatible endpoint (default OpenRouter); `agent_tool_mode` is `"tools"` (function-calling) or `"json"`.
 - Override the model per task: `run_agent_task(page, goal, model="anthropic/claude-3.5-sonnet")`.
 - The agent needs a **regular profile** — use `launch_agent` / `launch_persistent_context`, not the incognito `launch()`.
+- Without `user_data_dir`, `launch_agent` uses a temp profile and deletes it when the context closes; pass `user_data_dir` to keep logins between runs.
 
 ### Capture or import a profile
 
@@ -412,7 +413,7 @@ All optional. Anything not listed here is passed straight through to Playwright
 > before your first navigation. Pass an explicit `viewport`, `screen` or `no_viewport` to opt out
 > entirely.
 >
-> **Proxies:** a `socks5://user:pass@host:port` proxy is routed via `--proxy-server` (Playwright rejects credentials in its SOCKS descriptor), and the credentials are passed to the engine, which implements SOCKS5 username/password authentication (RFC 1929). Stock Chromium does not, so no local relay is needed.
+> **Proxies:** a SOCKS5 proxy with credentials — written in the URL (`socks5://user:pass@host:port`) or passed as `username`/`password` — is routed via `--proxy-server` (Playwright rejects credentials in its SOCKS descriptor), and the credentials are passed to the engine, which implements SOCKS5 username/password authentication (RFC 1929). Stock Chromium does not, so no local relay is needed.
 
 ## Personas & Client Hints coherence
 

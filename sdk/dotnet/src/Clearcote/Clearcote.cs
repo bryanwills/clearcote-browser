@@ -15,7 +15,7 @@ namespace Clearcote;
 public static class Clearcote
 {
     /// This SDK's version (kept in lockstep with the npm/PyPI SDKs).
-    public const string Version = "0.31.0";
+    public const string Version = "0.31.1";
 
     private static readonly SemaphoreSlim PwLock = new(1, 1);
     private static IPlaywright? _pw;
@@ -267,7 +267,10 @@ public static class Clearcote
             $"--user-data-dir={userDataDir}",
         };
         if (options.Headless != false) cdpArgs.Add("--headless=new");
-        if (!string.IsNullOrEmpty(options.Proxy?.Server)) cdpArgs.Add($"--proxy-server={options.Proxy!.Server}");
+        // Never the caller's raw server: it comes after proxyArgs, so a second --proxy-server would
+        // win, and one still carrying user:pass@ is rejected by Chromium's parser: every request
+        // then fails with ERR_NO_SUPPORTED_PROXIES (measured on r27, Node serve()).
+        if (!string.IsNullOrEmpty(proxy?.Server)) cdpArgs.Add($"--proxy-server={proxy!.Server}");
         // Chromium refuses to start as root without --no-sandbox, and serve spawns the binary itself,
         // so Playwright's own --no-sandbox is missing: serve in a root container just timed out.
         if (LaunchOpts.ServeNeedsNoSandbox(Native.OsTag, LaunchOpts.EffectiveUid(), engineArgs)) cdpArgs.Add("--no-sandbox");

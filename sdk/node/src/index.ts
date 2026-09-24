@@ -571,6 +571,45 @@ async function applyAutoProfile(
 }
 
 /**
+ * Layer a saved persona's options under the caller's (`profile:` a name, path or Profile).
+ *
+ * `profile: "auto"` is NOT a saved option-set — it resolves a real captured fingerprint once the
+ * binary is known ({@link applyProfileAuto}) — so it must never reach Profile.load. Every entry
+ * point goes through here: launchPersistentContext and serve() used to load "auto" as a saved
+ * name and throw ENOENT for ~/.clearcote/profiles/auto.json, which broke the default launch().
+ */
+function mergeSavedProfile<T extends { profile?: string | Profile }>(options: T): T {
+  return options.profile && options.profile !== "auto"
+    ? { ...resolveProfileOptions(options.profile), ...options }
+    : options;
+}
+
+/**
+ * `profile: "auto"` -> resolve a REAL captured fingerprint for this host and apply it as
+ * fingerprintProfile. Deliberately does NOT set a seed: with no --fingerprint the farbling
+ * machinery stays off, which is the whole reason this path survives strict scoring.
+ * Called once `exe` is known, because both the engine's Chromium major and the host GPU
+ * measurement depend on the binary that will actually run. Pass-through (fingerprint "off") runs
+ * with NO persona, so "auto" has nothing to apply.
+ */
+async function applyProfileAuto(
+  profile: unknown,
+  fingerprint: FingerprintOptions,
+  exe: string,
+  o: { quiet?: boolean; licenseKey?: string; licenseApiBase?: string; profileSelect?: AutoOptions },
+): Promise<void> {
+  if (profile !== "auto" || isFingerprintPassthrough(fingerprint.fingerprint)) return;
+  await applyAutoProfile(fingerprint, exe, {
+    quiet: o.quiet,
+    licenseKey: resolveLicenseKey(o.licenseKey),
+    // The profile service lives on the same backend as licensing, so a caller who overrode
+    // one has overridden both; profilesource still prefers CLEARCOTE_PROFILE_API when set.
+    apiBase: o.licenseApiBase,
+    ...(o.profileSelect ?? {}),
+  });
+}
+
+/**
  * Delete a throwaway profile directory once its context closes.
  *
  * THE RETRY IS NOT DEFENSIVE PADDING — a single attempt measurably does not work. On Windows the
@@ -586,15 +625,7 @@ function installEphemeralProfileCleanup(context: BrowserContext, userDataDir: st
   let done = false;
   const remove = async () => {
     if (done) return;
-    for (let attempt = 0; attempt < 6; attempt++) {
-      try {
-        rmSync(userDataDir, { recursive: true, force: true });
-        done = true;
-        return;
-      } catch {
-        await new Promise((r) => setTimeout(r, 250 * (attempt + 1))); // 0.25→1.5s, ~5s total
-      }
-    }
+    done = await removeProfileDir(userDataDir);
   };
   context.on("close", () => { void remove(); });
   // Synchronous: an exit handler cannot await, and an unresolved promise at exit removes nothing.
@@ -602,6 +633,37 @@ function installEphemeralProfileCleanup(context: BrowserContext, userDataDir: st
     if (done) return;
     try { rmSync(userDataDir, { recursive: true, force: true }); } catch { /* temp sweeper gets it */ }
   });
+}
+
+/** Remove a profile directory, retrying while the browser still holds handles (see above). */
+async function removeProfileDir(userDataDir: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      rmSync(userDataDir, { recursive: true, force: true });
+      return true;
+    } catch {
+      await new Promise((r) => setTimeout(r, 250 * (attempt + 1))); // 0.25→1.5s, ~5s total
+    }
+  }
+  return false;
+}
+
+/**
+ * A persistent context on a fresh temp profile the caller never named, so never sees again: it is
+ * removed when the context closes and at process exit — and at once when the launch fails, which
+ * used to leak one directory per failed launch.
+ */
+async function launchOnThrowawayProfile(prefix: string, options: PersistentContextOptions): Promise<BrowserContext> {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  let context: BrowserContext;
+  try {
+    context = await launchPersistentContext(dir, options);
+  } catch (e) {
+    await removeProfileDir(dir);
+    throw e;
+  }
+  installEphemeralProfileCleanup(context, dir);
+  return context;
 }
 
 /**
@@ -658,25 +720,17 @@ export async function launch(options: LaunchOptions = {}): Promise<Browser> {
     return asBrowserLike(await launchPersistentContext(userDataDir, restOpts as PersistentContextOptions));
   }
   if (ephemeralProfile !== false) {
-    const dir = mkdtempSync(join(tmpdir(), "clearcote-run-"));
-    const context = await launchPersistentContext(dir, restOpts as PersistentContextOptions);
-    installEphemeralProfileCleanup(context, dir);
-    return asBrowserLike(context);
+    return asBrowserLike(await launchOnThrowawayProfile("clearcote-run-", restOpts as PersistentContextOptions));
   }
   return launchIncognito(restOpts as LaunchOptions);
 }
 
 /** The pre-0.23 incognito launch, reached via `ephemeralProfile: false`. */
 async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
-  // profile="auto" is NOT a saved option-set — it resolves a real captured fingerprint later,
-  // once the executable (and therefore the engine's Chromium major) is known.
-  const isAutoProfile = options.profile === "auto";
-  // profile= a saved persona: its options are the base, explicit options override.
-  const merged =
-    options.profile && !isAutoProfile
-      ? { ...resolveProfileOptions(options.profile as string | Profile), ...options }
-      : options;
-  const { profile: _profile, profileSelect: _profileSelect, extensions, portableProfile, shaderDialect, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, ...rest } = merged;
+  // profile= a saved persona: its options are the base, explicit options override. ("auto" is
+  // resolved later, once the executable is known.)
+  const merged = mergeSavedProfile(options);
+  const { profile, profileSelect, extensions, portableProfile, shaderDialect, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
@@ -686,30 +740,18 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   // Playwright's handling, which authenticates (routing blindly would leave every request at 407).
   const exe = await executablePath({ executablePath: exeOption, version, autoUpdate, cacheDir, quiet, releaseChannel, pro: proSelector(licenseKey, licenseApiBase) });  // capability-gated proxy route
   ensureRunnableHere(exe);
+  // Before the warnings below, so they judge the persona that will actually run (as in Python).
+  await applyProfileAuto(profile, fingerprint, exe, { quiet, licenseKey, licenseApiBase, profileSelect });
   // SOCKS5-with-credentials must go through --proxy-server (Playwright rejects it); drop it from PW.
   const { args: proxyArgs, proxy } = resolveProxy((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, engineSupportsSwitch(exe, "proxy-auth"));
   warnUnsupportedEngineOptions(exe, fingerprint as Record<string, unknown>, proxyOpt as PwProxy | undefined, quiet);
-  // proxy unchanged unless it was rerouted to --proxy-server, in which case drop it from Playwright
+  // proxy unchanged unless it was rerouted to --proxy-server (drop it from Playwright) or its URL
+  // carried the credentials (hand Playwright the fields it reads)
   if (proxy === undefined) delete (pwOptions as Record<string, unknown>).proxy;
+  else (pwOptions as PlaywrightLaunchOptions).proxy = proxy as PlaywrightLaunchOptions["proxy"];
   emitCoherenceWarnings(
     { ...fingerprint, proxy: proxyOpt, geoip, headless: (pwOptions as PlaywrightLaunchOptions).headless, _userArgs: args ?? [] },
     quiet, process.platform, String(RELEASE.version).split(".")[0]);
-  // A license key selects the PRO (gated) binary; no key -> the free binary (unchanged path).
-  // profile:"auto" -> resolve a REAL captured fingerprint for this host and apply it as
-  // fingerprintProfile. Deliberately does NOT set a seed: with no --fingerprint the farbling
-  // machinery stays off, which is the whole reason this path survives strict scoring.
-  // Resolved here, after `exe` is known, because both the engine's Chromium major and the host
-  // GPU measurement depend on the binary that will actually run.
-  if (isAutoProfile && !isFingerprintPassthrough(fingerprint.fingerprint)) {
-    await applyAutoProfile(fingerprint, exe, {
-      quiet,
-      licenseKey: resolveLicenseKey(licenseKey),
-      // The profile service lives on the same backend as licensing, so a caller who overrode
-      // one has overridden both; profilesource still prefers CLEARCOTE_PROFILE_API when set.
-      apiBase: licenseApiBase,
-      ...(options.profileSelect ?? {}),
-    });
-  }
   const headed = (pwOptions as PlaywrightLaunchOptions).headless === false;
   // License (opt-in): check out a concurrency slot and inject CLEARCOTE_RUN_TOKEN so the PRO
   // engine gate lets the browser launch. Inert (null) in free mode / when no key is set.
@@ -757,17 +799,19 @@ export async function launchPersistentContext(
   userDataDir: string,
   options: PersistentContextOptions = {}
 ): Promise<BrowserContext> {
-  const merged = options.profile ? { ...resolveProfileOptions(options.profile), ...options } : options;
-  const { profile: _profile, extensions, portableProfile, shaderDialect, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, ...rest } = merged;
+  const merged = mergeSavedProfile(options);
+  const { profile, profileSelect, extensions, portableProfile, shaderDialect, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
   if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy, quiet);
   const exe = await executablePath({ executablePath: exeOption, version, autoUpdate, cacheDir, quiet, releaseChannel, pro: proSelector(licenseKey, licenseApiBase) });  // capability-gated proxy route
   ensureRunnableHere(exe);
+  await applyProfileAuto(profile, fingerprint, exe, { quiet, licenseKey, licenseApiBase, profileSelect });
   const { args: proxyArgs, proxy } = resolveProxy((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, engineSupportsSwitch(exe, "proxy-auth"));
   warnUnsupportedEngineOptions(exe, fingerprint as Record<string, unknown>, proxyOpt as PwProxy | undefined, quiet);
   if (proxy === undefined) delete (pwOptions as Record<string, unknown>).proxy;
+  else (pwOptions as PlaywrightLaunchOptions).proxy = proxy as PlaywrightLaunchOptions["proxy"];
   emitCoherenceWarnings(
     { ...fingerprint, proxy: proxyOpt, geoip, headless: (pwOptions as PlaywrightLaunchOptions).headless, _userArgs: args ?? [] },
     quiet, process.platform, String(RELEASE.version).split(".")[0]);
@@ -831,7 +875,8 @@ export async function launchPersistentContext(
 
 /** Options for {@link launchAgent}: persistent-context options + an optional `userDataDir`. */
 export interface LaunchAgentOptions extends PersistentContextOptions {
-  /** Profile directory to persist (cookies/storage/logins). Defaults to a fresh temp dir. */
+  /** Profile directory to persist (cookies/storage/logins). Defaults to a fresh temp dir that is
+   * deleted when the context closes. */
   userDataDir?: string;
 }
 
@@ -839,7 +884,8 @@ export interface LaunchAgentOptions extends PersistentContextOptions {
  * Launch Clearcote ready for the in-browser AI agent and return a Playwright {@link BrowserContext}.
  *
  * The agent drives Chrome's Actor framework, which only attaches to a **regular profile** — not
- * incognito — so this uses a *persistent* context (a fresh temp `userDataDir` unless you pass one).
+ * incognito — so this uses a *persistent* context: a fresh temp `userDataDir`, deleted when the
+ * context closes, unless you pass one to keep.
  * Set `agentLlmKey` (+ optional `agentModel`), then drive a page with {@link runAgentTask}:
  *
  * ```ts
@@ -854,8 +900,8 @@ export interface LaunchAgentOptions extends PersistentContextOptions {
  */
 export async function launchAgent(options: LaunchAgentOptions = {}): Promise<BrowserContext> {
   const { userDataDir, ...rest } = options;
-  const dir = userDataDir ?? mkdtempSync(join(tmpdir(), "clearcote-agent-"));
-  return launchPersistentContext(dir, rest);
+  if (userDataDir !== undefined) return launchPersistentContext(userDataDir, rest);
+  return launchOnThrowawayProfile("clearcote-agent-", rest);
 }
 
 /** A free ephemeral TCP port on loopback. */
@@ -985,11 +1031,9 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   }
 
   // Build the same stealth arg set as launch(), then launch the binary ourselves.
-  const merged = launchOpts.profile
-    ? { ...resolveProfileOptions(launchOpts.profile), ...launchOpts }
-    : launchOpts;
+  const merged = mergeSavedProfile(launchOpts);
   const {
-    profile: _profile, extensions, portableProfile, shaderDialect, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption,
+    profile, profileSelect, extensions, portableProfile, shaderDialect, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption,
     args: userArgs, geoip, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, ...rest
   } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
@@ -998,7 +1042,10 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   if (geoip) await applyGeoip(fingerprint, proxyOpt, quiet);
   const exe = await executablePath({ executablePath: exeOption, version, autoUpdate, cacheDir, quiet, releaseChannel, pro: proSelector(licenseKey, licenseApiBase) });  // capability-gated proxy route
   ensureRunnableHere(exe);
-  const { args: proxyArgs } = resolveProxy(proxyOpt, engineSupportsSwitch(exe, "proxy-auth"));
+  await applyProfileAuto(profile, fingerprint, exe, { quiet, licenseKey, licenseApiBase, profileSelect });
+  // passProxy: what is left for a plain --proxy-server once credentials went to the engine's own
+  // switches (undefined then — proxyArgs already carries --proxy-server).
+  const { args: proxyArgs, proxy: passProxy } = resolveProxy(proxyOpt, engineSupportsSwitch(exe, "proxy-auth"));
   warnUnsupportedEngineOptions(exe, fingerprint as Record<string, unknown>, proxyOpt, quiet);
   emitCoherenceWarnings(
     { ...fingerprint, proxy: proxyOpt, geoip, headless, _userArgs: userArgs ?? [] },
@@ -1022,7 +1069,10 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
     `--user-data-dir=${userDataDir}`,
   ];
   if (headless) cdpArgs.push("--headless=new");
-  if (proxyOpt?.server) cdpArgs.push(`--proxy-server=${proxyOpt.server}`);
+  // Never the caller's raw server: it comes after proxyArgs, so a second --proxy-server would win,
+  // and one still carrying user:pass@ is rejected by Chromium's parser — every request then failed
+  // with ERR_NO_SUPPORTED_PROXIES (measured on r27).
+  if (passProxy?.server) cdpArgs.push(`--proxy-server=${passProxy.server}`);
   // Chromium refuses to start as root without --no-sandbox, and serve spawns the binary itself, so
   // Playwright's own --no-sandbox is missing: `clearcote serve` in a root container just timed out.
   if (serveNeedsNoSandbox(process.platform, process.getuid?.(), engineArgs)) cdpArgs.push("--no-sandbox");

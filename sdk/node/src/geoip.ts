@@ -19,7 +19,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import extract from "extract-zip";
 import maxmind, { type Reader } from "maxmind";
-import { proxiedRequest, toProxySpec, type ProxySpec } from "./net.js";
+import { PROXIED_REQUEST_SCHEMES, proxiedRequest, toProxySpec, type ProxySpec } from "./net.js";
 
 const MMDB_URL = "https://github.com/daijro/geoip-all-in-one/releases/latest/download/geoip-aio-all.mmdb.zip";
 const MMDB_MAX_AGE_DAYS = 30;
@@ -215,6 +215,11 @@ export async function resolveGeoDetailed(
     spec = toProxySpec(proxy ?? null);
   } catch (e) {
     return { geo: null, reason: `invalid proxy (${(e as Error).message})`, elapsedMs: Date.now() - started };
+  }
+  // Say which scheme, rather than the "could not determine the exit IP" every lookup would end in.
+  const scheme = spec ? spec.server.slice(0, spec.server.indexOf(":")).toLowerCase() : "";
+  if (spec && !PROXIED_REQUEST_SCHEMES.has(scheme)) {
+    return { geo: null, reason: `${scheme}:// proxies are not supported; use http, https or socks5`, elapsedMs: Date.now() - started };
   }
   const ip = await exitIp(spec, deadline, opts.quiet);
   let geo: Geo | null = ip ? await mmdbLookup(ip, deadline, opts.quiet) : null;

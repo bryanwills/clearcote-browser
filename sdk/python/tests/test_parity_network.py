@@ -154,6 +154,16 @@ def test_geoip_reports_why_within_budget(servers):
     assert ms >= 1000
 
 
+def test_geoip_names_a_proxy_scheme_it_cannot_tunnel_through():
+    # The coherence warning that used to cover this ("geoip cannot resolve a SOCKS proxy") was wrong
+    # for socks5 and never printed before the GeoipError anyway; the error has to say it.
+    geo, reason, _ms = resolve_geo_detailed({"server": "socks4://127.0.0.1:1"}, quiet=True, timeout=1.5)
+    assert geo is None
+    assert reason == "socks4:// proxies are not supported; use http, https or socks5"
+    with pytest.raises(GeoipError, match="socks4:// proxies are not supported"):
+        clearcote.apply_geoip({}, {"server": "socks4://127.0.0.1:1"}, quiet=True)
+
+
 def test_geoip_refused_proxy_reports_exit_ip_reason():
     geo, reason, _ms = resolve_geo_detailed({"server": "socks5://127.0.0.1:1"}, quiet=True, timeout=3)
     assert geo is None

@@ -5,6 +5,7 @@ mirror the Node SDK exactly."""
 import re
 import sys
 import warnings
+from urllib.parse import unquote
 
 _SOCKS5 = re.compile(r"^socks5", re.I)
 _SOCKS = re.compile(r"^socks", re.IGNORECASE)
@@ -243,13 +244,35 @@ def warn_unsupported_engine_options(exe, fp, proxy, quiet=False):
             if not engine_supports_switch(exe, switch):
                 warnings.warn(f"clearcote: {label} is not supported by this engine build and is ignored; "
                               "upgrade the engine to use it.", stacklevel=3)
-        server = str((proxy or {}).get("server") or "") if isinstance(proxy, dict) else ""
-        has_creds = isinstance(proxy, dict) and bool(proxy.get("username") or proxy.get("password"))
+        server, username, password = proxy_credentials(proxy) if isinstance(proxy, dict) else ("", "", "")
+        has_creds = bool(username or password)
         if server and has_creds and _SOCKS.match(server) and not engine_supports_switch(exe, "socks5-credentials"):
             warnings.warn("clearcote: this engine build cannot authenticate to a SOCKS5 proxy "
                           "(needs r17+); the proxy will reject the connection.", stacklevel=3)
     except Exception:  # noqa: BLE001
         pass
+
+
+_URL_AUTHORITY = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.-]*://)([^/?#]*)(.*)$", re.DOTALL)
+
+
+def proxy_credentials(proxy):
+    """``(server, username, password)`` for a Playwright proxy dict, ``server`` without userinfo.
+
+    ``socks5://user:pass@host:1080`` is the shape most proxy providers hand out, so credentials
+    written into the URL count exactly like the ``username``/``password`` keys (which win when both
+    are given, as in ``to_proxy_spec``). Userinfo is percent-decoded, like a browser reads it, and
+    split at the LAST '@' of the authority, like a URL parser, so an unescaped '@' in a password
+    survives."""
+    raw = (proxy.get("server") or "").strip()
+    server, url_user, url_pass = raw, "", ""
+    m = _URL_AUTHORITY.match(raw)
+    if m and "@" in m.group(2):
+        info, _, hostport = m.group(2).rpartition("@")
+        user, sep, pw = info.partition(":")
+        url_user, url_pass = unquote(user), unquote(pw) if sep else ""
+        server = m.group(1) + hostport + m.group(3)
+    return server, proxy.get("username") or url_user, proxy.get("password") or url_pass
 
 
 def resolve_proxy(proxy, engine_supports_proxy_auth=False):
@@ -269,28 +292,40 @@ def resolve_proxy(proxy, engine_supports_proxy_auth=False):
     Playwright instead makes its driver enable Fetch interception and ``Network.setCacheDisabled``
     for the whole context -- every request then bypasses the cache and carries the interception's
     side effects, a transport tell that has nothing to do with the persona. Proxies without
-    credentials are left to Playwright unchanged."""
+    credentials are left to Playwright unchanged.
+
+    Credentials count wherever they were written (see ``proxy_credentials``). Reading only the
+    keys used to hand a ``socks5://user:pass@host`` proxy to Playwright, which rebuilds the server
+    as scheme://host:port: the browser then offered the proxy no authentication at all."""
     if not isinstance(proxy, dict):
         return [], proxy
-    server = (proxy.get("server") or "").strip()
-    has_creds = bool(proxy.get("username") or proxy.get("password"))
+    server, username, password = proxy_credentials(proxy)
+    has_creds = bool(username or password)
     # http(s) credentials go to the engine only when it implements --proxy-auth (r19+). Older
     # engines keep Playwright's handling: it works, at the cost of the interception side effects.
     http_to_engine = bool(_HTTP_PROXY.match(server)) and engine_supports_proxy_auth
     if server and has_creds and (_SOCKS.match(server) or http_to_engine):
-        # Strip any userinfo already in the URL; the engine takes it via its own switch. Userinfo
-        # left in --proxy-server is rejected by Chromium's proxy parser and the entry is dropped,
-        # i.e. the browser would go DIRECT -- never emit it.
-        bare = re.sub(r"^([a-zA-Z0-9+.-]+://)[^/@]*@", r"\1", server)
-        creds = "%s:%s" % (proxy.get("username") or "", proxy.get("password") or "")
+        # `server` has no userinfo; the engine takes it via its own switch. Userinfo left in
+        # --proxy-server is rejected by Chromium's proxy parser and the entry is dropped: every
+        # request then fails with ERR_NO_SUPPORTED_PROXIES (measured on r27) -- never emit it.
+        creds = "%s:%s" % (username, password)
         switch = "--socks5-credentials=" if _SOCKS.match(server) else "--proxy-auth="
-        args = ["--proxy-server=" + bare, switch + creds]
+        args = ["--proxy-server=" + server, switch + creds]
         bypass = (proxy.get("bypass") or "").strip()
         if bypass:
             args.append("--proxy-bypass-list=" + bypass)
         # drop the proxy from Playwright: it would reject a credentialed SOCKS descriptor, and for
         # http(s) it would turn on interception + cache-disable for the credentials we now own
         return args, None
+    # Left to Playwright. It drops userinfo from the server, so credentials written there are
+    # handed over as the keys it reads (an http proxy on an engine without --proxy-auth).
+    if server != (proxy.get("server") or "").strip():
+        out = {**proxy, "server": server}
+        if username:
+            out["username"] = username
+        if password:
+            out["password"] = password
+        return [], out
     return [], proxy
 
 

@@ -28,7 +28,7 @@ import tempfile
 
 from . import (  # shared sync helpers
     _headed_no_viewport, _headless_geometry_kwargs, _prepare, _acquire_lease_from_kwargs,
-    _is_win_launch_race, _with_geometry_args,
+    _is_win_launch_race, _with_geometry_args, _profile_dir_remover,
 )
 from ._launchopts import DEFAULT_IGNORED_ARGS
 from ._geometry import apply_headless_geometry, fit_window_to_work_area_async
@@ -305,10 +305,28 @@ async def launch_persistent_context(user_data_dir, **kwargs):
 async def launch_agent(user_data_dir=None, **kwargs):
     """Launch Clearcote ready for the in-browser AI agent; returns a Playwright **async**
     ``BrowserContext``. Set ``agent_llm_key`` (+ optional ``agent_model``), then drive a page with
-    ``run_agent_task``. Uses a persistent context (the Actor framework needs a regular profile)."""
-    if user_data_dir is None:
-        user_data_dir = tempfile.mkdtemp(prefix="clearcote-agent-")
-    return await launch_persistent_context(user_data_dir, **kwargs)
+    ``run_agent_task``. Uses a persistent context (the Actor framework needs a regular profile): a
+    fresh temp ``user_data_dir``, deleted when the context closes, unless you pass one to keep."""
+    if user_data_dir is not None:
+        return await launch_persistent_context(user_data_dir, **kwargs)
+    # The sync path's throwaway-profile handling, async: removed on close and at interpreter exit,
+    # and at once when the launch fails (it used to leak one directory per failed launch).
+    import atexit
+
+    udd = tempfile.mkdtemp(prefix="clearcote-agent-")
+    remove = _profile_dir_remover(udd)
+    try:
+        context = await launch_persistent_context(udd, **kwargs)
+    except BaseException:
+        await asyncio.to_thread(remove)
+        raise
+
+    async def _on_close(*_a):
+        await asyncio.to_thread(remove)  # retries with sleeps: keep them off the event loop
+
+    context.on("close", _on_close)
+    atexit.register(remove)
+    return context
 
 
 async def run_agent_task(page, goal, model=None, max_steps=None, plan_json=None):

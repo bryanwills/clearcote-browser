@@ -15,9 +15,11 @@ describe("coherenceWarnings", () => {
     expect(codes({ proxy: "http://h:8080", timezone: "America/New_York", acceptLanguage: "en-US,en", headless: false }).has("proxy-no-geo")).toBe(false);
   });
 
-  it("flags SOCKS + geoip (can't resolve)", () => {
-    expect(codes({ proxy: "socks5://u:p@h:1", geoip: true, headless: false }).has("socks-geoip")).toBe(true);
-    expect(codes({ proxy: "http://h:1", geoip: true, headless: false }).has("socks-geoip")).toBe(false);
+  it("does not flag SOCKS + geoip: geoip resolves through socks5 (with auth) since 0.29.0", () => {
+    // This warned "geoip cannot resolve a SOCKS proxy's exit IP" on every SOCKS launch, long after
+    // the lookup learned to tunnel through SOCKS5.
+    expect(codes({ proxy: "socks5://u:p@h:1", geoip: true, headless: false }).has("socks-geoip")).toBe(false);
+    expect(codes({ proxy: { server: "socks5://h:1" }, geoip: true, headless: false })).toEqual(new Set());
   });
 
   it("flags platform spoofed away from the host without a profile", () => {

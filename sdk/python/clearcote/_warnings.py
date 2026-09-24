@@ -25,11 +25,6 @@ def _proxy_server(proxy):
     return str(proxy)
 
 
-def _is_socks(server):
-    s = server.lower()
-    return s.startswith("socks") or "://socks" in s
-
-
 def _host_family(host):
     if host.startswith("win"):
         return "windows"
@@ -81,10 +76,8 @@ def coherence_warnings(opts, host_platform=None, build_major=None):
              "proxy set without geoip and no timezone/accept_language - the browser's timezone and "
              "language will reflect THIS host, not the proxy's exit region (a geo-mismatch tell). "
              "Pass geoip=True, or set timezone + accept_language.")
-    if server and geoip and _is_socks(server):
-        warn("socks-geoip",
-             "geoip cannot resolve a SOCKS proxy's exit IP - timezone/language will NOT auto-match. "
-             "Set timezone + accept_language (+ webrtc_ip) manually for SOCKS proxies.")
+    # No SOCKS + geoip warning: geoip resolves through socks5 (with credentials) since 0.29.0, and
+    # a scheme it cannot use fails the launch with a GeoipError that names it.
 
     # --- persona / cross-signal coherence ---
     fam = _host_family(host)

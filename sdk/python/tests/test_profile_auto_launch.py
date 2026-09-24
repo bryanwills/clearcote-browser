@@ -94,20 +94,21 @@ class TestApplyAutoProfile:
 class TestPrepareRouting:
     def test_auto_is_not_treated_as_a_saved_profile_name(self, monkeypatch):
         # resolve_profile_options would raise or look up a file called "auto"; the auto path must
-        # never reach it.
+        # never reach it, and must reach the auto resolver instead.
         def boom(*a, **k):
             raise AssertionError("resolve_profile_options must not be called for profile='auto'")
 
+        routed = []
         monkeypatch.setattr(clearcote, "resolve_profile_options", boom)
-        kwargs = {"profile": "auto"}
-        # _prepare does much more than this, but the routing decision happens first and is what
-        # this asserts; it raises later for lack of a real binary, which is fine.
-        try:
-            clearcote._prepare(kwargs)
-        except AssertionError:
-            raise
-        except Exception:
-            pass  # any non-AssertionError failure is downstream of the routing decision
+        # Hermetic. This used to run _prepare for real: on a machine with a cached engine and a
+        # cold host cache it ran the real host probe (a browser launch through Playwright's SYNC
+        # API, with this machine's licence), which left an event loop running on this thread and
+        # broke every async test that ran after it.
+        monkeypatch.setattr(clearcote, "_resolve_binary", lambda *a, **k: "/path/chrome")
+        monkeypatch.setattr(clearcote, "_apply_auto_profile",
+                            lambda fp, exe, select, quiet=False, pro=None: routed.append(exe))
+        clearcote._prepare({"profile": "auto", "quiet": True})
+        assert routed == ["/path/chrome"]
 
 
 class TestNestedProbeLaunchIsLicensed:

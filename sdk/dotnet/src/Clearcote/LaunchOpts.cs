@@ -130,24 +130,66 @@ public static class LaunchOpts
         return new() { $"--load-extension={joined}", $"--disable-extensions-except={joined}" };
     }
 
+    /// The credentials a proxy descriptor carries, and its server with any userinfo removed.
+    /// socks5://user:pass@host:1080 is the shape most proxy providers hand out, so credentials
+    /// written into the URL count exactly like <see cref="ProxyOptions.Username"/> /
+    /// <see cref="ProxyOptions.Password"/> (which win when both are given, as in
+    /// <see cref="ProxySpec.From(ProxyOptions?)"/>). Userinfo is percent-decoded, like a browser
+    /// reads it, and split at the LAST '@' of the authority, like a URL parser, so an unescaped '@'
+    /// in a password survives.
+    public static (string Server, string Username, string Password) ProxyCredentials(ProxyOptions proxy)
+    {
+        var raw = proxy.Server?.Trim() ?? string.Empty;
+        string server = raw, urlUser = string.Empty, urlPass = string.Empty;
+        var m = Regex.Match(raw, "^([a-zA-Z][a-zA-Z0-9+.-]*://)([^/?#]*)(.*)$", RegexOptions.Singleline);
+        var at = m.Success ? m.Groups[2].Value.LastIndexOf('@') : -1;
+        if (at >= 0)
+        {
+            var info = m.Groups[2].Value[..at];
+            var colon = info.IndexOf(':');
+            urlUser = Uri.UnescapeDataString(colon < 0 ? info : info[..colon]);
+            urlPass = colon < 0 ? string.Empty : Uri.UnescapeDataString(info[(colon + 1)..]);
+            server = m.Groups[1].Value + m.Groups[2].Value[(at + 1)..] + m.Groups[3].Value;
+        }
+        return (server,
+            string.IsNullOrEmpty(proxy.Username) ? urlUser : proxy.Username,
+            string.IsNullOrEmpty(proxy.Password) ? urlPass : proxy.Password);
+    }
+
     /// Playwright rejects credentials in its SOCKS proxy descriptor, so a
     /// socks5://user:pass@host:port proxy is routed through --proxy-server instead and the
     /// credentials handed to the engine via --socks5-credentials. Clearcote implements RFC 1929
     /// username/password authentication, which stock Chromium does not, so no local relay is
-    /// needed. Everything else passes through unchanged. Returns the extra args + the (possibly
-    /// nulled) proxy to hand to Playwright.
+    /// needed. Credentials count wherever they were written (see <see cref="ProxyCredentials"/>):
+    /// reading only the fields used to hand a URL-credentialed SOCKS5 proxy to Playwright, which
+    /// rebuilds the server as scheme://host:port, and the browser offered the proxy no
+    /// authentication at all. Everything else passes through, minus any userinfo in the server.
+    /// Returns the extra args + the (possibly nulled) proxy to hand to Playwright.
     public static (List<string> Args, ProxyOptions? Proxy) ResolveProxy(ProxyOptions? proxy)
     {
         if (proxy is null) return (new(), null);
-        var isSocks = proxy.Server?.StartsWith("socks", StringComparison.OrdinalIgnoreCase) ?? false;
-        var hasCreds = !string.IsNullOrEmpty(proxy.Username) || !string.IsNullOrEmpty(proxy.Password);
-        if (isSocks && hasCreds && !string.IsNullOrEmpty(proxy.Server))
+        var (server, user, pass) = ProxyCredentials(proxy);
+        var isSocks = server.StartsWith("socks", StringComparison.OrdinalIgnoreCase);
+        var hasCreds = user.Length > 0 || pass.Length > 0;
+        if (isSocks && hasCreds)
         {
-            // Strip any userinfo already in the URL; the engine takes it via its own switch.
-            var bare = Regex.Replace(proxy.Server!, "^([a-zA-Z0-9+.-]+://)[^/@]*@", "$1");
-            var creds = $"{proxy.Username ?? string.Empty}:{proxy.Password ?? string.Empty}";
-            return (new() { $"--proxy-server={bare}", $"--socks5-credentials={creds}" }, null);
+            // `server` has no userinfo; the engine takes it via its own switch. Userinfo left in
+            // --proxy-server is rejected by Chromium's proxy parser and the entry dropped: every
+            // request then fails with ERR_NO_SUPPORTED_PROXIES (measured on r27).
+            var args = new List<string> { $"--proxy-server={server}", $"--socks5-credentials={user}:{pass}" };
+            if (!string.IsNullOrWhiteSpace(proxy.Bypass)) args.Add($"--proxy-bypass-list={proxy.Bypass.Trim()}");
+            return (args, null);
         }
+        // Left to Playwright. It drops userinfo from the server, so credentials written there are
+        // handed over as the fields it reads.
+        if (server != (proxy.Server?.Trim() ?? string.Empty))
+            return (new(), new ProxyOptions
+            {
+                Server = server,
+                Username = user.Length > 0 ? user : null,
+                Password = pass.Length > 0 ? pass : null,
+                Bypass = proxy.Bypass,
+            });
         return (new(), proxy);
     }
 

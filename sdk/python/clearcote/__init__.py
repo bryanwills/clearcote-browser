@@ -147,7 +147,7 @@ __all__ = [
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.31.0"
+__version__ = "0.31.1"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -619,6 +619,16 @@ def _install_ephemeral_profile_cleanup(context, user_data_dir):
     570 directories accumulate without anyone noticing.
     """
     import atexit
+
+    cleanup = _profile_dir_remover(user_data_dir)
+    context.on("close", cleanup)
+    atexit.register(cleanup)
+    return cleanup
+
+
+def _profile_dir_remover(user_data_dir):
+    """An idempotent remove of ``user_data_dir`` that retries while the browser still holds
+    handles under it (see _install_ephemeral_profile_cleanup for why one attempt is not enough)."""
     import shutil
     import time
 
@@ -644,9 +654,24 @@ def _install_ephemeral_profile_cleanup(context, user_data_dir):
         # atexit hook genuinely retries rather than short-circuiting.
         shutil.rmtree(user_data_dir, ignore_errors=True)
 
-    context.on("close", cleanup)
-    atexit.register(cleanup)
     return cleanup
+
+
+def _launch_on_throwaway_profile(prefix, kwargs):
+    """A persistent context on a fresh temp profile the caller never named, so never sees again:
+    removed when the context closes and at interpreter exit -- and at once when the launch fails,
+    which used to leak one directory per failed launch."""
+    import tempfile
+
+    udd = tempfile.mkdtemp(prefix=prefix)
+    try:
+        # looked up at call time (module global), so tests can stand in for the real launch
+        context = launch_persistent_context(udd, **kwargs)
+    except BaseException:
+        _profile_dir_remover(udd)()
+        raise
+    _install_ephemeral_profile_cleanup(context, udd)
+    return context
 
 
 def _install_persistent_as_browser(context):
@@ -789,12 +814,7 @@ def launch(**kwargs):
     if explicit_dir is not None:
         return launch_persistent_context(explicit_dir, **kwargs)
     if ephemeral:
-        import tempfile
-
-        udd = tempfile.mkdtemp(prefix="clearcote-run-")
-        context = launch_persistent_context(udd, **kwargs)
-        _install_ephemeral_profile_cleanup(context, udd)
-        return _install_persistent_as_browser(context)
+        return _install_persistent_as_browser(_launch_on_throwaway_profile("clearcote-run-", kwargs))
 
     shader_dialect = kwargs.pop("shader_dialect", None)  # popped before _prepare: not a PW option
     lease = _acquire_lease_from_kwargs(kwargs)  # opt-in; None in free mode
@@ -876,15 +896,14 @@ def launch_agent(user_data_dir=None, **kwargs):
     """Launch Clearcote ready for the in-browser AI agent; returns a Playwright ``BrowserContext``.
 
     The agent drives Chrome's Actor framework, which only attaches to a REGULAR profile (not
-    incognito), so this uses a persistent context (a fresh temp ``user_data_dir`` unless you pass
-    one). Set ``agent_llm_key`` (+ optional ``agent_model``), then drive a page with
-    ``run_agent_task()``. Use this (or ``launch_persistent_context``) for the agent -- plain
-    ``launch()`` is incognito, where the Actor framework can't attach the tab."""
-    import tempfile
-
-    if user_data_dir is None:
-        user_data_dir = tempfile.mkdtemp(prefix="clearcote-agent-")
-    return launch_persistent_context(user_data_dir, **kwargs)
+    incognito), so this uses a persistent context: a fresh temp ``user_data_dir``, deleted when the
+    context closes, unless you pass one to keep. Set ``agent_llm_key`` (+ optional
+    ``agent_model``), then drive a page with ``run_agent_task()``. Use this (or
+    ``launch_persistent_context``) for the agent -- plain ``launch()`` is incognito, where the
+    Actor framework can't attach the tab."""
+    if user_data_dir is not None:
+        return launch_persistent_context(user_data_dir, **kwargs)
+    return _launch_on_throwaway_profile("clearcote-agent-", kwargs)
 
 
 def serve_multiplex(**kwargs):

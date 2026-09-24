@@ -84,6 +84,54 @@ def test_resolve_proxy_socks5_strips_userinfo_already_in_url():
     assert pw is None
 
 
+# Regression (found 2026-09-24, proven at runtime on r27): credentials written INTO the URL were
+# ignored, because only the keys were read. The proxy went to Playwright, which rebuilds the server
+# as scheme://host:port, and the browser's SOCKS5 greeting offered only "no auth".
+def test_resolve_proxy_routes_socks5_url_credentials_to_the_engine():
+    args, pw = resolve_proxy({"server": "socks5://user:pass@h:1080"})
+    assert args == ["--proxy-server=socks5://h:1080", "--socks5-credentials=user:pass"]
+    assert pw is None
+
+
+def test_resolve_proxy_percent_decodes_url_credentials_and_splits_at_the_last_at():
+    args, _ = resolve_proxy({"server": "socks5://us%40er:p%3Ass%2Fw@h:1080"})
+    assert args == ["--proxy-server=socks5://h:1080", "--socks5-credentials=us@er:p:ss/w"]
+    # an unescaped '@' in the password (URL parsers split userinfo at the LAST '@')
+    args, _ = resolve_proxy({"server": "socks5://user:p@ss@h:1080"})
+    assert args == ["--proxy-server=socks5://h:1080", "--socks5-credentials=user:p@ss"]
+    # a malformed escape is taken literally
+    args, _ = resolve_proxy({"server": "socks5://user:100%@h:1080"})
+    assert args == ["--proxy-server=socks5://h:1080", "--socks5-credentials=user:100%"]
+
+
+def test_resolve_proxy_routes_http_url_credentials_to_proxy_auth():
+    args, pw = resolve_proxy({"server": "http://u:p@h:3128", "bypass": "*.internal"},
+                             engine_supports_proxy_auth=True)
+    assert args == ["--proxy-server=http://h:3128", "--proxy-auth=u:p", "--proxy-bypass-list=*.internal"]
+    assert pw is None
+
+
+def test_resolve_proxy_hands_url_credentials_to_playwright_as_keys():
+    # Playwright drops userinfo from `server`: left there, every request would 407.
+    args, pw = resolve_proxy({"server": "http://u:p%21@h:3128", "bypass": "*.internal"})
+    assert args == []
+    assert pw == {"server": "http://h:3128", "username": "u", "password": "p!", "bypass": "*.internal"}
+
+
+def test_resolve_proxy_keys_win_over_userinfo_per_key():
+    args, _ = resolve_proxy({"server": "socks5://urluser:urlpass@h:1080", "password": "field"})
+    assert args == ["--proxy-server=socks5://h:1080", "--socks5-credentials=urluser:field"]
+
+
+def test_warn_unsupported_engine_options_sees_socks5_url_credentials(tmp_path):
+    from clearcote._launchopts import warn_unsupported_engine_options
+    r16 = tmp_path / "r16-chrome"; r16.write_bytes(b"\x00proxy-server\x00")  # no socks5-credentials
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        warn_unsupported_engine_options(str(r16), {}, {"server": "socks5://u:p@h:1080"})
+    assert any("cannot authenticate to a SOCKS5 proxy" in str(w.message) for w in caught)
+
+
 def test_resolve_proxy_socks5_without_creds_left_to_playwright():
     proxy = {"server": "socks5://h:1080"}
     assert resolve_proxy(proxy) == ([], proxy)

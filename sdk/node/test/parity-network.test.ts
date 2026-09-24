@@ -148,6 +148,15 @@ describe("geoip timeout + fail-closed (#3)", () => {
     expect(Date.now() - t0).toBeLessThan(5000);
   });
 
+  it("names a proxy scheme the lookup cannot tunnel through, instead of a generic exit-IP failure", async () => {
+    // The coherence warning that used to cover this ("geoip cannot resolve a SOCKS proxy") was
+    // wrong for socks5 and never printed before the GeoipError anyway; the error has to say it.
+    const r = await resolveGeoDetailed({ server: "socks4://127.0.0.1:1" }, { quiet: true, timeoutMs: 1500 });
+    expect(r.geo).toBeNull();
+    expect(r.reason).toBe("socks4:// proxies are not supported; use http, https or socks5");
+    await expect(applyGeoip({}, { server: "socks4://127.0.0.1:1" }, true)).rejects.toThrow(/socks4:\/\/ proxies are not supported/);
+  });
+
   it("throws GeoipError instead of launching on the host's clock", async () => {
     const fp: Record<string, unknown> = {};
     await expect(applyGeoip(fp, { server: "socks5://127.0.0.1:1" }, true)).rejects.toBeInstanceOf(GeoipError);

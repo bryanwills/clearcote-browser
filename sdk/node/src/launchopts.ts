@@ -225,18 +225,50 @@ export function warnUnsupportedEngineOptions(exe: string | undefined, fingerprin
       out.push("clearcote: personaSchema: 2 (engine r19+) is not supported by this engine build and is ignored; upgrade the engine to use it.");
     if (fingerprint.realGpuHost && !engineSupportsSwitch(exe, "fingerprint-gpu-backend-real"))
       out.push("clearcote: realGpuHost (engine r19+) is not supported by this engine build and is ignored; upgrade the engine to use it.");
-    const server = (proxy?.server ?? "").trim();
-    if (server && /^socks/i.test(server) && (proxy?.username || proxy?.password) && !engineSupportsSwitch(exe, "socks5-credentials"))
+    const { server, username, password } = proxy ? proxyCredentials(proxy) : { server: "", username: "", password: "" };
+    if (server && /^socks/i.test(server) && (username || password) && !engineSupportsSwitch(exe, "socks5-credentials"))
       out.push("clearcote: this engine build cannot authenticate to a SOCKS5 proxy (needs r17+); the proxy will reject the connection.");
     if (!quiet) for (const m of out) console.warn(m);
   } catch { /* never block a launch over a warning */ }
   return out;
 }
 
+function decodeUserinfo(s: string): string {
+  try { return decodeURIComponent(s); } catch { return s; } // malformed %-escape: take it literally
+}
+
+/**
+ * The credentials a proxy descriptor carries, and its server with any userinfo removed.
+ *
+ * `socks5://user:pass@host:1080` is the shape most proxy providers hand out, so credentials written
+ * into the URL count exactly like the `username`/`password` fields (which win when both are given,
+ * as in {@link toProxySpec}). Userinfo is percent-decoded, like a browser reads it, and split at the
+ * LAST '@' of the authority, like the WHATWG URL parser, so an unescaped '@' in a password survives.
+ */
+export function proxyCredentials(proxy: PwProxy): { server: string; username: string; password: string } {
+  const raw = (proxy.server ?? "").trim();
+  let server = raw;
+  let urlUser = "";
+  let urlPass = "";
+  const m = /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^/?#]*)(.*)$/s.exec(raw);
+  const at = m ? m[2].lastIndexOf("@") : -1;
+  if (m && at >= 0) {
+    const info = m[2].slice(0, at);
+    const colon = info.indexOf(":");
+    urlUser = decodeUserinfo(colon < 0 ? info : info.slice(0, colon));
+    urlPass = colon < 0 ? "" : decodeUserinfo(info.slice(colon + 1));
+    server = m[1] + m[2].slice(at + 1) + m[3];
+  }
+  return { server, username: proxy.username || urlUser, password: proxy.password || urlPass };
+}
+
 export function resolveProxy(proxy: PwProxy | undefined, engineSupportsProxyAuth = false): { args: string[]; proxy: PwProxy | undefined } {
   if (!proxy || typeof proxy !== "object") return { args: [], proxy };
-  const server = (proxy.server ?? "").trim();
-  const hasCreds = !!(proxy.username || proxy.password);
+  // Credentials count wherever they were written. Reading only the fields used to send a
+  // socks5://user:pass@host proxy to Playwright, which rebuilds the server as scheme://host:port:
+  // the browser then offered the proxy no authentication at all.
+  const { server, username, password } = proxyCredentials(proxy);
+  const hasCreds = !!(username || password);
   const isSocks = /^socks/i.test(server);
   // http(s) credentials go to the engine only when it implements --proxy-auth (r19+). Older
   // engines keep Playwright's handling: it works, at the cost of the interception side effects.
@@ -244,17 +276,21 @@ export function resolveProxy(proxy: PwProxy | undefined, engineSupportsProxyAuth
   // engine ignores: every request 407s.
   const isHttp = /^https?:\/\//i.test(server) && engineSupportsProxyAuth;
   if (server && hasCreds && (isSocks || isHttp)) {
-    // Strip any userinfo already in the URL; the engine takes it via its own switch. Userinfo left
-    // in --proxy-server is rejected by Chromium's proxy parser and the entry dropped (DIRECT).
-    const bare = server.replace(/^([a-zA-Z0-9+.-]+:\/\/)[^/@]*@/, "$1");
-    const creds = `${proxy.username ?? ""}:${proxy.password ?? ""}`;
+    // `server` has no userinfo; the engine takes it via its own switch. Userinfo left in
+    // --proxy-server is rejected by Chromium's proxy parser and the entry dropped: every request
+    // then fails with ERR_NO_SUPPORTED_PROXIES (measured on r27).
     // An http(s) proxy WITH credentials also goes to the engine (--proxy-auth, clearcote r19+):
     // credentials given to Playwright make its driver enable Fetch interception and
     // Network.setCacheDisabled for the whole context -- a transport tell unrelated to the persona.
-    const args = [`--proxy-server=${bare}`, `${isSocks ? "--socks5-credentials=" : "--proxy-auth="}${creds}`];
+    const args = [`--proxy-server=${server}`, `${isSocks ? "--socks5-credentials=" : "--proxy-auth="}${username}:${password}`];
     const bypass = (proxy.bypass ?? "").trim();
     if (bypass) args.push(`--proxy-bypass-list=${bypass}`);
     return { args, proxy: undefined };
+  }
+  // Left to Playwright. It drops userinfo from the server, so credentials written there are handed
+  // over as the fields it reads (an http proxy on an engine without --proxy-auth).
+  if (server !== (proxy.server ?? "").trim()) {
+    return { args: [], proxy: { ...proxy, server, ...(username ? { username } : {}), ...(password ? { password } : {}) } };
   }
   return { args: [], proxy };
 }
