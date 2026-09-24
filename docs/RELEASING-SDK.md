@@ -108,8 +108,11 @@ separately (starts at `0.1.0`). One `mcp-v*` tag publishes **both** the Python p
    git tag mcp-v0.1.0
    git push origin mcp-v0.1.0
    ```
-3. The push runs `mcp.yml` — a version-consistency guard + the MCP harness tests, then pauses at the
-   `pypi` and `npm` environment gates. Approve each; both publish via OIDC.
+3. The push runs `mcp.yml` — a version-consistency guard + the MCP tests
+   ([`mcp-ci.yml`](../.github/workflows/mcp-ci.yml): a fresh resolve of `./mcp` at the latest
+   dependencies and at the declared floors), then pauses at the `pypi` and `npm` environment gates.
+   Approve each; both publish via OIDC. `mcp-ci.yml` also runs weekly and checks the package as
+   published, because an upstream `mcp` release can break a fresh install with no commit here.
 
 **One-time trusted-publisher registration** (like the SDK, but pointing at `mcp.yml`):
 - PyPI: project `clearcote-mcp` → Publishing → add repo `clearcotelabs/clearcote-browser`, workflow

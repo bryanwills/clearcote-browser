@@ -29,7 +29,11 @@ permissions:
   contents: read
 
 jobs:
-  # Gate: versions must agree + the MCP tests must pass before any publish.
+  # Gate: the MCP tests against a fresh resolve (latest + declared floors) must pass before any publish.
+  ci:
+    uses: ./.github/workflows/mcp-ci.yml
+
+  # Gate: versions must agree with the tag.
   check:
     runs-on: ubuntu-latest
     steps:
@@ -51,14 +55,8 @@ jobs:
             exit 1
           fi
 
-      - name: Run MCP tests (harness — no browser needed)
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install ./sdk/python ./mcp pytest pytest-asyncio
-          python -m pytest mcp/tests -q
-
   build-python:
-    needs: check
+    needs: [ci, check]
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -97,7 +95,7 @@ jobs:
           skip-existing: true
 
   publish-npm:
-    needs: check
+    needs: [ci, check]
     runs-on: ubuntu-latest
     environment: npm
     permissions:
