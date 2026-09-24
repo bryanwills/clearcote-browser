@@ -29,7 +29,7 @@ from ._fingerprint import FINGERPRINT_KEYS, fingerprint_args, is_fingerprint_pas
 from ._fontpersona import ensure_persona_fonts, font_reachability
 from ._fonts import apply_font_env
 from ._shaderdialect import apply_shader_dialect
-from ._geometry import apply_headless_geometry, fit_window_to_persona, move_window_to_origin
+from ._geometry import apply_headless_geometry, fit_window_to_work_area
 from ._humanize import install_humanize, install_humanize_on_context
 from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for tests)
     DEFAULT_IGNORED_ARGS,
@@ -147,7 +147,7 @@ __all__ = [
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.30.0"
+__version__ = "0.31.0"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -525,19 +525,23 @@ def _install_headed_viewport(browser):
 def _headless_geometry_kwargs(pw_kwargs, seed, args=None):
     """The headless geometry defaults for this launch, or None if they don't apply.
 
-    ``apply_headless_geometry`` mutates, and ``chromium.launch()`` accepts neither ``viewport`` nor
-    ``screen`` (they are context options), so probe a copy and carry the result to the context.
+    ``apply_headless_geometry`` mutates, and ``chromium.launch()`` accepts no ``no_viewport`` (a
+    context option), so probe a copy and carry the result to the context.
     """
     return apply_headless_geometry(dict(pw_kwargs), seed, args)
 
 
-def _install_window_fixup(container, args, persona):
-    """Apply the headless window fixup once, on the first page.
+def _with_geometry_args(args, geom):
+    """The command line plus the headless display switches ``geom`` asks for (regime 2)."""
+    return list(args) + list((geom or {}).get("args") or [])
 
-    Persona regime: fit the window to the persona's work area. Profile regime: move the window to the
-    origin so it stops overhanging the spoofed screen edge. A persistent context already owns a page,
-    so act immediately; a browser-level context does not, so defer to its first ``new_page``.
-    Idempotent — later tabs share the window.
+
+def _install_window_fixup(container, args):
+    """Fit the headless window to the display's work area once, on the first page.
+
+    A persistent context already owns a page, so act immediately; a browser-level context does not,
+    so defer to its first ``new_page``. Idempotent — later tabs share the window. ``args`` are the
+    caller's, so a window switch of theirs is respected.
     """
     done = []
 
@@ -545,10 +549,7 @@ def _install_window_fixup(container, args, persona):
         if done:
             return page
         done.append(True)
-        if persona:
-            fit_window_to_persona(page, args)
-        else:
-            move_window_to_origin(page, args)
+        fit_window_to_work_area(page, args)
         return page
 
     pages = getattr(container, "pages", None)
@@ -563,35 +564,30 @@ def _install_window_fixup(container, args, persona):
     return None
 
 
-def _install_headless_geometry(browser, geom, args=None):
-    """Default a headless browser's new pages/contexts to ``geom``.
+def _install_headless_geometry(browser, args=None):
+    """Default a headless browser's new pages/contexts to ``no_viewport`` plus a window fit.
 
     ``chromium.launch()`` accepts no context options, so the default has to ride on
-    ``new_page``/``new_context`` — the same shape as ``_install_headed_viewport``. In persona mode
-    each new context is a new window, so each also gets the window fit. A caller who passes any of
-    ``viewport`` / ``no_viewport`` / ``screen`` per call keeps full control.
+    ``new_page``/``new_context`` — the same shape as ``_install_headed_viewport``. Each new context
+    is a new window, so each also gets the window fit (to the persona's work area, or the display
+    ``--screen-info`` set). A caller who passes any of ``viewport`` / ``no_viewport`` / ``screen``
+    per call keeps full control.
     """
-    persona = geom.get("mode") == "persona"
-    defaults = {"no_viewport": True} if persona else {
-        k: v for k, v in geom.items() if k in ("screen", "viewport")}
     orig_new_page, orig_new_context = browser.new_page, browser.new_context
 
     def _merge(kw):
         if not any(k in kw for k in ("viewport", "no_viewport", "screen")):
-            kw.update(defaults)
+            kw["no_viewport"] = True
         return kw
 
     def new_page(**kw):
         page = orig_new_page(**_merge(kw))
-        if persona:
-            fit_window_to_persona(page, args)
-        else:
-            move_window_to_origin(page, args)
+        fit_window_to_work_area(page, args)
         return page
 
     def new_context(**kw):
         context = orig_new_context(**_merge(kw))
-        _install_window_fixup(context, args, persona)
+        _install_window_fixup(context, args)
         return context
 
     browser.new_page, browser.new_context = new_page, new_context
@@ -810,11 +806,13 @@ def launch(**kwargs):
     if lease:  # inject CLEARCOTE_RUN_TOKEN (+ the r23+ opt-in token FILE) so the gate lets it launch
         inject_run_token(pw_kwargs, lease.token, launch_token[0])
     headed = _headed_no_viewport(pw_kwargs)  # launch() takes no viewport kwarg -> wrap new_page/context
-    # Headless: screen.* has to be overridden alongside the viewport or the window reports
-    # outer > screen (see _geometry). Also a context option, so it rides on new_page/new_context.
+    # Headless: screen.* has to be handled alongside the viewport or the window reports
+    # outer > screen (see _geometry). The display switches go on the command line; no_viewport is a
+    # context option, so it rides on new_page/new_context.
     geom = None if headed else _headless_geometry_kwargs(pw_kwargs, seed, args)
+    launch_args = _with_geometry_args(args, geom)
     browser = _release_lease_on_failure(lease, lambda: _win_av_retry(
-        lambda e: _playwright().chromium.launch(executable_path=e, args=args, **pw_kwargs), exe
+        lambda e: _playwright().chromium.launch(executable_path=e, args=launch_args, **pw_kwargs), exe
     ))
     if lease:  # release the concurrency slot + remove the run-token file when the browser closes
         def _on_disconnect(_b=None, _lease=lease, _lt=launch_token):
@@ -824,7 +822,7 @@ def launch(**kwargs):
     if headed:
         _install_headed_viewport(browser)
     elif geom:
-        _install_headless_geometry(browser, geom, args)
+        _install_headless_geometry(browser, args)
     install_humanize(browser, humanize, show_cursor, seed=seed)
     return browser
 
@@ -854,11 +852,12 @@ def launch_persistent_context(user_data_dir, **kwargs):
     geom = None
     if _headed_no_viewport(pw_kwargs):  # no_viewport IS a valid persistent-context option
         pw_kwargs["no_viewport"] = True
-    else:  # headless: persona owns screen -> fit the window; no persona -> override screen
+    else:  # headless: persona owns screen -> fit the window; no persona -> set the display too
         geom = apply_headless_geometry(pw_kwargs, seed, args)
+    launch_args = _with_geometry_args(args, geom)
     context = _release_lease_on_failure(lease, lambda: _win_av_retry(
         lambda e: _playwright().chromium.launch_persistent_context(
-            user_data_dir, executable_path=e, args=args, **pw_kwargs
+            user_data_dir, executable_path=e, args=launch_args, **pw_kwargs
         ),
         exe,
     ))
@@ -868,7 +867,7 @@ def launch_persistent_context(user_data_dir, **kwargs):
             _lt[1]()
         context.on("close", _on_close)
     if geom:
-        _install_window_fixup(context, args, geom.get("mode") == "persona")
+        _install_window_fixup(context, args)
     install_humanize_on_context(context, humanize, show_cursor, seed=seed)
     return context
 

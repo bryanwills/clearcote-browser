@@ -13,9 +13,10 @@ namespace Clearcote.Tests;
 /// <remarks>
 /// A default headless launch used to report a window LARGER than the screen it claims to be on
 /// (screen 1280x720, outer 1288x851) — not a subtle statistical tell but a state no real browser can
-/// be in, readable with two property lookups. These lock down the frame arithmetic, the regime split
-/// (with --fingerprint the engine's persona owns screen/avail and the SDK only fits the window;
-/// without it the SDK overrides screen itself), and the rule that a caller's own geometry always wins.
+/// be in, readable with two property lookups. These lock down the frame arithmetic (the cross-SDK
+/// contract), the regime split (with --fingerprint the engine's persona owns screen/avail and the SDK
+/// only fits the window; without it the SDK also sets the headless display with --screen-info), and
+/// the rule that a caller's own geometry always wins.
 ///
 /// PARITY: the vector below is duplicated verbatim in sdk/python/tests/test_geometry.py and
 /// sdk/node/test/geometry.test.ts. A seed must select the same persona in every SDK, or a persona
@@ -31,7 +32,7 @@ public class GeometryTests
         {
             var inner = new[] { w - Geometry.EngineFrameWidth, h - Geometry.EngineFrameHeight };
             var outer = new[] { inner[0] + Geometry.EngineFrameWidth, inner[1] + Geometry.EngineFrameHeight };
-            // CDP forces avail == screen (measured), so that is what a page will read.
+            // A CDP screen override forces avail == screen (measured), so that is what a page reads.
             Assert.True(Geometry.GeometryIsCoherent(new[] { w, h }, new[] { w, h }, inner, outer),
                 $"{w}x{h}: window escapes its screen");
         }
@@ -136,30 +137,75 @@ public class GeometryTests
     [Theory]
     [InlineData(null)]
     [InlineData(true)]
-    public void RegimeTwoAppliesScreenAndViewportWhenHeadless(bool? headless)
+    public void RegimeTwoSetsTheSeedsDisplayWhenHeadless(bool? headless)
     {
-        var r = Geometry.Resolve(headless, "seed", new[] { "--no-sandbox" }, callerSetGeometry: false);
-        var expected = Geometry.HeadlessGeometry("seed");
-        Assert.Equal(Geometry.Mode.Profile, r.Mode);
-        Assert.Equal((expected.Screen.Width, expected.Screen.Height), (r.Screen!.Width, r.Screen.Height));
-        Assert.Equal((expected.Viewport.Width, expected.Viewport.Height), (r.Viewport!.Width, r.Viewport.Height));
+        var r = Geometry.ResolveHeadless(headless, "seed",
+            new[] { "--no-sandbox", "--fingerprint-platform=windows" }, callerSetGeometry: false);
+        var (screen, _) = Geometry.HeadlessGeometry("seed");
+        var display = new Geometry.Display(screen.Width, screen.Height, screen.Width,
+            screen.Height - Geometry.WindowsTaskbarHeight);
+        Assert.Equal(Geometry.Mode.Display, r.Mode);
+        Assert.Equal(display, r.Display);
+        Assert.Equal(new[] { Geometry.ScreenInfoSwitch(display), "--window-position=0,0" }, r.Args);
+    }
+
+    [Fact]
+    public void RegimeTwoDisplayHasATaskbarOnWindowsOnly()
+    {
+        var linux = Geometry.HeadlessDisplay("seed", new[] { "--fingerprint-platform=linux" });
+        Assert.Equal((linux.Width, linux.Height), (linux.AvailWidth, linux.AvailHeight));
+        var windows = Geometry.HeadlessDisplay("seed", new[] { "--fingerprint-platform=windows" });
+        Assert.Equal(windows.Height - Geometry.WindowsTaskbarHeight, windows.AvailHeight);
+    }
+
+    [Fact]
+    public void RegimeTwoDisplayAgreesWithAnExplicitScreenTheEngineSpoofs()
+    {
+        var args = new[] { "--fingerprint-platform=windows", "--fingerprint-screen-width=1600", "--fingerprint-screen-height=900" };
+        Assert.Equal(new Geometry.Display(1600, 900, 1600, 860), Geometry.HeadlessDisplay("x", args));
+        Assert.Equal(870, Geometry.HeadlessDisplay("x", args.Append("--fingerprint-avail-height=870")).AvailHeight);
+        // never a work area larger than the screen
+        Assert.Equal(1600, Geometry.HeadlessDisplay("x", args.Append("--fingerprint-avail-width=2000")).AvailWidth);
+    }
+
+    [Fact]
+    public void ScreenInfoSwitchWritesTheTaskbarAsAWorkAreaInset()
+    {
+        Assert.Equal("--screen-info={1920x1080 workAreaBottom=40}",
+            Geometry.ScreenInfoSwitch(new Geometry.Display(1920, 1080, 1920, 1040)));
+        Assert.Equal("--screen-info={1920x1080}",
+            Geometry.ScreenInfoSwitch(new Geometry.Display(1920, 1080, 1920, 1080)));
+    }
+
+    [Fact]
+    public void RegimeTwoKeepsACallersOwnDisplayOrWindowSwitch()
+    {
+        var own = Geometry.ResolveHeadless(true, "seed", new[] { "--screen-info={1280x720}" }, callerSetGeometry: false);
+        Assert.Equal(Geometry.Mode.Display, own.Mode);
+        Assert.Null(own.Display);
+        Assert.Equal(new[] { "--window-position=0,0" }, own.Args);
+        Assert.True(Geometry.CallerSetTheDisplay(new[] { "--screen-info={1x1}" }));
+        // a caller-sized window still gets a real screen under it; the fit then leaves it alone
+        var sized = Geometry.ResolveHeadless(true, "seed", new[] { "--window-size=1440,900" }, callerSetGeometry: false);
+        Assert.StartsWith("--screen-info=", Assert.Single(sized.Args));
     }
 
     [Fact]
     public void RegimeOneLeavesScreenToThePersona()
     {
         // Setting screen here would be a silent no-op: the persona's value beats the CDP override.
-        var r = Geometry.Resolve(true, "seed", new[] { "--fingerprint=seed" }, callerSetGeometry: false);
+        var r = Geometry.ResolveHeadless(true, "seed", new[] { "--fingerprint=seed" }, callerSetGeometry: false);
         Assert.Equal(Geometry.Mode.Persona, r.Mode);
-        Assert.Null(r.Screen);
-        Assert.Null(r.Viewport);
+        Assert.Null(r.Display);
+        Assert.Empty(r.Args);
     }
 
     [Fact]
     public void SkippedWhenHeaded()
     {
-        var r = Geometry.Resolve(false, "seed", new[] { "--fingerprint=seed" }, callerSetGeometry: false);
+        var r = Geometry.ResolveHeadless(false, "seed", new[] { "--fingerprint=seed" }, callerSetGeometry: false);
         Assert.Equal(Geometry.Mode.None, r.Mode);
+        Assert.Empty(r.Args);
     }
 
     [Theory]
@@ -168,10 +214,22 @@ public class GeometryTests
     public void NeverOverridesACallerWhoSetTheirOwnGeometry(bool persona)
     {
         var args = persona ? new[] { "--fingerprint=seed" } : new[] { "--no-sandbox" };
-        var r = Geometry.Resolve(true, "seed", args, callerSetGeometry: true);
+        var r = Geometry.ResolveHeadless(true, "seed", args, callerSetGeometry: true);
         Assert.Equal(Geometry.Mode.None, r.Mode);
-        Assert.Null(r.Screen);
-        Assert.Null(r.Viewport);
+        Assert.Null(r.Display);
+        Assert.Empty(r.Args);
+    }
+
+    [Fact]
+    public void TheObsoleteResolveStillReturnsItsOldShape()
+    {
+        // Kept so existing callers compile and behave as before; the SDK itself no longer uses it.
+#pragma warning disable CS0618
+        var r = Geometry.Resolve(true, "seed", new[] { "--no-sandbox" }, callerSetGeometry: false);
+#pragma warning restore CS0618
+        var expected = Geometry.HeadlessGeometry("seed");
+        Assert.Equal(Geometry.Mode.Profile, r.Mode);
+        Assert.Equal((expected.Viewport.Width, expected.Viewport.Height), (r.Viewport!.Width, r.Viewport.Height));
     }
 
     // ─────────────────────────────────────────────────────── the imported profile's screen
@@ -200,11 +258,9 @@ public class GeometryTests
     {
         // Otherwise every seedless profile launch shares one screen and the imported identity is lost.
         var arg = ProfileArg(new { screen = new { width = 2560, height = 1440 } });
-        var r = Geometry.Resolve(true, "some-seed", new[] { arg }, callerSetGeometry: false);
-        Assert.Equal(Geometry.Mode.Profile, r.Mode);
-        Assert.Equal((2560, 1440), (r.Screen!.Width, r.Screen.Height));
-        Assert.Equal((2560 - Geometry.EngineFrameWidth, 1440 - Geometry.EngineFrameHeight),
-            (r.Viewport!.Width, r.Viewport.Height));
+        var r = Geometry.ResolveHeadless(true, "some-seed", new[] { arg, "--fingerprint-platform=windows" }, callerSetGeometry: false);
+        Assert.Equal(Geometry.Mode.Display, r.Mode);
+        Assert.Equal(new Geometry.Display(2560, 1440, 2560, 1400), r.Display);
     }
 
     [Fact]
@@ -213,9 +269,9 @@ public class GeometryTests
         // profile="auto" resolved on a headless host can carry the 800x600 headless surface (measured).
         var arg = ProfileArg(new { screen = new { width = 800, height = 600 } });
         Assert.Null(Geometry.ProfileScreenFromArgs(new[] { arg }));
-        var r = Geometry.Resolve(true, "seed", new[] { arg }, callerSetGeometry: false);
+        var r = Geometry.ResolveHeadless(true, "seed", new[] { arg }, callerSetGeometry: false);
         var (corpus, _) = Geometry.HeadlessGeometry("seed");
-        Assert.Equal((corpus.Width, corpus.Height), (r.Screen!.Width, r.Screen.Height));
+        Assert.Equal((corpus.Width, corpus.Height), (r.Display!.Width, r.Display.Height));
     }
 
     [Theory]
@@ -225,8 +281,8 @@ public class GeometryTests
     public void AnUnreadableProfileNeverBreaksTheLaunch(string arg)
     {
         Assert.Null(Geometry.ProfileScreenFromArgs(new[] { arg }));
-        Assert.Equal(Geometry.Mode.Profile,
-            Geometry.Resolve(true, "seed", new[] { arg }, callerSetGeometry: false).Mode);
+        Assert.Equal(Geometry.Mode.Display,
+            Geometry.ResolveHeadless(true, "seed", new[] { arg }, callerSetGeometry: false).Mode);
     }
 
     [Fact]
@@ -241,9 +297,9 @@ public class GeometryTests
     {
         // With --fingerprint present the ENGINE applies the profile's screen, so the SDK keeps out.
         var arg = ProfileArg(new { screen = new { width = 2560, height = 1440 } });
-        var r = Geometry.Resolve(true, "seed", new[] { arg, "--fingerprint=seed" }, callerSetGeometry: false);
+        var r = Geometry.ResolveHeadless(true, "seed", new[] { arg, "--fingerprint=seed" }, callerSetGeometry: false);
         Assert.Equal(Geometry.Mode.Persona, r.Mode);
-        Assert.Null(r.Screen);
+        Assert.Null(r.Display);
     }
 
     // ─────────────────────────────────────────────────────── the fit correction
@@ -257,9 +313,9 @@ public class GeometryTests
     }
 
     [Fact]
-    public void CallerWindowPositionSuppressesBothTheFitAndTheOriginMove()
+    public void CallerWindowPositionSuppressesTheFit()
     {
-        // Both window fixups defer to a caller who positioned or sized the window themselves.
+        // The window fit defers to a caller who positioned or sized the window themselves.
         Assert.True(Geometry.CallerSizedTheWindow(new[] { "--window-position=100,100" }));
     }
 

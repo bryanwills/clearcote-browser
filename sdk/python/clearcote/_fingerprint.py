@@ -250,6 +250,21 @@ _LIGHT_STEALTH_PROFILES = (
 )
 
 
+def _light_stealth_row(seed):
+    key = str(seed if seed not in (None, "") else "clearcote-light-stealth")
+    h = int(hashlib.sha256(key.encode("utf-8")).hexdigest(), 16)
+    return _LIGHT_STEALTH_PROFILES[h % len(_LIGHT_STEALTH_PROFILES)]
+
+
+def _light_stealth_screen(seed):
+    """The display of the same ``light_stealth`` row ``_light_stealth_values`` draws its DPR from, so
+    a seed's screen and device_pixel_ratio stay a pair (1536x864 comes with 1.25: a 1080p laptop at
+    125%). Never spoofed through the ``--fingerprint-screen-*`` switches: ``serve()`` makes it the
+    headless display itself, which the page, media queries and the window all agree on."""
+    sw, sh, aw, ah = _light_stealth_row(seed)[:4]
+    return {"width": sw, "height": sh, "avail_width": aw, "avail_height": ah}
+
+
 def _light_stealth_values(seed):
     """Deterministic, coherent metadata bundle applied via the NATIVE override switches only
     (never --fingerprint), so the persona machinery / farble hooks that strict anti-bots detect
@@ -262,9 +277,7 @@ def _light_stealth_values(seed):
     window/render surface and is a reliable block trigger -- so screen stays REAL by default.
     Opt into a screen spoof by passing screen_width=/screen_height=/avail_width=/avail_height=
     explicitly (best when the host's real display actually matches)."""
-    key = str(seed if seed not in (None, "") else "clearcote-light-stealth")
-    h = int(hashlib.sha256(key.encode("utf-8")).hexdigest(), 16)
-    _sw, _sh, _aw, _ah, dpr, depth, mem, hw = _LIGHT_STEALTH_PROFILES[h % len(_LIGHT_STEALTH_PROFILES)]
+    _sw, _sh, _aw, _ah, dpr, depth, mem, hw = _light_stealth_row(seed)
     # Present the browser's REAL version -- do NOT spoof brand_version. A Chrome-major lie moves
     # the UA-CH version AND (via tls_profile="match-persona") the TLS ClientHello off the genuine
     # binary, while the binary's real JS/engine surface still reflects its true version -- another

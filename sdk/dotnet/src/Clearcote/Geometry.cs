@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Net.WebSockets;
 using System.Numerics;
 using System.Security.Cryptography;
 using System.Text;
@@ -17,7 +18,7 @@ namespace Clearcote;
 /// Headed launches take their geometry from the real display and the SDK keeps the page on it
 /// (<c>ViewportSize.NoViewport</c>), so screen/avail/inner/outer agree by construction. Headless has
 /// no display, and what it reports depends on whether the engine's persona machinery is running.
-/// Both regimes were measured on 149.0.7827.114/linux-x64.
+/// Regime 1 was measured on 149.0.7827.114/linux-x64, regime 2 on win-x64 149 and 153 (below).
 /// </para>
 /// <para>
 /// REGIME 1 — a persona is active (<c>--fingerprint=&lt;seed&gt;</c> on the command line). The engine
@@ -31,21 +32,28 @@ namespace Clearcote;
 /// </para>
 /// <para>
 /// REGIME 2 — no persona (the default seedless launch, and <c>LightStealth</c>, which drops
-/// <c>--fingerprint</c> deliberately). Nothing spoofs screen, so Chromium reports screen == the
-/// emulated viewport and then synthesizes a frame on top of it:
+/// <c>--fingerprint</c> deliberately). Nothing spoofs screen, so a page sees the 800x600 headless
+/// surface, and Playwright's emulated viewport then synthesizes a window on top of it:
 /// <c>screen 1280x720, avail 1280x720, inner 1280x720, outer 1288x851</c> — a window LARGER than its
 /// own screen, an impossible state readable in two property lookups, and it was present on every
-/// headless shape reachable through the SDK. The lever is CDP
-/// <c>Emulation.setDeviceMetricsOverride</c> via the context's ScreenSize — the only thing that moves
-/// screen.* in headless (the engine's own <c>--fingerprint-screen-*</c> switches are inert without a
-/// persona: verified through the SDK options and passed raw, headless and headed). So pick a screen
-/// size real machines have and size the viewport so the frame lands exactly on the screen edge.
+/// headless shape reachable through the SDK. The fix is <c>--screen-info</c>, which makes the
+/// headless DISPLAY a real-machine size (with a taskbar on Windows) before the first document
+/// exists, then the same NoViewport + work-area fit as regime 1. Measured on 153.0.8010.36/win-x64:
+/// <c>screen 1920x1080, avail 1920x1040, inner 1904x911, outer 1920x1040</c>, popups clamped inside it.
 /// </para>
 /// <para>
-/// CDP LIMIT: the override sets availWidth/availHeight equal to screen.*, so regime 2 always reports
-/// no taskbar. Not invented — 78 of 432 real desktop captures (23 of 79 networks) report
-/// avail == screen too. It is a minority shape and the only one available here; regime 1 is the more
-/// faithful of the two, so prefer a seeded launch when it is an option.
+/// This used to be a CDP screen override with the viewport sized as screen minus a hardcoded engine
+/// frame. Two faults: the override forces avail == screen (no taskbar, a minority shape), and the
+/// frame around an emulated viewport is per-platform — 8x131 on linux-x64 but 16x134 on win-x64
+/// (measured on 149.0.7827.114 and 153.0.8010.36) — so on Windows the window landed 8x3 px past the
+/// screen edge. With a real display nothing is sized against the frame. (The engine's
+/// <c>--fingerprint-screen-*</c> switches are no substitute: device-width media queries keep
+/// answering 800x600.) Because the display is a command-line switch, it also reaches pages that
+/// <see cref="Clearcote.LaunchAsync"/> callers create themselves.
+/// </para>
+/// <para>
+/// PARITY: the seed still selects the same screen row in every SDK (<see cref="HeadlessGeometry"/>);
+/// only how it is applied changed.
 /// </para>
 /// <para>
 /// PROVENANCE of the regime-2 table: the <c>audit_profiles</c> corpus (real captures from the public
@@ -59,16 +67,19 @@ namespace Clearcote;
 public static class Geometry
 {
     /// <summary>
-    /// Regime-2 engine window-frame width delta: <c>outerWidth = innerWidth + 8</c>. Measured with no
-    /// persona on 149.0.7827.114/linux-x64, re-confirmed on the 150 build a default launch resolves,
-    /// constant across every viewport probed. The regime-2
-    /// viewport is sized against this, so drift would put headless windows back outside their screen —
-    /// the live test in GeometryTests measures the running engine and fails if it moves.
+    /// The linux-x64 engine's frame width around an EMULATED viewport: <c>outerWidth = innerWidth + 8</c>.
+    /// Measured with no persona on 149.0.7827.114/linux-x64 (same on 150). win-x64 draws 16x134
+    /// instead, which is why launches no longer size anything against these (see the class remarks).
+    /// They remain the shared cross-SDK constants behind <see cref="HeadlessGeometry"/>'s viewport and
+    /// the floor a usable imported-profile screen must clear.
     /// </summary>
     public const int EngineFrameWidth = 8;
 
-    /// <summary>Regime-2 engine window-frame height delta: <c>outerHeight = innerHeight + 131</c>.</summary>
+    /// <summary>The linux-x64 engine's frame height around an emulated viewport: <c>+ 131</c>.</summary>
     public const int EngineFrameHeight = 131;
+
+    /// <summary>Windows' taskbar at 100% scaling; the engine's persona table uses the same 40px.</summary>
+    public const int WindowsTaskbarHeight = 40;
 
     /// <summary>(ScreenWidth, ScreenHeight, Weight, OsHint) — Weight is distinct /24s in the corpus.</summary>
     public static readonly (int Width, int Height, int Weight, string Os)[] HeadlessScreenProfiles =
@@ -86,6 +97,8 @@ public static class Geometry
     private static readonly string[] CallerWindowFlags =
         { "--window-size", "--window-position", "--start-maximized" };
 
+    private static readonly string[] CallerDisplayFlags = { "--screen-info" };
+
     /// <summary>
     /// Whether <c>--fingerprint=&lt;seed&gt;</c> is on the command line, i.e. the engine spoofs
     /// screen/avail itself (regime 1). <c>LightStealth</c> drops that switch on purpose, so this is
@@ -97,6 +110,10 @@ public static class Geometry
     /// <summary>True when the caller passed their own window geometry flag.</summary>
     public static bool CallerSizedTheWindow(IEnumerable<string>? args) =>
         args?.Any(a => CallerWindowFlags.Contains((a ?? "").Split('=')[0])) == true;
+
+    /// <summary>True when the caller passed their own headless display switch.</summary>
+    public static bool CallerSetTheDisplay(IEnumerable<string>? args) =>
+        args?.Any(a => CallerDisplayFlags.Contains((a ?? "").Split('=')[0])) == true;
 
     /// <summary>
     /// Weighted, deterministic choice from <see cref="HeadlessScreenProfiles"/>. Same construction as
@@ -167,8 +184,8 @@ public static class Geometry
     }
 
     /// <summary>
-    /// Regime-2 context geometry. The viewport is the screen minus the engine's frame, so the
-    /// synthesized outerWidth/Height lands exactly on the screen edge (a maximized window).
+    /// A seed's regime-2 screen row, with the viewport sized as screen minus the linux engine frame.
+    /// This is the cross-SDK parity contract; launches take only the screen from it (the display).
     /// </summary>
     public static (ScreenSize Screen, ViewportSize Viewport) HeadlessGeometry(string? seed = null)
     {
@@ -176,25 +193,118 @@ public static class Geometry
         return GeometryFor(row.Width, row.Height);
     }
 
-    /// <summary>Which regime a launch falls into, and the regime-2 values when it applies.</summary>
+    /// <summary>A headless display in CSS px, its work area anchored top-left (taskbar at the bottom).</summary>
+    public sealed record Display(int Width, int Height, int AvailWidth, int AvailHeight);
+
+    private static string? SwitchValue(IEnumerable<string>? args, string name)
+    {
+        var prefix = $"--{name}=";
+        string? found = null;
+        foreach (var a in args ?? Array.Empty<string>())
+            if ((a ?? "").StartsWith(prefix, StringComparison.Ordinal)) found = a![prefix.Length..];
+        return found;
+    }
+
+    private static int? SwitchInt(IEnumerable<string>? args, string name) =>
+        int.TryParse(SwitchValue(args, name), out var v) && v > 0 ? v : null;
+
+    private static string HostPlatform =>
+        OperatingSystem.IsLinux() ? "linux" : OperatingSystem.IsMacOS() ? "macos" : "windows";
+
+    /// <summary>The regime-2 headless display for a launch's command line.</summary>
+    /// <remarks>
+    /// In order: an explicit <c>--fingerprint-screen-width/height</c> (already spoofed into screen.*
+    /// by the engine, so the display must agree), an imported profile's screen, and otherwise the
+    /// seed's corpus row (<see cref="HeadlessGeometry"/>, identical in every SDK). A Windows platform
+    /// gets a taskbar; others report avail == screen, which real captures do too. Everything is read
+    /// off the command line, where the platform always is (it defaults to the host OS).
+    /// </remarks>
+    public static Display HeadlessDisplay(string? seed, IEnumerable<string>? args) =>
+        HeadlessDisplay(seed, args, lightStealth: false);
+
+    /// <summary>
+    /// <see cref="HeadlessDisplay(string?, IEnumerable{string}?)"/>, and with <paramref name="lightStealth"/>
+    /// (ServeAsync only) the LightStealth row that also supplies the seed's DPR, ahead of the corpus row.
+    /// </summary>
+    internal static Display HeadlessDisplay(string? seed, IEnumerable<string>? args, bool lightStealth)
+    {
+        var windows = (SwitchValue(args, "fingerprint-platform") ?? HostPlatform) == "windows";
+        Display WithTaskbar(int w, int h) => new(w, h, w, windows ? h - WindowsTaskbarHeight : h);
+
+        if (SwitchInt(args, "fingerprint-screen-width") is int sw && SwitchInt(args, "fingerprint-screen-height") is int sh)
+        {
+            var d = WithTaskbar(sw, sh);
+            return d with
+            {
+                AvailWidth = Math.Min(SwitchInt(args, "fingerprint-avail-width") ?? d.AvailWidth, sw),
+                AvailHeight = Math.Min(SwitchInt(args, "fingerprint-avail-height") ?? d.AvailHeight, sh),
+            };
+        }
+        if (ProfileScreenFromArgs(args) is { } fromProfile) return WithTaskbar(fromProfile.Width, fromProfile.Height);
+        if (lightStealth)
+        {
+            var d = Fingerprint.LightStealthScreen(seed);
+            return windows ? d : WithTaskbar(d.Width, d.Height);
+        }
+        var row = Pick(seed);
+        return WithTaskbar(row.Width, row.Height);
+    }
+
+    /// <summary><c>--screen-info</c> for a display: its size plus the work-area insets the taskbar takes.</summary>
+    public static string ScreenInfoSwitch(Display d)
+    {
+        var insets = new (string Key, int Value)[]
+        {
+            ("workAreaRight", d.Width - d.AvailWidth), ("workAreaBottom", d.Height - d.AvailHeight),
+        }.Where(i => i.Value > 0).Select(i => $" {i.Key}={i.Value}");
+        return $"--screen-info={{{d.Width}x{d.Height}{string.Concat(insets)}}}";
+    }
+
+    /// <summary>Which regime a launch falls into.</summary>
     public enum Mode
     {
         /// <summary>Headed, or the caller chose their own geometry — nothing to do.</summary>
         None,
         /// <summary>Regime 1: NoViewport, and the window still needs fitting to the persona's work area.</summary>
         Persona,
-        /// <summary>Regime 2: the SDK's screen + viewport apply.</summary>
+        /// <summary>The earlier regime 2 (a CDP screen override); only <see cref="Resolve"/> returns it.</summary>
         Profile,
+        /// <summary>Regime 2: the SDK's headless display (<see cref="HeadlessPlan.Args"/>) plus NoViewport and a window fit.</summary>
+        Display,
     }
 
-    /// <summary>
-    /// Resolve the geometry a headless launch should use.
-    /// </summary>
+    /// <summary>What a headless launch should do; see <see cref="ResolveHeadless"/>.</summary>
+    /// <param name="Mode">The regime, or <see cref="Mode.None"/> to leave geometry alone.</param>
+    /// <param name="Display">Regime 2's display, or null (other regimes, or the caller passed their own <c>--screen-info</c>).</param>
+    /// <param name="Args">Switches to APPEND to the command line. Keep passing the caller's own args to the fit.</param>
+    public sealed record HeadlessPlan(Mode Mode, Display? Display, string[] Args);
+
+    /// <summary>Resolve the geometry a headless launch should use.</summary>
     /// <remarks>
-    /// Returns <see cref="Mode.None"/> when the launch is headed (the real window is already coherent)
-    /// or when the caller set ViewportSize / ScreenSize themselves. Note a null
-    /// <paramref name="headless"/> means headless, matching Playwright.
+    /// <see cref="Mode.None"/> when the launch is headed (the real window is already coherent) or the
+    /// caller set ViewportSize / ScreenSize themselves; a null <paramref name="headless"/> means
+    /// headless, matching Playwright. Otherwise the context takes NoViewport and the window is fitted
+    /// to the work area (<see cref="InstallWindowFixupAsync"/>). A caller's own <c>--screen-info</c>
+    /// keeps their display; a caller's own window switch keeps their window (the display is still set).
     /// </remarks>
+    public static HeadlessPlan ResolveHeadless(
+        bool? headless,
+        string? seed,
+        IEnumerable<string>? args,
+        bool callerSetGeometry)
+    {
+        if (headless == false || callerSetGeometry) return new(Mode.None, null, Array.Empty<string>());
+        if (PersonaActive(args)) return new(Mode.Persona, null, Array.Empty<string>());
+        var display = CallerSetTheDisplay(args) ? null : HeadlessDisplay(seed, args);
+        var extra = new List<string>();
+        if (display is not null) extra.Add(ScreenInfoSwitch(display));
+        if (!CallerSizedTheWindow(args)) extra.Add("--window-position=0,0");
+        return new(Mode.Display, display, extra.ToArray());
+    }
+
+    /// <summary>The earlier regime-2 geometry (a CDP screen override sized against the linux frame).</summary>
+    [Obsolete("Superseded by ResolveHeadless: regime 2 now sets a real headless display (--screen-info), " +
+              "since the engine frame this sized against differs per platform.")]
     public static (Mode Mode, ScreenSize? Screen, ViewportSize? Viewport) Resolve(
         bool? headless,
         string? seed,
@@ -218,7 +328,7 @@ public static class Geometry
     private const string OuterJs = "[outerWidth, outerHeight]";
 
     /// <summary>
-    /// A work area only a non-engaged persona would report (the headless default) is not worth fitting to.
+    /// A work area only an undisplayed headless browser reports (the 800x600 default) is not worth fitting to.
     /// </summary>
     private static bool Plausible(int[]? area) =>
         area is { Length: 2 } && area[0] >= 1024 && area[1] >= 600;
@@ -247,17 +357,25 @@ public static class Geometry
         return (avail[0] + Math.Max(dw, 0), avail[1] + Math.Max(dh, 0));
     }
 
+    /// <summary>Old name of <see cref="FitWindowToWorkAreaAsync"/>, which now serves both regimes.</summary>
+    [Obsolete("Renamed FitWindowToWorkAreaAsync.")]
+    public static Task<(int Width, int Height)?> FitWindowToPersonaAsync(
+        IPage page, IEnumerable<string>? args = null) => FitWindowToWorkAreaAsync(page, args);
+
     /// <summary>
-    /// Regime 1: size the headless window to the persona's own work area, so the page reports a
-    /// maximized window (outer == avail) instead of the 800x600 headless default sitting inside a
-    /// spoofed 1920x1080 screen. Returns the reported outer size, or null if skipped.
+    /// Size the headless window to the display's work area — the persona's (regime 1) or the one
+    /// <c>--screen-info</c> set (regime 2) — so the page reports a maximized window (outer == avail)
+    /// instead of the headless default window sitting inside a much larger screen. Returns the
+    /// reported outer size, or null if skipped.
     /// </summary>
     /// <remarks>
     /// <c>--start-maximized</c> and CDP <c>windowState: "maximized"</c> are both no-ops in headless
     /// (measured — the window stays at its default size), which is why this sets explicit bounds.
-    /// Never throws: a geometry improvement must not be able to fail a launch.
+    /// A <see cref="Clearcote.LaunchAsync"/> caller can use it on a page created with
+    /// <c>ViewportSize = ViewportSize.NoViewport</c>. Never throws: a geometry improvement must not be
+    /// able to fail a launch.
     /// </remarks>
-    public static async Task<(int Width, int Height)?> FitWindowToPersonaAsync(
+    public static async Task<(int Width, int Height)?> FitWindowToWorkAreaAsync(
         IPage page, IEnumerable<string>? args = null)
     {
         if (CallerSizedTheWindow(args)) return null;
@@ -302,7 +420,7 @@ public static class Geometry
     }
 
     /// <summary>
-    /// Regime 2: move the real window to (0, 0). Returns the position applied, or null if skipped.
+    /// The earlier regime 2: move the real window to (0, 0). Returns the position applied, or null if skipped.
     /// </summary>
     /// <remarks>
     /// Regime 2 leaves the real window at the headless default position — measured (10, 10) — while
@@ -312,6 +430,7 @@ public static class Geometry
     /// free tell. The move costs one CDP call and leaves the emulated viewport untouched (verified:
     /// inner/outer unchanged, screenX/Y become 0). Never throws.
     /// </remarks>
+    [Obsolete("No longer used by the SDK: regime 2 starts windows at the origin with --window-position.")]
     public static async Task<(int X, int Y)?> MoveWindowToOriginAsync(
         IPage page, IEnumerable<string>? args = null)
     {
@@ -336,17 +455,23 @@ public static class Geometry
     }
 
     /// <summary>
-    /// Apply the headless window fixup once, using the context's existing page (a persistent context
-    /// always has one) or its first new page: fit to the persona's work area, or move to the origin.
+    /// Apply the headless window fit once, using the context's existing page (a persistent context
+    /// always has one) or its first new page: fit to the display's work area. <paramref name="args"/>
+    /// are the caller's, so a window switch of theirs is respected.
     /// </summary>
+    /// <param name="context">The context whose window to fit.</param>
+    /// <param name="args">The caller's command line.</param>
+    /// <param name="persona">Leave true. false is the earlier regime-2 origin move, kept for compatibility.</param>
     public static async Task InstallWindowFixupAsync(
         IBrowserContext context, IEnumerable<string>? args = null, bool persona = true)
     {
         var page = context.Pages.Count > 0
             ? context.Pages[0]
             : await context.NewPageAsync().ConfigureAwait(false);
-        if (persona) await FitWindowToPersonaAsync(page, args).ConfigureAwait(false);
+        if (persona) await FitWindowToWorkAreaAsync(page, args).ConfigureAwait(false);
+#pragma warning disable CS0618   // the documented compatibility path
         else await MoveWindowToOriginAsync(page, args).ConfigureAwait(false);
+#pragma warning restore CS0618
     }
 
     /// <summary>
@@ -368,6 +493,7 @@ public static class Geometry
     /// inherit it — so new pages get it too, via the context's Page event.
     /// </para>
     /// </remarks>
+    [Obsolete("No longer used by the SDK: regime 2 sets a real headless display (--screen-info) instead.")]
     public static async Task InstallScreenOverrideAsync(
         IBrowserContext context, ScreenSize screen, ViewportSize viewport)
     {
@@ -404,4 +530,226 @@ public static class Geometry
         inner[0] <= outer[0] && inner[1] <= outer[1]
         && outer[0] <= avail[0] && outer[1] <= avail[1]
         && avail[0] <= screen[0] && avail[1] <= screen[1];
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────────
+    // ServeAsync: a raw CDP endpoint. Port of the Node SDK's serve() section of the same name.
+    //
+    // Everything above rides on Playwright: NoViewport is a context option and the fit runs on each
+    // context's first page. A raw endpoint has neither, and a CDP emulation override would not survive
+    // either, being scoped to the session that set it. What every target and every client of a served
+    // browser inherits is the headless DISPLAY and the real WINDOW, both browser-level. Untouched, a
+    // served headless browser reports the 800x600 surface as its screen (measured on 153/win-x64).
+    //
+    // REGIME 2 (no persona): --screen-info, as in a launch, makes the headless display a real-machine
+    // size before the first document exists. The one difference from a launch is which row: ServeAsync
+    // takes a LightStealth seed's own row (its DPR's pair), a launch the cross-SDK one.
+    //
+    // REGIME 1 (persona): the persona picks its display inside the engine, so it is only known once a
+    // page can be asked. Emulation.updateScreen (headless-only, browser-level, outlives the session that
+    // sent it) then resizes the headless display to match.
+    //
+    // BOTH: one Browser.setWindowBounds puts the first window on the work area, and --window-position
+    // puts later windows at the work-area origin. Deliberately no --window-size: it forces every popup
+    // to that size, ignoring the window.open() features real Chrome honours.
+
+    /// <summary>What ServeAsync adds for a headless launch.</summary>
+    internal sealed record ServedPlan(bool Persona, Display? Display, string[] Args);
+
+    /// <summary>
+    /// The served-browser geometry, or null to leave it alone: headed, or the caller passed a window or
+    /// display switch of their own (the SDK's own android --window-size counts: a phone sizes itself).
+    /// </summary>
+    internal static ServedPlan? ServedGeometry(
+        IReadOnlyCollection<string> engineArgs, string? seed, bool lightStealth, bool headless)
+    {
+        if (!headless || CallerSizedTheWindow(engineArgs) || CallerSetTheDisplay(engineArgs)) return null;
+        const string origin = "--window-position=0,0";
+        if (PersonaActive(engineArgs)) return new(true, null, new[] { origin });
+        var display = HeadlessDisplay(seed, engineArgs, lightStealth);
+        return new(false, display, new[] { ScreenInfoSwitch(display), origin });
+    }
+
+    /// <summary>Throws unless <paramref name="size"/> is null or whole CSS px in 100-10000.</summary>
+    internal static void ValidateWindowSize(ViewportSize? size)
+    {
+        static bool Ok(int v) => v is >= 100 and <= 10000;
+        if (size is not null && !(Ok(size.Width) && Ok(size.Height)))
+            throw new ArgumentException("clearcote serve: WindowSize must be whole CSS px, 100-10000", nameof(size));
+    }
+
+    /// <summary>The slice of a browser-level CDP connection the served-window fit needs.</summary>
+    internal interface ICdpSend
+    {
+        Task<JsonElement> SendAsync(string method, object? parameters = null, string? sessionId = null);
+    }
+
+    private const string DisplayJs =
+        "[screen.width, screen.height, screen.availLeft, screen.availTop, screen.availWidth, screen.availHeight]";
+
+    /// <summary>
+    /// Put the served browser's first window on its display's work area (or <paramref name="windowSize"/>,
+    /// clamped into it); under a persona, first make the headless display the persona's own. Only
+    /// Target/Emulation/Browser commands plus one Runtime.evaluate (never Runtime.enable) on the first
+    /// page, and every change is browser-level, so nothing lingers when the connection closes.
+    /// </summary>
+    /// <returns>The display and the window's outer size, or null when it could not act (no page, an
+    /// implausible display, or an engine without Emulation.updateScreen under a persona). Never throws.</returns>
+    internal static async Task<(Display Display, int[] Outer)?> FitWindowOverCdpAsync(
+        ICdpSend cdp, bool persona, ViewportSize? windowSize = null)
+    {
+        string? sessionId = null;
+        try
+        {
+            var targets = await cdp.SendAsync("Target.getTargets").ConfigureAwait(false);
+            var page = targets.TryGetProperty("targetInfos", out var infos)
+                ? infos.EnumerateArray().FirstOrDefault(t => t.GetProperty("type").GetString() == "page")
+                : default;
+            if (page.ValueKind != JsonValueKind.Object) return null;
+            var targetId = page.GetProperty("targetId").GetString()!;
+            sessionId = (await cdp.SendAsync("Target.attachToTarget",
+                new Dictionary<string, object> { ["targetId"] = targetId, ["flatten"] = true }).ConfigureAwait(false))
+                .GetProperty("sessionId").GetString();
+
+            async Task<int[]> ReadAsync(string expression)
+            {
+                var r = await cdp.SendAsync("Runtime.evaluate",
+                    new Dictionary<string, object> { ["expression"] = expression, ["returnByValue"] = true },
+                    sessionId).ConfigureAwait(false);
+                return r.GetProperty("result").GetProperty("value").EnumerateArray().Select(v => (int)Math.Round(v.GetDouble())).ToArray();
+            }
+
+            var d = await ReadAsync(DisplayJs).ConfigureAwait(false);
+            var (sw, sh, al, at, aw, ah) = (d[0], d[1], d[2], d[3], d[4], d[5]);
+            if (!Plausible(new[] { aw, ah }) || aw > sw || ah > sh) return null;
+            if (persona)
+            {
+                var screens = await cdp.SendAsync("Emulation.getScreenInfos").ConfigureAwait(false);
+                var list = screens.TryGetProperty("screenInfos", out var s) ? s.EnumerateArray().ToList() : new();
+                if (list.Count == 0) return null;
+                var primary = list.FirstOrDefault(x => x.TryGetProperty("isPrimary", out var p) && p.GetBoolean());
+                if (primary.ValueKind != JsonValueKind.Object) primary = list[0];
+                await cdp.SendAsync("Emulation.updateScreen", new Dictionary<string, object>
+                {
+                    ["screenId"] = primary.GetProperty("id").GetString()!,
+                    ["left"] = 0, ["top"] = 0, ["width"] = sw, ["height"] = sh,
+                    ["workAreaInsets"] = new Dictionary<string, object>
+                    {
+                        ["left"] = al, ["top"] = at, ["right"] = sw - al - aw, ["bottom"] = sh - at - ah,
+                    },
+                }).ConfigureAwait(false);
+            }
+            // The asked-for size, never past the work area; a window smaller than it sits 10px in, like
+            // Chrome's own first placement.
+            var w = Math.Min(windowSize?.Width ?? aw, aw);
+            var h = Math.Min(windowSize?.Height ?? ah, ah);
+            var left = al + Math.Min(10, aw - w);
+            var top = at + Math.Min(10, ah - h);
+            var windowId = (await cdp.SendAsync("Browser.getWindowForTarget",
+                new Dictionary<string, object> { ["targetId"] = targetId }).ConfigureAwait(false))
+                .GetProperty("windowId").GetInt32();
+            Task SetBoundsAsync(int bw, int bh) => cdp.SendAsync("Browser.setWindowBounds", new Dictionary<string, object>
+            {
+                ["windowId"] = windowId,
+                ["bounds"] = new Dictionary<string, object> { ["left"] = left, ["top"] = top, ["width"] = bw, ["height"] = bh },
+            });
+
+            await SetBoundsAsync(w, h).ConfigureAwait(false);
+            var outer = await ReadAsync(OuterJs).ConfigureAwait(false);
+            // Same self-tuning as FitWindowToWorkAreaAsync: an engine that reports less than the bounds
+            // it was given gets the shortfall added back, and an overshoot is reverted.
+            if (FitPlan(new[] { w, h }, outer) is { } plan)
+            {
+                await SetBoundsAsync(plan.Width, plan.Height).ConfigureAwait(false);
+                outer = await ReadAsync(OuterJs).ConfigureAwait(false);
+                if (outer[0] > w || outer[1] > h)
+                {
+                    await SetBoundsAsync(w, h).ConfigureAwait(false);
+                    outer = await ReadAsync(OuterJs).ConfigureAwait(false);
+                }
+            }
+            return (new Display(sw, sh, aw, ah), outer);
+        }
+        catch (Exception)
+        {
+            return null;   // deliberately silent: never fail a launch over geometry
+        }
+        finally
+        {
+            if (sessionId is not null)
+            {
+                try
+                {
+                    await cdp.SendAsync("Target.detachFromTarget",
+                        new Dictionary<string, object> { ["sessionId"] = sessionId }).ConfigureAwait(false);
+                }
+                catch (Exception) { }
+            }
+        }
+    }
+
+    /// <summary>A minimal CDP client on <see cref="ClientWebSocket"/>: request/response only, events dropped.</summary>
+    private sealed class CdpSocket : ICdpSend, IDisposable
+    {
+        private readonly ClientWebSocket _ws = new();
+        private readonly TimeSpan _timeout;
+        private int _next;
+
+        private CdpSocket(TimeSpan timeout) => _timeout = timeout;
+
+        public static async Task<CdpSocket> ConnectAsync(string wsUrl, TimeSpan timeout)
+        {
+            var c = new CdpSocket(timeout);
+            using var cts = new CancellationTokenSource(timeout);
+            await c._ws.ConnectAsync(new Uri(wsUrl), cts.Token).ConfigureAwait(false);
+            return c;
+        }
+
+        public async Task<JsonElement> SendAsync(string method, object? parameters = null, string? sessionId = null)
+        {
+            var id = ++_next;
+            var msg = new Dictionary<string, object> { ["id"] = id, ["method"] = method, ["params"] = parameters ?? new Dictionary<string, object>() };
+            if (sessionId is not null) msg["sessionId"] = sessionId;
+            using var cts = new CancellationTokenSource(_timeout);
+            await _ws.SendAsync(JsonSerializer.SerializeToUtf8Bytes(msg), WebSocketMessageType.Text, true, cts.Token).ConfigureAwait(false);
+            var buffer = new byte[64 * 1024];
+            while (true)
+            {
+                using var message = new MemoryStream();
+                WebSocketReceiveResult r;
+                do
+                {
+                    r = await _ws.ReceiveAsync(buffer, cts.Token).ConfigureAwait(false);
+                    if (r.MessageType == WebSocketMessageType.Close) throw new Exception("CDP connection closed");
+                    message.Write(buffer, 0, r.Count);
+                } while (!r.EndOfMessage);
+                using var doc = JsonDocument.Parse(message.ToArray());
+                var root = doc.RootElement;
+                if (!root.TryGetProperty("id", out var rid) || rid.GetInt32() != id) continue;   // an event
+                if (root.TryGetProperty("error", out var err)) throw new Exception(err.GetProperty("message").GetString());
+                return root.TryGetProperty("result", out var result) ? result.Clone() : default;
+            }
+        }
+
+        public void Dispose()
+        {
+            try { _ws.Abort(); } catch { }
+            _ws.Dispose();
+        }
+    }
+
+    /// <summary><see cref="FitWindowOverCdpAsync"/> on the SDK's own short connection. Never throws.</summary>
+    internal static async Task<(Display Display, int[] Outer)?> FitServedWindowAsync(
+        string? wsUrl, bool persona, ViewportSize? windowSize = null, int timeoutMs = 5000)
+    {
+        if (string.IsNullOrEmpty(wsUrl)) return null;
+        try
+        {
+            using var cdp = await CdpSocket.ConnectAsync(wsUrl, TimeSpan.FromMilliseconds(timeoutMs)).ConfigureAwait(false);
+            return await FitWindowOverCdpAsync(cdp, persona, windowSize).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
 }

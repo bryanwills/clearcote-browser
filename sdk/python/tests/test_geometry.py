@@ -6,15 +6,13 @@ claims to be on::
     screen 1280x720   avail 1280x720   inner 1280x720   outer 1288x851
 
 ``outer > screen`` on both axes is not a subtle statistical tell — it is a state no real browser can
-be in, readable with two property lookups and no JS trickery. It happened because ``screen.*`` in
-headless follows the emulated viewport while the engine still synthesizes a window frame on top, and
-because the engine's own ``--fingerprint-screen-*`` switches are inert (they never reach
-``screen.width/height``; verified on 149.0.7827.114 through the SDK and passed raw).
+be in, readable with two property lookups and no JS trickery. It happened because headless has only
+an 800x600 surface for a display while Playwright's emulated viewport synthesizes a window on top.
 
-The tests below lock down the three things that keep it fixed: the frame arithmetic, the fact that
-the default is actually APPLIED at every launch entry point (and never over a caller's own choice),
-and — in the live test — that the engine's real frame still matches the constant the arithmetic is
-built on.
+The tests below lock down what keeps it fixed: the display (``--screen-info``) and the window fit
+the SDK applies instead, the fact that the default is actually APPLIED at every launch entry point
+(and never over a caller's own choice), and — in the live tests — that a real engine ends up with a
+maximized window on that display whatever frame its platform draws (8x131 linux, 16x134 windows).
 
 The parity vector is duplicated verbatim in the Node and .NET suites. If a seed ever selects a
 different screen in one SDK, a persona stops being portable across them, so all three assert the
@@ -29,24 +27,29 @@ from clearcote._geometry import (
     ENGINE_FRAME_HEIGHT,
     ENGINE_FRAME_WIDTH,
     HEADLESS_SCREEN_PROFILES,
+    WINDOWS_TASKBAR_HEIGHT,
     apply_headless_geometry,
+    caller_set_the_display,
     caller_sized_the_window,
-    fit_window_to_persona,
+    fit_window_to_work_area,
     geometry_is_coherent,
+    headless_display,
     headless_geometry,
-    move_window_to_origin,
     persona_active,
     profile_screen_from_args,
+    screen_info_switch,
 )
 
 
 # --------------------------------------------------------------- the frame arithmetic
+# headless_geometry's viewport is the cross-SDK contract (the PARITY vector below); launch takes only
+# its screen row (the display) and fits the real window instead of sizing against the frame.
 def test_every_profile_row_leaves_a_window_that_fits_its_screen():
     """The whole point: inner + frame must land ON the screen edge, never past it."""
     for sw, sh, _weight, _os in HEADLESS_SCREEN_PROFILES:
         inner = (sw - ENGINE_FRAME_WIDTH, sh - ENGINE_FRAME_HEIGHT)
         outer = (inner[0] + ENGINE_FRAME_WIDTH, inner[1] + ENGINE_FRAME_HEIGHT)
-        # CDP forces avail == screen (measured), so that is what a page will read.
+        # A CDP screen override forces avail == screen (measured), so that is what a page reads.
         assert geometry_is_coherent((sw, sh), (sw, sh), inner, outer), (
             f"{sw}x{sh}: inner={inner} outer={outer} escapes the screen")
 
@@ -144,14 +147,56 @@ def test_caller_sized_the_window_detects_every_window_flag():
     assert not caller_sized_the_window(["--no-sandbox", "--fingerprint=x"])
 
 
+def test_caller_set_the_display_detects_screen_info():
+    assert caller_set_the_display(["--screen-info={1280x720}"])
+    assert not caller_set_the_display(["--no-sandbox", "--window-size=1,1"])
+
+
 # --------------------------------------------------------------- apply / skip rules
-def test_regime_2_applies_screen_and_viewport_when_headless_is_true_or_unset():
+def test_regime_2_sets_the_seeds_display_and_no_viewport_when_headless_is_true_or_unset():
     for kwargs in ({"headless": True}, {}):
-        applied = apply_headless_geometry(kwargs, "seed", args=["--no-sandbox"])
-        assert applied["mode"] == "profile"
-        assert kwargs["screen"] == applied["screen"]
-        assert kwargs["viewport"] == applied["viewport"]
-        assert "no_viewport" not in kwargs
+        applied = apply_headless_geometry(
+            kwargs, "seed", args=["--no-sandbox", "--fingerprint-platform=windows"])
+        screen = headless_geometry("seed")["screen"]
+        display = {"width": screen["width"], "height": screen["height"], "avail_width": screen["width"],
+                   "avail_height": screen["height"] - WINDOWS_TASKBAR_HEIGHT}
+        assert applied == {"mode": "display", "display": display,
+                           "args": [screen_info_switch(display), "--window-position=0,0"]}
+        # the window is fitted to the display, never sized against a per-platform frame
+        assert kwargs["no_viewport"] is True
+        assert "screen" not in kwargs and "viewport" not in kwargs
+
+
+def test_regime_2_display_has_a_taskbar_on_windows_only():
+    d = headless_display("seed", ["--fingerprint-platform=linux"])
+    assert (d["avail_width"], d["avail_height"]) == (d["width"], d["height"])
+    d = headless_display("seed", ["--fingerprint-platform=windows"])
+    assert d["avail_height"] == d["height"] - WINDOWS_TASKBAR_HEIGHT
+
+
+def test_regime_2_display_agrees_with_an_explicit_screen_the_engine_spoofs():
+    args = ["--fingerprint-platform=windows", "--fingerprint-screen-width=1600",
+            "--fingerprint-screen-height=900"]
+    assert headless_display("x", args) == {
+        "width": 1600, "height": 900, "avail_width": 1600, "avail_height": 860}
+    assert headless_display("x", args + ["--fingerprint-avail-height=870"])["avail_height"] == 870
+    # never a work area larger than the screen
+    assert headless_display("x", args + ["--fingerprint-avail-width=2000"])["avail_width"] == 1600
+
+
+def test_screen_info_switch_writes_the_taskbar_as_a_work_area_inset():
+    assert screen_info_switch({"width": 1920, "height": 1080, "avail_width": 1920,
+                               "avail_height": 1040}) == "--screen-info={1920x1080 workAreaBottom=40}"
+    assert screen_info_switch({"width": 1920, "height": 1080, "avail_width": 1920,
+                               "avail_height": 1080}) == "--screen-info={1920x1080}"
+
+
+def test_regime_2_keeps_a_callers_own_display_or_window_switch():
+    own = apply_headless_geometry({}, "seed", args=["--screen-info={1280x720}"])
+    assert own == {"mode": "display", "display": None, "args": ["--window-position=0,0"]}
+    # a caller-sized window still gets a real screen under it; the fit then leaves it alone
+    sized = apply_headless_geometry({}, "seed", args=["--window-size=1440,900"])
+    assert len(sized["args"]) == 1 and sized["args"][0].startswith("--screen-info=")
 
 
 def test_regime_1_takes_no_viewport_and_leaves_screen_to_the_persona():
@@ -159,7 +204,7 @@ def test_regime_1_takes_no_viewport_and_leaves_screen_to_the_persona():
     override (measured), so the SDK must not pretend to control it."""
     kwargs = {"headless": True}
     applied = apply_headless_geometry(kwargs, "seed", args=["--fingerprint=seed", "--no-sandbox"])
-    assert applied == {"mode": "persona"}
+    assert applied == {"mode": "persona", "args": []}
     assert kwargs["no_viewport"] is True
     assert "screen" not in kwargs and "viewport" not in kwargs
 
@@ -204,11 +249,10 @@ def test_profile_screen_is_used_instead_of_a_corpus_pick():
     otherwise every profile launch shares one screen and the imported identity is thrown away."""
     arg = _profile_arg({"screen": {"width": 2560, "height": 1440}})
     kwargs = {"headless": True}
-    applied = apply_headless_geometry(kwargs, "some-seed", args=[arg])
-    assert applied["source"] == "imported"
-    assert kwargs["screen"] == {"width": 2560, "height": 1440}
-    assert kwargs["viewport"] == {"width": 2560 - ENGINE_FRAME_WIDTH,
-                                  "height": 1440 - ENGINE_FRAME_HEIGHT}
+    applied = apply_headless_geometry(kwargs, "some-seed", args=[arg, "--fingerprint-platform=windows"])
+    assert applied["display"] == {"width": 2560, "height": 1440, "avail_width": 2560,
+                                  "avail_height": 1400}
+    assert kwargs["no_viewport"] is True
 
 
 def test_profile_screen_too_small_falls_back_to_the_corpus():
@@ -216,10 +260,10 @@ def test_profile_screen_too_small_falls_back_to_the_corpus():
     screen (measured). Sizing a persona to that would be a worse tell than a corpus screen."""
     arg = _profile_arg({"screen": {"width": 800, "height": 600}})
     assert profile_screen_from_args([arg]) is None
-    kwargs = {"headless": True}
-    applied = apply_headless_geometry(kwargs, "seed", args=[arg])
-    assert applied["source"] == "corpus"
-    assert kwargs["screen"] == headless_geometry("seed")["screen"]
+    applied = apply_headless_geometry({"headless": True}, "seed", args=[arg])
+    screen = headless_geometry("seed")["screen"]
+    assert (applied["display"]["width"], applied["display"]["height"]) == (
+        screen["width"], screen["height"])
 
 
 @pytest.mark.parametrize("arg", [
@@ -229,8 +273,8 @@ def test_profile_screen_too_small_falls_back_to_the_corpus():
 ])
 def test_an_unreadable_profile_never_breaks_the_launch(arg):
     assert profile_screen_from_args([arg]) is None
-    kwargs = {"headless": True}
-    assert apply_headless_geometry(kwargs, "seed", args=[arg])["source"] == "corpus"
+    applied = apply_headless_geometry({"headless": True}, "seed", args=[arg])
+    assert applied["display"]["width"] == headless_geometry("seed")["screen"]["width"]
 
 
 def test_a_profile_without_a_screen_block_falls_back():
@@ -244,11 +288,11 @@ def test_a_seed_beside_a_profile_still_takes_the_persona_regime():
     arg = _profile_arg({"screen": {"width": 2560, "height": 1440}})
     kwargs = {"headless": True}
     applied = apply_headless_geometry(kwargs, "seed", args=[arg, "--fingerprint=seed"])
-    assert applied == {"mode": "persona"}
+    assert applied == {"mode": "persona", "args": []}
     assert kwargs["no_viewport"] is True
 
 
-# --------------------------------------------------------------- the persona window fit
+# --------------------------------------------------------------- the work-area window fit
 class _FakeCdp:
     def __init__(self, on_bounds=None):
         self.calls = []
@@ -303,7 +347,7 @@ def test_window_fit_maximizes_into_the_personas_work_area():
     """One correction pass: the engine reports outerHeight below the bounds height it was given
     (33px on 149), so a single fit lands short of the work area and the shortfall is added back."""
     page = _FakePageForFit((1920, 1040), height_bias=33)
-    assert fit_window_to_persona(page, ["--fingerprint=x"]) == (1920, 1040)
+    assert fit_window_to_work_area(page, ["--fingerprint=x"]) == (1920, 1040)
     bounds = [p["bounds"] for m, p in page.cdp.calls if m == "Browser.setWindowBounds"]
     assert bounds == [
         {"left": 0, "top": 0, "width": 1920, "height": 1040},   # first attempt: lands 33 short
@@ -313,7 +357,7 @@ def test_window_fit_maximizes_into_the_personas_work_area():
 
 def test_window_fit_needs_no_correction_when_the_engine_is_exact():
     page = _FakePageForFit((1920, 1040), height_bias=0)
-    assert fit_window_to_persona(page) == (1920, 1040)
+    assert fit_window_to_work_area(page) == (1920, 1040)
     assert len([m for m, _ in page.cdp.calls if m == "Browser.setWindowBounds"]) == 1
 
 
@@ -321,22 +365,22 @@ def test_window_fit_reverts_rather_than_overshooting_the_work_area():
     """An engine that honours bounds exactly AND reports a short outer would make the correction
     overshoot; outer > avail is just as impossible as the bug being fixed, so revert instead."""
     page = _FakePageForFit((1920, 1040), height_bias=33, bias_first_call_only=True)
-    assert fit_window_to_persona(page) == (1920, 1040)
+    assert fit_window_to_work_area(page) == (1920, 1040)
     bounds = [p["bounds"] for m, p in page.cdp.calls if m == "Browser.setWindowBounds"]
     assert len(bounds) == 3 and bounds[2] == bounds[0], "should have reverted to the safe bounds"
 
 
 def test_window_fit_defers_to_a_caller_supplied_window_size():
     page = _FakePageForFit((1920, 1040))
-    assert fit_window_to_persona(page, ["--window-size=1024,768"]) is None
+    assert fit_window_to_work_area(page, ["--window-size=1024,768"]) is None
     assert page.cdp.calls == []
 
 
 def test_window_fit_declines_an_implausible_work_area():
-    """No persona engaged -> the headless default work area. Maximizing to 800x600 would be worse
+    """No display set -> the headless default work area. Maximizing to 800x600 would be worse
     than leaving the window alone."""
     page = _FakePageForFit((800, 600))
-    assert fit_window_to_persona(page) is None
+    assert fit_window_to_work_area(page) is None
     assert page.cdp.calls == []
 
 
@@ -347,31 +391,7 @@ def test_window_fit_never_raises():
         def evaluate(self, _js):
             raise RuntimeError("target closed")
 
-    assert fit_window_to_persona(_Boom()) is None
-
-
-# --------------------------------------------------------------- the regime-2 origin move
-def test_origin_move_sends_left_top_only():
-    """Sending width/height here would fight the emulated viewport, so the move is position-only."""
-    page = _FakePageForFit((1920, 1080))
-    assert move_window_to_origin(page) == (0, 0)
-    assert [p for m, p in page.cdp.calls if m == "Browser.setWindowBounds"] == [
-        {"windowId": 7, "bounds": {"left": 0, "top": 0}}]
-
-
-def test_origin_move_defers_to_a_caller_supplied_window_position():
-    page = _FakePageForFit((1920, 1080))
-    assert move_window_to_origin(page, ["--window-position=100,100"]) is None
-    assert page.cdp.calls == []
-
-
-def test_origin_move_never_raises():
-    class _Boom:
-        @property
-        def context(self):
-            raise RuntimeError("target closed")
-
-    assert move_window_to_origin(_Boom()) is None
+    assert fit_window_to_work_area(_Boom()) is None
 
 
 # --------------------------------------------------------------- wiring at the entry points
@@ -445,17 +465,23 @@ class _Capture:
         return params["bounds"] if params else None
 
 
-def test_persistent_context_seedless_sends_screen_and_viewport(monkeypatch, tmp_path):
-    """Regime 2: no --fingerprint, so the SDK owns the screen."""
-    cap = _Capture().install(monkeypatch)
+def _screen_info(kw):
+    return [a for a in kw["args"] if a.startswith("--screen-info=")]
+
+
+def test_persistent_context_seedless_sets_the_display_and_fits_the_window(monkeypatch, tmp_path):
+    """Regime 2: no --fingerprint, so the SDK sets the headless display itself."""
+    cap = _Capture(avail=(1920, 1040)).install(monkeypatch)
     clearcote.launch_persistent_context(
         str(tmp_path / "prof"), executable_path=_fake_exe(tmp_path), quiet=True)
-    expected = headless_geometry(None)
-    assert cap.context_kwargs["screen"] == expected["screen"]
-    assert cap.context_kwargs["viewport"] == expected["viewport"]
-    # regime 2 moves the window to the origin (so it stops overhanging the spoofed screen edge) but
-    # must NOT resize it — the size comes from the emulated viewport.
-    assert cap.bounds == {"left": 0, "top": 0}
+    screen = headless_geometry(None)["screen"]
+    [switch] = _screen_info(cap.context_kwargs)
+    assert switch.startswith(f"--screen-info={{{screen['width']}x{screen['height']}")
+    assert "--window-position=0,0" in cap.context_kwargs["args"]
+    assert cap.context_kwargs["no_viewport"] is True
+    assert "screen" not in cap.context_kwargs and "viewport" not in cap.context_kwargs
+    # maximized into the display's work area, like regime 1
+    assert cap.bounds == {"left": 0, "top": 0, "width": 1920, "height": 1040}
 
 
 def test_persistent_context_with_a_seed_uses_no_viewport_and_fits_the_window(monkeypatch, tmp_path):
@@ -466,6 +492,7 @@ def test_persistent_context_with_a_seed_uses_no_viewport_and_fits_the_window(mon
         str(tmp_path / "prof"), executable_path=_fake_exe(tmp_path), fingerprint="geo-1", quiet=True)
     assert cap.context_kwargs["no_viewport"] is True
     assert "screen" not in cap.context_kwargs and "viewport" not in cap.context_kwargs
+    assert _screen_info(cap.context_kwargs) == [], "the persona owns the display"
     assert cap.bounds == {"left": 0, "top": 0, "width": 2560, "height": 1400}
 
 
@@ -483,9 +510,8 @@ def test_launch_default_path_carries_the_geometry_through_the_throwaway_profile(
     as context options there rather than via a new_page wrap."""
     cap = _Capture().install(monkeypatch)
     clearcote.launch(executable_path=_fake_exe(tmp_path), quiet=True)
-    expected = headless_geometry(None)
-    assert cap.context_kwargs["screen"] == expected["screen"]
-    assert cap.context_kwargs["viewport"] == expected["viewport"]
+    assert cap.context_kwargs["no_viewport"] is True
+    assert len(_screen_info(cap.context_kwargs)) == 1
 
 
 def test_incognito_launch_defaults_new_page_geometry(monkeypatch, tmp_path):
@@ -494,9 +520,10 @@ def test_incognito_launch_defaults_new_page_geometry(monkeypatch, tmp_path):
     cap = _Capture().install(monkeypatch)
     browser = clearcote.launch(
         executable_path=_fake_exe(tmp_path), ephemeral_profile=False, quiet=True)
-    expected = headless_geometry(None)
-    assert "viewport" not in (cap.launch_kwargs or {}), "viewport is not a chromium.launch option"
-    assert browser.new_page().kw == expected            # wrapper injected screen+viewport
+    assert "no_viewport" not in cap.launch_kwargs, "no_viewport is not a chromium.launch option"
+    assert len(_screen_info(cap.launch_kwargs)) == 1   # the display is browser-wide
+    assert browser.new_page().kw == {"no_viewport": True}   # wrapper injected no_viewport
+    assert cap.bounds == {"left": 0, "top": 0, "width": 1920, "height": 1040}
     # a caller's own choice still wins
     assert browser.new_page(no_viewport=True).kw == {"no_viewport": True}
     assert browser.new_page(viewport={"width": 640, "height": 480}).kw == {
@@ -535,6 +562,7 @@ _MEASURE_JS = """() => ({
     outer: [outerWidth, outerHeight],
     pos: [screenX, screenY],
     resizes: window.__resizes,
+    media_agrees: matchMedia(`(device-width: ${screen.width}px) and (device-height: ${screen.height}px)`).matches,
 })"""
 
 # Runs before any page script, so a window resized after a page starts running JS shows up as a
@@ -613,28 +641,43 @@ def test_live_regime_1_persona_owns_the_screen_and_the_window_is_maximized(tmp_p
     assert m["resizes"] == 0, f"the page observed the window being resized: {m}"
 
 
-@live_only
-def test_live_regime_2_seedless_screen_override_and_frame_constant(tmp_path):
-    """Seedless launch: no persona, so the SDK's corpus screen + frame-fitted viewport apply, and
-    the engine's frame must still match the constants that arithmetic is built on."""
-    m = _measure_live(tmp_path / "live-seedless")
-    expected = headless_geometry(None)
-
-    assert m["screen"] == [expected["screen"]["width"], expected["screen"]["height"]]
-    assert m["inner"] == [expected["viewport"]["width"], expected["viewport"]["height"]]
+def _assert_maximized_on_the_display(m):
     assert geometry_is_coherent(m["screen"], m["avail"], m["inner"], m["outer"]), (
         f"live geometry escapes its screen: {m}")
-    # flush with the screen edge: the maximized shape regime 2 aims for
-    assert m["outer"] == m["screen"], f"window is not flush with the screen: {m}"
-    # ...and positioned so it does not hang off that edge (only 6% of real single-display captures do)
+    assert m["outer"] == m["avail"], f"window was not fitted to the work area: {m}"
     assert m["pos"] == [0, 0], f"window is not at the origin: {m}"
-    assert m["pos"][0] + m["outer"][0] <= m["screen"][0], f"window overhangs the right edge: {m}"
-    assert m["pos"][1] + m["outer"][1] <= m["screen"][1], f"window overhangs the bottom edge: {m}"
+    dx, dy = m["outer"][0] - m["inner"][0], m["outer"][1] - m["inner"][1]
+    assert 0 <= dx <= 16 and 60 <= dy <= 160, f"implausible window frame ({dx}, {dy}): {m}"
+
+
+@live_only
+def test_live_regime_2_seedless_display_is_the_cross_sdk_row_and_the_window_is_maximized(tmp_path):
+    """Seedless launch: no persona, so the SDK sets the headless display (the seed's cross-SDK row,
+    with a taskbar on Windows) and maximizes the window into it — whatever frame this platform's
+    engine draws (linux 8x131 vs windows 16x134 is why nothing is sized against a constant)."""
+    m = _measure_live(tmp_path / "live-seedless")
+    screen = headless_geometry(None)["screen"]
+    display = headless_display(None, [])
+    assert m["screen"] == [screen["width"], screen["height"]]
+    assert m["avail"] == [display["avail_width"], display["avail_height"]]
+    # a real display, not an emulated screen: device-width media queries agree with screen.*
+    assert m["media_agrees"] is True, f"device-width media query disagrees with screen: {m}"
+    _assert_maximized_on_the_display(m)
     assert m["resizes"] == 0, f"the page observed the window being moved/resized: {m}"
-    assert (m["outer"][0] - m["inner"][0], m["outer"][1] - m["inner"][1]) == (
-        ENGINE_FRAME_WIDTH, ENGINE_FRAME_HEIGHT), (
-        f"engine window frame moved: {m} - update _geometry.ENGINE_FRAME_* and re-derive the "
-        f"regime-2 viewports")
+
+
+@live_only
+def test_live_regime_2_incognito_launch_gives_every_context_its_own_maximized_window():
+    """The chromium.launch() path: each new context is a new window on the same display."""
+    browser = clearcote.launch(executable_path=LIVE_EXE, args=["--no-sandbox"], quiet=True,
+                               ephemeral_profile=False)
+    try:
+        for page in (browser.new_page(), browser.new_context().new_page()):
+            page.goto("data:text/html,<body style='margin:0'>geo</body>")
+            page.wait_for_timeout(700)
+            _assert_maximized_on_the_display(page.evaluate(_MEASURE_JS))
+    finally:
+        browser.close()
 
 
 @live_only

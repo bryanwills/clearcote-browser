@@ -93,6 +93,12 @@ await srv.close();
 The returned `Server` exposes `.cdpUrl`, `.wsUrl()`, and `.close()`. (For a no-code CDP endpoint, the
 official Docker image also works: `docker run -d --rm -p 9222:9222 teamflatearth/clearcote`.)
 
+Headless, `serve()` gives the browser a real-size display (the persona's, or one drawn from real
+desktops) and maximizes its window onto the work area before any client attaches, so every page,
+tab and popup reports a window that fits its screen. Pass `windowSize: { width, height }` for a
+smaller window (clamped to the work area), or your own `--window-size` / `--screen-info` in `args` to
+opt out.
+
 **Drive it from an AI agent (MCP).** Point Claude Desktop / Cursor / Cline at the
 [`clearcote-mcp`](https://github.com/clearcotelabs/clearcote-browser/tree/main/mcp) server
 (`npx -y clearcote-mcp` or `pip install clearcote-mcp`) — ~20 tools over one shared stealth browser.
@@ -323,8 +329,9 @@ All optional. Anything not listed here is passed straight through to Playwright
 > **Headless launches** (0.24.0+) get a coherent window geometry by default, so `screen`, `availWidth/Height`,
 > `innerWidth/Height` and `outerWidth/Height` agree with each other the way a real window's do. With a
 > `fingerprint` seed the engine's own screen and work area are used and the window is sized to them; without a
-> seed the SDK applies a screen size drawn from real captured desktops and fits the viewport to it. It is
-> applied at launch, before your first navigation. Pass an explicit `viewport` or `screen` to opt out entirely.
+> seed the SDK sets the headless display to a screen size drawn from real captured desktops (with a
+> taskbar on Windows) and sizes the window to its work area the same way. It is applied at launch,
+> before your first navigation. Pass an explicit `viewport` or `screen` to opt out entirely.
 >
 > **Proxies:** a `socks5://user:pass@host:port` proxy is routed via `--proxy-server` (Playwright rejects credentials in its SOCKS descriptor). Chromium can't authenticate SOCKS5, so the credentials are dropped with a warning — put the auth on a local relay.
 

@@ -114,7 +114,7 @@ class Server:
 
 
 def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
-          headless=True, ready_timeout=30.0, quiet=False, **kwargs):
+          headless=True, ready_timeout=30.0, quiet=False, window_size=None, **kwargs):
     """Launch clearcote and expose a raw CDP endpoint; return a :class:`Server`.
 
     ``port``          bound port (default: a free ephemeral port; pass 9222 for the conventional one).
@@ -123,13 +123,22 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
                       ``"*"`` only for trusted local use.
     ``user_data_dir`` persistent profile dir (default: a fresh temp dir, removed on close).
     ``headless``      run headless (default True; pass False for a visible window).
+    ``window_size``   headless: the outer window size, ``{"width", "height"}`` (or a pair) in CSS px,
+                      clamped to the display's work area so the window can never be larger than its
+                      screen. Default: the whole work area (a maximized window). Ignored when headed,
+                      and when ``args`` carries a window or display switch (the caller then owns
+                      geometry).
     All other kwargs (fingerprint, platform, proxy, geoip, timezone, ...) are the persona options
     ``launch()`` accepts.
     """
     # Lazy import to avoid a circular import at module load (this module is imported by __init__).
     from . import _acquire_lease_from_kwargs, _prepare_or_release, _win_av_retry
     from ._fonts import linux_font_env
+    from ._geometry import fit_served_window, served_geometry, validate_window_size
     from ._launchopts import serve_needs_no_sandbox
+
+    window_size = validate_window_size(window_size)
+    light_stealth = bool(kwargs.get("light_stealth"))
 
     kwargs.pop("headless", None)  # serve() drives headless directly via --headless=new
     # ...so _prepare cannot see it: tell it explicitly (the GPU-blocklist rule depends on headed).
@@ -170,6 +179,11 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     # Playwright's own --no-sandbox is missing: `clearcote serve` in a root container just timed out.
     if serve_needs_no_sandbox(sys.platform, getattr(os, "getuid", lambda: None)(), args):
         cdp.append("--no-sandbox")
+    # Headless geometry for a raw endpoint: the display and window are set browser-wide, since no
+    # client's context options or CDP overrides would reach every page (see _geometry).
+    geometry = served_geometry(args, _seed, light_stealth=light_stealth, headless=headless)
+    if geometry:
+        cdp.extend(geometry["args"])
 
     launch_token = lease.bind_launch() if lease else None  # (file, release) or None; r23+ opt-in
     env = dict(os.environ)
@@ -224,6 +238,10 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
 
     srv = Server(proc, host, port, user_data_dir, own_udd, lease=lease, launch_token=launch_token)
     atexit.register(srv.close)
+    # Before any client attaches: the window onto the work area (and, under a persona, the headless
+    # display onto the persona's). Its own connection, closed again; never fails the launch.
+    if geometry:
+        fit_served_window(srv.ws_url, geometry["persona"], window_size)
     if not quiet:
         sys.stderr.write(
             "[clearcote] CDP endpoint ready: %s\n"

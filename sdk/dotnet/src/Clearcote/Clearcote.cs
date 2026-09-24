@@ -15,7 +15,7 @@ namespace Clearcote;
 public static class Clearcote
 {
     /// This SDK's version (kept in lockstep with the npm/PyPI SDKs).
-    public const string Version = "0.30.0";
+    public const string Version = "0.31.0";
 
     private static readonly SemaphoreSlim PwLock = new(1, 1);
     private static IPlaywright? _pw;
@@ -64,17 +64,18 @@ public static class Clearcote
 
     /// Launch Clearcote and return a standard Playwright <see cref="IBrowser"/>.
     /// <remarks>
-    /// GEOMETRY CAVEAT. The headless geometry defaults (see <see cref="Geometry"/>) cannot be applied
-    /// here: they are CONTEXT options, and this returns an <see cref="IBrowser"/> whose
-    /// <c>NewPageAsync</c>/<c>NewContextAsync</c> the caller invokes directly — C# has no
-    /// monkeypatching, so there is nothing for the SDK to hook. A page created from this browser
-    /// therefore keeps Playwright's emulated 1280x720 viewport, which in headless makes the window
-    /// report <c>outer &gt; screen</c> — an impossible geometry. Prefer
+    /// GEOMETRY CAVEAT. Only half of the headless geometry default (see <see cref="Geometry"/>) can be
+    /// applied here. The headless display is a command-line switch, so it is set. The rest — NoViewport
+    /// and fitting the window to the work area — needs the context, and this returns an
+    /// <see cref="IBrowser"/> whose <c>NewPageAsync</c>/<c>NewContextAsync</c> the caller invokes
+    /// directly (C# has no monkeypatching). A page created with default options therefore keeps
+    /// Playwright's emulated 1280x720 viewport, which also overrides screen.* to 1280x720, so the
+    /// window reports <c>outer &gt; screen</c> — an impossible geometry. Prefer
     /// <see cref="LaunchEphemeralProfileAsync"/> (which is the recommended path anyway, for the CDM),
-    /// or pass the values yourself:
+    /// or do the rest yourself (the display this launch set is what the window is fitted to):
     /// <code>
-    /// var (screen, viewport) = Geometry.HeadlessGeometry(options.Fingerprint);
-    /// var page = await browser.NewPageAsync(new() { ScreenSize = screen, ViewportSize = viewport });
+    /// var page = await browser.NewPageAsync(new() { ViewportSize = ViewportSize.NoViewport });
+    /// await Geometry.FitWindowToWorkAreaAsync(page);
     /// </code>
     /// </remarks>
     public static async Task<IBrowser> LaunchAsync(LaunchOptions? options = null)
@@ -100,11 +101,14 @@ public static class Clearcote
         var env = lease is not null ? License.WithRunToken(lease.Token, options.Env, launchToken?.File) : options.Env;
         env = ShaderDialect.Apply(options.ShaderDialect, env);  // opt-in; no-op when unset
 
+        // Headless: the display is browser-wide, so it applies even here (see the geometry caveat).
+        var display = Geometry.ResolveHeadless(options.Headless, options.Fingerprint, args, callerSetGeometry: false);
+
         var pw = await PlaywrightAsync().ConfigureAwait(false);
         var browser = await License.ReleaseLeaseOnFailureAsync(lease, () => WinLaunch.WinAvRetryAsync(exePath => pw.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
         {
             ExecutablePath = exePath,
-            Args = args,
+            Args = args.Concat(display.Args).ToArray(),
             Headless = options.Headless,
             Channel = options.Channel,
             SlowMo = options.SlowMo,
@@ -197,7 +201,7 @@ public static class Clearcote
         var env = lease is not null ? License.WithRunToken(lease.Token, options.Env, launchToken?.File) : options.Env;
         env = ShaderDialect.Apply(options.ShaderDialect, env);  // opt-in; no-op when unset
 
-        var geometry = Geometry.Resolve(
+        var geometry = Geometry.ResolveHeadless(
             options.Headless, options.Fingerprint, args,
             callerSetGeometry: options.ViewportSize is not null || options.ScreenSize is not null);
 
@@ -206,7 +210,8 @@ public static class Clearcote
             new BrowserTypeLaunchPersistentContextOptions
             {
                 ExecutablePath = exePath,
-                Args = args,
+                // Regime 2 appends the headless display; the fit below keeps reading the caller's args.
+                Args = args.Concat(geometry.Args).ToArray(),
                 Headless = options.Headless,
                 Channel = options.Channel,
                 SlowMo = options.SlowMo,
@@ -214,30 +219,22 @@ public static class Clearcote
                 Env = env,
                 Proxy = ToPwProxy(proxy),
                 // Headed with no explicit viewport -> real window size (matches launch()).
-                // Headless -> either the persona owns screen/avail and only the window needs fitting
-                // (regime 1), or the SDK overrides screen itself (regime 2). See Geometry.
+                // Headless -> the persona's display (regime 1) or the SDK's (regime 2), and the window
+                // is fitted to its work area below. See Geometry.
                 ViewportSize = options.ViewportSize
-                    ?? (options.Headless == false || geometry.Mode == Geometry.Mode.Persona
+                    ?? (options.Headless == false || geometry.Mode != Geometry.Mode.None
                         ? ViewportSize.NoViewport
-                        : geometry.Viewport),
-                ScreenSize = options.ScreenSize ?? geometry.Screen,
+                        : null),
+                ScreenSize = options.ScreenSize,
             }), exe)).ConfigureAwait(false);
 
         // Release the concurrency slot + remove the run-token file when the context closes.
         if (lease is not null) context.Close += (_, _) => { _ = lease.StopAsync(); launchToken?.Release(); };
-        // Regime 2 needs its screen override issued by hand: Playwright .NET drops ScreenSize on a
-        // persistent context (see InstallScreenOverrideAsync). Python/Node get it from the context
-        // option and need nothing here.
-        if (geometry.Mode == Geometry.Mode.Profile && geometry.Screen is not null && geometry.Viewport is not null)
-            await Geometry.InstallScreenOverrideAsync(context, geometry.Screen, geometry.Viewport)
-                .ConfigureAwait(false);
-        // Regime 1: maximize into the persona's own work area. Regime 2: move the window to the
-        // origin so it stops overhanging the spoofed screen edge. Both are one CDP round-trip and
-        // neither throws, so a launch cannot fail on them. Both run while the context is still on
-        // about:blank, so the caller's page never observes a resize.
+        // Both regimes: maximize into the display's work area. It never throws, so a launch cannot
+        // fail on it, and it runs while the context is still on about:blank, so the caller's page
+        // never observes a resize.
         if (geometry.Mode != Geometry.Mode.None)
-            await Geometry.InstallWindowFixupAsync(
-                context, args, geometry.Mode == Geometry.Mode.Persona).ConfigureAwait(false);
+            await Geometry.InstallWindowFixupAsync(context, args).ConfigureAwait(false);
         return context;
     }
 
@@ -245,6 +242,7 @@ public static class Clearcote
     /// Playwright/Puppeteer/CDP client can attach to via ConnectOverCDP. Returns a <see cref="Server"/>.
     public static async Task<Server> ServeAsync(ServeOptions? options = null)
     {
+        Geometry.ValidateWindowSize(options?.WindowSize);
         options = await PrepareAsync(options ?? new ServeOptions()).ConfigureAwait(false);
         var host = string.IsNullOrEmpty(options.Host) ? "127.0.0.1" : options.Host;
         var exe = await ExecutablePathAsync(options).ConfigureAwait(false);
@@ -273,6 +271,11 @@ public static class Clearcote
         // Chromium refuses to start as root without --no-sandbox, and serve spawns the binary itself,
         // so Playwright's own --no-sandbox is missing: serve in a root container just timed out.
         if (LaunchOpts.ServeNeedsNoSandbox(Native.OsTag, LaunchOpts.EffectiveUid(), engineArgs)) cdpArgs.Add("--no-sandbox");
+        // Headless geometry for a raw endpoint: the display and window are set browser-wide, since no
+        // client's context options or CDP overrides would reach every page (see Geometry).
+        var geometry = Geometry.ServedGeometry(engineArgs, options.Fingerprint, options.LightStealth == true,
+            headless: options.Headless != false);
+        if (geometry is not null) cdpArgs.AddRange(geometry.Args);
 
         var licVersion = options.Version ?? Environment.GetEnvironmentVariable("CLEARCOTE_BROWSER_VERSION");
         var licKey = License.ResolveLicenseKey(options.LicenseKey);
@@ -321,6 +324,11 @@ public static class Clearcote
 
         var srv = new Server(proc, host, port, userDataDir, ownUdd, lease, launchToken);
         AppDomain.CurrentDomain.ProcessExit += (_, _) => { try { srv.CloseAsync().GetAwaiter().GetResult(); } catch { } };
+        // Before any client attaches: the window onto the work area (and, under a persona, the headless
+        // display onto the persona's). Its own connection, closed again; never fails the launch.
+        if (geometry is not null)
+            await Geometry.FitServedWindowAsync(await srv.WsUrlAsync().ConfigureAwait(false), geometry.Persona, options.WindowSize)
+                .ConfigureAwait(false);
         if (!options.Quiet) Console.Error.WriteLine($"[clearcote] serve: CDP endpoint ready at {srv.CdpUrl}");
         return srv;
     }

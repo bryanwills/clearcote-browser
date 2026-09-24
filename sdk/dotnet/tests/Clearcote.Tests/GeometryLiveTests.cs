@@ -19,7 +19,13 @@ public class GeometryLiveTests
     private static string? LiveExe => Environment.GetEnvironmentVariable("CLEARCOTE_LIVE_ENGINE");
 
     private record Measured(
-        int[] Screen, int[] Avail, int[] Inner, int[] Outer, int[] Pos, int Resizes);
+        int[] Screen, int[] Avail, int[] Inner, int[] Outer, int[] Pos, int Resizes, bool MediaAgrees = true);
+
+    private const string ReadJs =
+        "[[screen.width, screen.height], [screen.availWidth, screen.availHeight], " +
+        "[innerWidth, innerHeight], [outerWidth, outerHeight], [screenX, screenY], " +
+        "[window.__resizes | 0], " +
+        "[+matchMedia(`(device-width: ${screen.width}px) and (device-height: ${screen.height}px)`).matches]]";
 
     private static async Task<(Measured First, Measured SecondTab)> MeasureBothAsync(string? fingerprint)
     {
@@ -56,11 +62,8 @@ public class GeometryLiveTests
     {
         await page.GotoAsync("data:text/html,<body style='margin:0'>geo</body>").ConfigureAwait(false);
         await page.WaitForTimeoutAsync(700).ConfigureAwait(false);
-        var m = await page.EvaluateAsync<int[][]>(
-            "[[screen.width, screen.height], [screen.availWidth, screen.availHeight], " +
-            "[innerWidth, innerHeight], [outerWidth, outerHeight], [screenX, screenY], " +
-            "[window.__resizes]]").ConfigureAwait(false);
-        return new Measured(m[0], m[1], m[2], m[3], m[4], m[5][0]);
+        var m = await page.EvaluateAsync<int[][]>(ReadJs).ConfigureAwait(false);
+        return new Measured(m[0], m[1], m[2], m[3], m[4], m[5][0], m[6][0] == 1);
     }
 
     private static async Task<Measured> MeasureAsync(string? fingerprint)
@@ -86,11 +89,8 @@ public class GeometryLiveTests
                 var page = await context.NewPageAsync().ConfigureAwait(false);
                 await page.GotoAsync("data:text/html,<body style='margin:0'>geo</body>").ConfigureAwait(false);
                 await page.WaitForTimeoutAsync(700).ConfigureAwait(false);   // first paint
-                var m = await page.EvaluateAsync<int[][]>(
-                    "[[screen.width, screen.height], [screen.availWidth, screen.availHeight], " +
-                    "[innerWidth, innerHeight], [outerWidth, outerHeight], [screenX, screenY], " +
-                    "[window.__resizes]]").ConfigureAwait(false);
-                return new Measured(m[0], m[1], m[2], m[3], m[4], m[5][0]);
+                var m = await page.EvaluateAsync<int[][]>(ReadJs).ConfigureAwait(false);
+                return new Measured(m[0], m[1], m[2], m[3], m[4], m[5][0], m[6][0] == 1);
             }
             finally
             {
@@ -124,40 +124,66 @@ public class GeometryLiveTests
         Assert.Equal(0, m.Resizes);
     }
 
+    /// Maximized on its display, whatever frame this platform's engine draws (linux 8x131 vs windows
+    /// 16x134 is why nothing is sized against a constant any more).
+    private static void AssertMaximizedOnTheDisplay(Measured m, string label = "")
+    {
+        var at = $"{label} screen={Fmt(m.Screen)} avail={Fmt(m.Avail)} inner={Fmt(m.Inner)} outer={Fmt(m.Outer)}";
+        Assert.True(Geometry.GeometryIsCoherent(m.Screen, m.Avail, m.Inner, m.Outer), $"escapes its screen: {at}");
+        Assert.True(Fmt(m.Avail) == Fmt(m.Outer), $"not fitted to the work area: {at}");
+        Assert.True(m.Pos[0] == 0 && m.Pos[1] == 0, $"not at the origin: {at} pos={m.Pos[0]},{m.Pos[1]}");
+        var (dx, dy) = (m.Outer[0] - m.Inner[0], m.Outer[1] - m.Inner[1]);
+        Assert.True(dx is >= 0 and <= 16 && dy is >= 60 and <= 160, $"implausible frame ({dx}, {dy}): {at}");
+    }
+
     [Fact]
-    public async Task Regime2_SeedlessScreenOverride_AndFrameConstantStillHolds()
+    public async Task Regime2_SeedlessDisplayIsTheCrossSdkRow_AndTheWindowIsMaximized()
     {
         if (string.IsNullOrEmpty(LiveExe)) return;
         var m = await MeasureAsync(null);
-        var (screen, viewport) = Geometry.HeadlessGeometry(null);
+        var (screen, _) = Geometry.HeadlessGeometry(null);
+        var display = Geometry.HeadlessDisplay(null, Array.Empty<string>());
 
-        Assert.Equal($"{screen.Width}x{screen.Height}", $"{m.Screen[0]}x{m.Screen[1]}");
-        Assert.Equal($"{viewport.Width}x{viewport.Height}", $"{m.Inner[0]}x{m.Inner[1]}");
-        Assert.True(Geometry.GeometryIsCoherent(m.Screen, m.Avail, m.Inner, m.Outer),
-            "live geometry escapes its screen");
-        // the engine's frame must still match the constants the regime-2 viewport is sized against
-        Assert.Equal(Geometry.EngineFrameWidth, m.Outer[0] - m.Inner[0]);
-        Assert.Equal(Geometry.EngineFrameHeight, m.Outer[1] - m.Inner[1]);
-        // moved to the origin, so the window does not hang off the spoofed screen edge
-        Assert.Equal("0,0", $"{m.Pos[0]},{m.Pos[1]}");
+        Assert.Equal($"{screen.Width}x{screen.Height}", Fmt(m.Screen));
+        Assert.Equal($"{display.AvailWidth}x{display.AvailHeight}", Fmt(m.Avail));
+        // a real display, not an emulated screen: device-width media queries agree with screen.*
+        Assert.True(m.MediaAgrees, "device-width media query disagrees with screen.*");
+        AssertMaximizedOnTheDisplay(m);
         Assert.Equal(0, m.Resizes);
     }
 
     [Fact]
-    public async Task ScreenOverrideAlsoReachesPagesOpenedLater()
+    public async Task Regime2_ASecondTabSharesTheDisplayAndTheWindow()
     {
-        // The .NET screen override is per-TARGET (verified: a second tab does not inherit it), so a
-        // tab opened after launch is where a half-done implementation shows up.
         if (string.IsNullOrEmpty(LiveExe)) return;
         var (first, second) = await MeasureBothAsync(null);
-        var (screen, _) = Geometry.HeadlessGeometry(null);
-
         foreach (var (label, m) in new[] { ("first page", first), ("second tab", second) })
         {
-            Assert.Equal($"{screen.Width}x{screen.Height}", Fmt(m.Screen));
-            Assert.True(Geometry.GeometryIsCoherent(m.Screen, m.Avail, m.Inner, m.Outer),
-                $"{label}: geometry escapes its screen (screen={Fmt(m.Screen)} outer={Fmt(m.Outer)})");
+            AssertMaximizedOnTheDisplay(m, label);
             Assert.Equal(0, m.Resizes);
+        }
+        Assert.Equal(Fmt(first.Inner), Fmt(second.Inner));
+    }
+
+    [Fact]
+    public async Task LaunchAsync_SetsTheDisplay_SoTheDocumentedFitMaximizes()
+    {
+        // LaunchAsync hands back an IBrowser the SDK cannot hook, but the display is a command-line
+        // switch, so the workaround its docs give (NoViewport + the public fit) lands on a real screen.
+        if (string.IsNullOrEmpty(LiveExe)) return;
+        var browser = await Clearcote.LaunchAsync(new LaunchOptions
+        {
+            ExecutablePath = LiveExe, Args = new[] { "--no-sandbox" }, Quiet = true,
+        }).ConfigureAwait(false);
+        try
+        {
+            var page = await browser.NewPageAsync(new() { ViewportSize = ViewportSize.NoViewport }).ConfigureAwait(false);
+            await Geometry.FitWindowToWorkAreaAsync(page).ConfigureAwait(false);
+            AssertMaximizedOnTheDisplay(await ReadAsync(page).ConfigureAwait(false), "fitted page");
+        }
+        finally
+        {
+            await browser.CloseAsync().ConfigureAwait(false);
         }
     }
 

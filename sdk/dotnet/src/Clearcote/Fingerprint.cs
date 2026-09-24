@@ -165,11 +165,7 @@ public static class Fingerprint
     /// digest as a big integer mod N).
     public static FingerprintOptions LightStealthValues(string? seed)
     {
-        var key = string.IsNullOrEmpty(seed) ? "clearcote-light-stealth" : seed;
-        var digest = SHA256.HashData(Encoding.UTF8.GetBytes(key));
-        var big = new BigInteger(digest, isUnsigned: true, isBigEndian: true);
-        var idx = (int)(big % LightStealthProfiles.Length);
-        var row = LightStealthProfiles[idx];
+        var row = LightStealthRow(seed);
         return new FingerprintOptions
         {
             DevicePixelRatio = row.Dpr,
@@ -179,6 +175,24 @@ public static class Fingerprint
             MaxTouchPoints = 0,
             Brand = "chrome",
         };
+    }
+
+    private static (int Sw, int Sh, int Aw, int Ah, double Dpr, int Cd, int Mem, int Hw) LightStealthRow(string? seed)
+    {
+        var key = string.IsNullOrEmpty(seed) ? "clearcote-light-stealth" : seed;
+        var digest = SHA256.HashData(Encoding.UTF8.GetBytes(key));
+        var big = new BigInteger(digest, isUnsigned: true, isBigEndian: true);
+        return LightStealthProfiles[(int)(big % LightStealthProfiles.Length)];
+    }
+
+    /// The display of the same LightStealth row <see cref="LightStealthValues"/> draws its DPR from, so
+    /// a seed's screen and DevicePixelRatio stay a pair (1536x864 comes with 1.25: a 1080p laptop at
+    /// 125%). Never spoofed through the --fingerprint-screen-* switches: ServeAsync makes it the
+    /// headless display itself, which the page, media queries and the window all agree on.
+    internal static Geometry.Display LightStealthScreen(string? seed)
+    {
+        var row = LightStealthRow(seed);
+        return new Geometry.Display(row.Sw, row.Sh, row.Aw, row.Ah);
     }
 
     /// Normalize an Accept-Language for Chromium's --accept-lang: a plain comma-separated tag list with

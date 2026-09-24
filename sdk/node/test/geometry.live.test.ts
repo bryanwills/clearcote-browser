@@ -13,18 +13,37 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { launchPersistentContext } from "../src/index.js";
-import {
-  ENGINE_FRAME_HEIGHT,
-  ENGINE_FRAME_WIDTH,
-  geometryIsCoherent,
-  headlessGeometry,
-} from "../src/geometry.js";
+import type { Page } from "playwright-core";
+import { launch, launchPersistentContext } from "../src/index.js";
+import { geometryIsCoherent, headlessGeometry, servedDisplay } from "../src/geometry.js";
 
 const LIVE_EXE = process.env.CLEARCOTE_LIVE_ENGINE;
 
 const READ = "[[screen.width, screen.height], [screen.availWidth, screen.availHeight], " +
-  "[innerWidth, innerHeight], [outerWidth, outerHeight], [screenX, screenY], [window.__resizes]]";
+  "[innerWidth, innerHeight], [outerWidth, outerHeight], [screenX, screenY], [window.__resizes], " +
+  "[matchMedia(`(device-width: ${screen.width}px) and (device-height: ${screen.height}px)`).matches]]";
+
+async function read(page: Page) {
+  const m = (await page.evaluate(READ)) as number[][];
+  return { screen: m[0], avail: m[1], inner: m[2], outer: m[3], pos: m[4], resizes: m[5][0], mediaAgrees: m[6][0] };
+}
+
+/** The frame the engine draws stays in the range real captures show (it is per-platform). */
+function expectPlausibleFrame(m: { inner: number[]; outer: number[] }) {
+  const dx = m.outer[0] - m.inner[0];
+  const dy = m.outer[1] - m.inner[1];
+  expect(dx).toBeGreaterThanOrEqual(0);
+  expect(dx).toBeLessThanOrEqual(16);
+  expect(dy).toBeGreaterThanOrEqual(60);
+  expect(dy).toBeLessThanOrEqual(160);
+}
+
+/** A window that stays on its screen: coherent, and not hanging past the work area's edge. */
+function expectOnScreen(m: Awaited<ReturnType<typeof read>>) {
+  expect(geometryIsCoherent(m.screen, m.avail, m.inner, m.outer)).toBe(true);
+  expect(m.pos[0] + m.outer[0]).toBeLessThanOrEqual(m.avail[0]);
+  expect(m.pos[1] + m.outer[1]).toBeLessThanOrEqual(m.avail[1]);
+}
 
 async function measure(fingerprint?: string, tabs = 1) {
   const dir = mkdtempSync(join(tmpdir(), "cc-live-node-"));
@@ -42,8 +61,7 @@ async function measure(fingerprint?: string, tabs = 1) {
         const page = await ctx.newPage();
         await page.goto("data:text/html,<body style='margin:0'>geo</body>");
         await page.waitForTimeout(700);   // first paint: innerWidth reads 0 before it
-        const m = (await page.evaluate(READ)) as number[][];
-        out.push({ screen: m[0], avail: m[1], inner: m[2], outer: m[3], pos: m[4], resizes: m[5][0] });
+        out.push(await read(page));
       }
       return out;
     } finally {
@@ -64,30 +82,75 @@ describe.runIf(LIVE_EXE)("live engine geometry", () => {
     expect(m.avail[1]).toBeLessThan(m.screen[1]);
     // this is the assertion that catches a silently no-op fit (the arrow-function-string bug)
     expect(m.outer).toEqual(m.avail);
-    // the frame the engine synthesizes stays in the range real captures show
-    const dx = m.outer[0] - m.inner[0];
-    const dy = m.outer[1] - m.inner[1];
-    expect(dx).toBeGreaterThanOrEqual(0);
-    expect(dx).toBeLessThanOrEqual(16);
-    expect(dy).toBeGreaterThanOrEqual(60);
-    expect(dy).toBeLessThanOrEqual(160);
+    expectPlausibleFrame(m);
     // and it all happened on about:blank, before the page ran a line of script
     expect(m.resizes).toBe(0);
   }, 120_000);
 
-  it("regime 2: the seedless screen override applies and the engine frame is unchanged", async () => {
+  it("regime 2: the seedless display is the cross-SDK row and the window is maximized into it", async () => {
     const [m] = await measure();
-    const expected = headlessGeometry(undefined);
-    expect(m.screen).toEqual([expected.screen.width, expected.screen.height]);
-    expect(m.inner).toEqual([expected.viewport.width, expected.viewport.height]);
-    expect(geometryIsCoherent(m.screen, m.avail, m.inner, m.outer)).toBe(true);
-    // flush with the screen edge, and positioned so it does not hang off that edge
-    expect(m.outer).toEqual(m.screen);
+    // the same screen row the Python and .NET SDKs pick for no seed; a taskbar on a Windows host
+    const { screen } = headlessGeometry(undefined);
+    const display = servedDisplay({});
+    expect(m.screen).toEqual([screen.width, screen.height]);
+    expect(m.avail).toEqual([display.availWidth, display.availHeight]);
+    // a real display, not an emulated screen: device-width media queries agree with screen.*
+    expect(m.mediaAgrees).toBe(true);
+    expectOnScreen(m);
+    // maximized, whatever frame this platform's engine draws (linux 8x131 vs windows 16x134 is why
+    // nothing is sized against a hardcoded frame any more)
+    expect(m.outer).toEqual(m.avail);
     expect(m.pos).toEqual([0, 0]);
-    // the constants the regime-2 viewport is sized against must still hold
-    expect([m.outer[0] - m.inner[0], m.outer[1] - m.inner[1]])
-      .toEqual([ENGINE_FRAME_WIDTH, ENGINE_FRAME_HEIGHT]);
+    expectPlausibleFrame(m);
     expect(m.resizes).toBe(0);
+  }, 120_000);
+
+  it("regime 2 through launch(): every new context is its own maximized window on the display", async () => {
+    const browser = await launch({ executablePath: LIVE_EXE, args: ["--no-sandbox"], quiet: true });
+    try {
+      const out = [];
+      for (const open of [() => browser.newPage(), async () => (await browser.newContext()).newPage()]) {
+        const page = await open();
+        await page.goto("data:text/html,<body style='margin:0'>geo</body>");
+        await page.waitForTimeout(700);
+        out.push(await read(page));
+      }
+      for (const m of out) {
+        expectOnScreen(m);
+        expect(m.avail[1]).toBe(servedDisplay({}).availHeight);
+        expect(m.outer).toEqual(m.avail);
+        expect(m.pos).toEqual([0, 0]);   // not Chrome's 10px-per-window cascade
+        expectPlausibleFrame(m);
+      }
+    } finally {
+      await browser.close();
+    }
+  }, 120_000);
+
+  it("regime 2: popups, small and oversized, stay on the display", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cc-live-node-"));
+    try {
+      const ctx = await launchPersistentContext(dir, { executablePath: LIVE_EXE, args: ["--no-sandbox"], quiet: true });
+      try {
+        const page = await ctx.newPage();
+        await page.goto("data:text/html,<body style='margin:0'>geo</body>");
+        for (const [w, h] of [[500, 400], [4000, 3000]]) {
+          const [popup] = await Promise.all([
+            ctx.waitForEvent("page"),
+            page.evaluate(`window.open("about:blank", "_blank", "width=${w},height=${h}")`),
+          ]);
+          await popup.waitForTimeout(700);
+          const m = await read(popup);
+          expectOnScreen(m);
+          // window.open() features are honoured (no forced size), clamped to the work area
+          if (w < m.avail[0]) expect(m.inner[0]).toBe(w);
+        }
+      } finally {
+        await ctx.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }, 120_000);
 
   it("a second tab in the same window reports the same geometry", async () => {
