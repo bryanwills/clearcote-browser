@@ -33,6 +33,8 @@
 
 **🆕 The latest build is now free with GitHub for one browser at a time** — newest Chromium, recorded human motion and the private stealth patches. **[Get it free →](https://clearcotelabs.com/pricing#free)**
 
+**☁️ Or skip the install: hosted Clearcote browsers** — one API call, a residential IP included, €1 per GB and nothing else. **[Hosted browsers →](#hosted-browsers--nothing-to-install)**
+
 </div>
 
 <table>
@@ -74,7 +76,7 @@ One real Chromium keeps the JS identity, the **UA / UA-CH** headers, and the **T
 [What it is](#what-it-is) · [Quick start](#quick-start) · [Why patch the engine](#why-patch-the-engine-not-the-page) ·
 [vs. the others](#why-clearcote-instead-of-the-others) · [Persona options](#configure-the-persona--what-you-control) ·
 [AI agents](#drive-a-page-with-an-ai-agent) · [Verify](#proof--verify) · [Build](#build-from-source) ·
-[Free with GitHub & Pro](#free-with-github-and-pro) · [Reference](#reference)
+[Free with GitHub & Pro](#free-with-github-and-pro) · [Hosted browsers](#hosted-browsers--nothing-to-install) · [Reference](#reference)
 
 ---
 
@@ -348,6 +350,37 @@ Clearcote is free and open source, and the open build always will be — **fully
 **What it is not:** it does not unlock more spoofing. The whole identity surface — personas, canvas/WebGL/audio farbling, all 18 native metadata overrides, `light_stealth`, TLS profiles, humanized input — is in the open build, in full. The per-feature table lives in the SDK READMEs ([Node](sdk/node/README.md#whats-in-each-tier) / [Python](sdk/python/README.md#whats-in-each-tier)), mirroring `site/lib/tiers.ts`.
 
 **→ [Get it free with GitHub](https://clearcotelabs.com/pricing#free) · [Get Pro](https://clearcotelabs.com/pricing)**
+
+## Hosted browsers — nothing to install
+
+The same engine also runs on our servers. One API call starts a Clearcote browser and returns a CDP WebSocket URL; your existing Playwright or Puppeteer code connects to it exactly as it connects to a local browser.
+
+```javascript
+const { connectUrl } = await fetch("https://www.clearcotelabs.com/api/v1/browsers", {
+  method: "POST",
+  headers: { authorization: "Bearer cc_live_...", "content-type": "application/json" },
+  body: JSON.stringify({ identity: "account-1", country: "us" }),
+}).then((r) => r.json());
+
+const browser = await chromium.connectOverCDP(connectUrl);   // your Playwright code from here
+```
+
+- **A residential IP, included.** Every session leaves through a real home connection. Pick a `country`, `state` or `city`, or leave it to us.
+- **The Clearcote engine on every session.** Fingerprint control compiled in and on by default: one tier, nothing to upgrade to.
+- **Identities that stay put.** The same `identity` label comes back as the same device on the same exit IP in every later session; timezone and language follow the exit IP on their own.
+- **Dedicated physical servers,** not shared cloud virtual machines.
+- **€1 per GB of traffic, and nothing else.** No plan, no per-hour clock, no separate proxy bill. Prepaid from €5, and `maxGb` caps any session.
+- **A Playground in the dashboard** runs a script in a cloud browser with a live view, console and screenshots side by side, then hands you the same session as code.
+
+| | **Clearcote hosted** | Most hosted browsers |
+|---|---|---|
+| **The browser** | The Clearcote engine, the same build you can run yourself | Stock Chromium with stealth injected on top |
+| **Residential IPs** | Included in the one price | Metered separately, typically $5–12 per GB on top |
+| **Stealth** | On by default, one tier | Basic on entry plans, the full version an enterprise upsell |
+| **The bill** | Traffic only: no plan, no clock | Monthly plan + browser-hours + proxy GB |
+| **The machine** | Dedicated physical servers | Shared cloud virtual machines |
+
+Accounts that sign in with a GitHub account at least 30 days old get a one-time welcome credit to try it. **→ [Hosted browser docs](https://www.clearcotelabs.com/docs/hosted-browsers) · [Try the Playground](https://www.clearcotelabs.com/dashboard/playground)**
 
 ## Build availability
 
