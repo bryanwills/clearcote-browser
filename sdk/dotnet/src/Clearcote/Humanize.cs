@@ -493,18 +493,70 @@ public static class Humanize
         ArgumentNullException.ThrowIfNull(text);
         var p = PersonaFor(page);
         await AmbientPlaceAsync(page, p, StateFor(page)).ConfigureAwait(false);
-        for (int i = 0; i < text.Length; i++)
+        // One key per code point (a surrogate pair is one character, not two half keys).
+        var chars = text.EnumerateRunes().Select(r => r.ToString()).ToArray();
+        // Capitals and shifted symbols are typed the way a person types them: ShiftLeft goes down a
+        // moment before the key (35-120 ms) and comes up just after it (10-70 ms), held across a run of
+        // them. PressAsync("A") alone sent the key with shiftKey=false and no Shift key at all
+        // (measured on r28 with "Ab!") -- input no keyboard produces.
+        var shift = false;
+        try
         {
-            await page.Keyboard.PressAsync(text[i].ToString(),
-                new KeyboardPressOptions { Delay = (float)Motion.KeyDwell(p) }).ConfigureAwait(false);
-            if (i < text.Length - 1)
+            for (int i = 0; i < chars.Length; i++)
             {
-                // Gaussian inter-key cadence with a floor — a realistic distribution, not a uniform band.
-                double d = Math.Max(25, Gauss(85, 45));
-                if (char.IsWhiteSpace(text[i])) d += Rand(20, 100);
-                if (Rnd.NextDouble() < 0.06) d += Rand(180, 450);   // occasional thinking pause
-                await Task.Delay((int)d).ConfigureAwait(false);
+                var ch = chars[i];
+                if (NeedsShift(ch) && !shift)
+                {
+                    await page.Keyboard.DownAsync("Shift").ConfigureAwait(false);
+                    shift = true;
+                    await Task.Delay((int)Rand(35, 120)).ConfigureAwait(false);
+                }
+                await PressOrInsertAsync(page, ch, p).ConfigureAwait(false);
+                if (shift && (i == chars.Length - 1 || !NeedsShift(chars[i + 1])))
+                {
+                    await Task.Delay((int)Rand(10, 70)).ConfigureAwait(false);
+                    await page.Keyboard.UpAsync("Shift").ConfigureAwait(false);
+                    shift = false;
+                }
+                if (i < chars.Length - 1)
+                {
+                    // Gaussian inter-key cadence with a floor — a realistic distribution, not a uniform band.
+                    double d = Math.Max(25, Gauss(85, 45));
+                    if (ch.Length == 1 && char.IsWhiteSpace(ch[0])) d += Rand(20, 100);
+                    if (Rnd.NextDouble() < 0.06) d += Rand(180, 450);   // occasional thinking pause
+                    await Task.Delay((int)d).ConfigureAwait(false);
+                }
             }
+        }
+        finally
+        {
+            // never leave Shift held for the caller's next keystroke
+            if (shift)
+            {
+                try { await page.Keyboard.UpAsync("Shift").ConfigureAwait(false); }
+                catch (PlaywrightException) { /* best-effort */ }
+            }
+        }
+    }
+
+    // The characters a US-layout keyboard (Playwright's, and the engine's keyboard.getLayoutMap())
+    // types with Shift held: capitals and the shifted symbols.
+    internal static bool NeedsShift(string ch)
+        => ch.Length == 1 && ((ch[0] >= 'A' && ch[0] <= 'Z') || "~!@#$%^&*()_+{}|:\"<>?".IndexOf(ch[0]) >= 0);
+
+    // One key with the persona's hold. Playwright maps only its US layout; for anything else ("ö",
+    // emoji) PressAsync throws "Unknown key", and the text is inserted instead -- the same fallback
+    // the Python and Node SDKs use.
+    private static async Task PressOrInsertAsync(IPage page, string ch, Persona p)
+    {
+        try
+        {
+            await page.Keyboard.PressAsync(ch,
+                new KeyboardPressOptions { Delay = (float)Motion.KeyDwell(p) }).ConfigureAwait(false);
+        }
+        catch (PlaywrightException)
+        {
+            await page.Keyboard.TypeAsync(ch).ConfigureAwait(false);
         }
     }
 

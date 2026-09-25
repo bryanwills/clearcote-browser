@@ -221,3 +221,50 @@ async def test_async_launch_unpacks_prepare_sixtuple_and_threads_seed(monkeypatc
     context = await async_api.launch_persistent_context(tempfile.mkdtemp())
     assert context is not None
     assert captured["ctx_seed"] == "eff-seed-123"
+
+
+class _ShiftKeyboard(_FakeKeyboard):
+    """Records press/down/up in order, like the real keyboard sees them."""
+
+    def __init__(self):
+        super().__init__()
+        self.events = []
+
+    async def press(self, combo, **k):
+        await super().press(combo, **k)
+        self.events.append(("press", combo))
+
+    async def down(self, key):
+        self.events.append(("down", key))
+
+    async def up(self, key):
+        self.events.append(("up", key))
+
+
+async def test_humanize_types_capitals_and_symbols_behind_a_real_shift():
+    # r28 sent "A" and "!" with shiftKey=false and no Shift keydown at all.
+    page = _FakePage()
+    page.keyboard = _ShiftKeyboard()
+    await attach_humanize(None, page, humanize=True)
+    await page.keyboard.type("Ab!?c")
+    assert page.keyboard.events == [
+        ("down", "Shift"), ("press", "A"), ("up", "Shift"),
+        ("press", "b"),
+        ("down", "Shift"), ("press", "!"), ("press", "?"), ("up", "Shift"),  # held across the run
+        ("press", "c"),
+    ]
+
+
+async def test_humanize_releases_shift_when_typing_ends_on_a_capital():
+    page = _FakePage()
+    page.keyboard = _ShiftKeyboard()
+    await attach_humanize(None, page, humanize=True)
+    await page.keyboard.type("aB")
+    assert page.keyboard.events[-2:] == [("press", "B"), ("up", "Shift")]
+
+
+async def test_humanize_types_without_shift_when_keyboard_has_no_down_up():
+    page = _FakePage()  # _FakeKeyboard has press/type only
+    await attach_humanize(None, page, humanize=True)
+    await page.keyboard.type("Ab")
+    assert [p for p in page.keyboard.presses if p in ("A", "b")] == ["A", "b"]

@@ -8,7 +8,7 @@ call is awaited and pacing uses asyncio.sleep. See _humanize.py for the rational
 import asyncio
 import random
 
-from ._humanize import CURSOR_OVERLAY, _rand
+from ._humanize import CURSOR_OVERLAY, _needs_shift, _rand, _shift_lag_s, _shift_lead_s
 from ._motion import make_persona, plan_move, drag_dwell, click_hold, key_dwell, click_point, plan_ambient
 
 
@@ -317,6 +317,9 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
     # ---- keystroke dynamics (async; mirrors _humanize.py) ----
     kb = page.keyboard
     native_kb_type, native_kb_press = kb.type, kb.press
+    # getattr: a page-like keyboard without down/up still gets every other humanization; it just
+    # types capitals without the Shift key, as before.
+    native_kb_down, native_kb_up = getattr(kb, "down", None), getattr(kb, "up", None)
     native_fill, native_type = page.fill, page.type
     # getattr for the same reason as mouse.down/up above: a page-like object that does not
     # implement select_option must still get every OTHER humanization, not lose all of it to
@@ -353,20 +356,37 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
                 pass
 
     async def _type_humanized(text):
+        # Capitals and shifted symbols behind a real ShiftLeft (see _humanize._human_type_text).
         text = str(text)
         n = len(text)
-        for i, ch in enumerate(text):
-            try:
-                await _emit_key(ch)
-            except Exception:  # noqa: BLE001
-                break
-            if i < n - 1:
-                d = max(0.025, random.gauss(0.085, 0.045))
-                if ch in " \t\n":
-                    d += _rand(0.02, 0.10)
-                if random.random() < 0.05:
-                    d += _rand(0.18, 0.5)
-                await asyncio.sleep(d)
+        shift = False
+        try:
+            for i, ch in enumerate(text):
+                if _needs_shift(ch) and not shift and native_kb_down and native_kb_up:
+                    await native_kb_down("Shift")
+                    shift = True
+                    await asyncio.sleep(_shift_lead_s())
+                try:
+                    await _emit_key(ch)
+                except Exception:  # noqa: BLE001
+                    break
+                if shift and (i == n - 1 or not _needs_shift(text[i + 1])):
+                    await asyncio.sleep(_shift_lag_s())
+                    await native_kb_up("Shift")
+                    shift = False
+                if i < n - 1:
+                    d = max(0.025, random.gauss(0.085, 0.045))
+                    if ch in " \t\n":
+                        d += _rand(0.02, 0.10)
+                    if random.random() < 0.05:
+                        d += _rand(0.18, 0.5)
+                    await asyncio.sleep(d)
+        finally:
+            if shift:  # never leave Shift held for the caller's next keystroke
+                try:
+                    await native_kb_up("Shift")
+                except Exception:  # noqa: BLE001
+                    pass
 
     async def _focus(selector, timeout):
         loc = page.locator(selector).first

@@ -65,6 +65,25 @@ def _rand(a, b):
     return a + random.random() * (b - a)
 
 
+# The characters a US-layout keyboard (Playwright's, and the engine's keyboard.getLayoutMap())
+# types with Shift held: capitals and the shifted symbols.
+_SHIFTED_SYMBOLS = frozenset('~!@#$%^&*()_+{}|:"<>?')
+
+
+def _needs_shift(ch):
+    return "A" <= ch <= "Z" or ch in _SHIFTED_SYMBOLS
+
+
+def _shift_lead_s():
+    """ShiftLeft keydown -> the shifted key's keydown (a person presses Shift first)."""
+    return _rand(35, 120) / 1000.0
+
+
+def _shift_lag_s():
+    """The shifted key's keyup -> ShiftLeft keyup (Shift comes up just after the letter)."""
+    return _rand(10, 70) / 1000.0
+
+
 def _nearby_key(ch):
     lo = ch.lower()
     if lo in _NEARBY:
@@ -379,6 +398,9 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
     # ----------------------------------------------------------------- keyboard
     kb = page.keyboard
     native_kb_type, native_kb_press = kb.type, kb.press
+    # getattr: a page-like keyboard without down/up still gets every other humanization; it just
+    # types capitals without the Shift key, as before.
+    native_kb_down, native_kb_up = getattr(kb, "down", None), getattr(kb, "up", None)
 
     def _pointer_presence():
         """Give a keyboard-only session a mouse, once, before its first keystroke.
@@ -413,30 +435,52 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
 
     def _human_type_text(text):
         """Type text key-by-key with human timing. Each char goes through Playwright's native
-        keyboard (trusted; shift/symbols handled by the engine), so this stays isTrusted=True."""
+        keyboard (trusted), so this stays isTrusted=True.
+
+        Capitals and shifted symbols are typed the way a person types them: ShiftLeft goes down a
+        moment before the key and comes up just after it, held across a run of them. Playwright's
+        press("A") alone sent the key with shiftKey=false and no Shift key at all (measured on r28
+        with "Ab!") -- input no keyboard produces."""
         n = len(text)
-        for i, ch in enumerate(text):
-            # occasional fat-finger on alnum chars, then notice + correct
-            if ch.isascii() and ch.isalnum() and random.random() < 0.02:
+        shift = False
+        try:
+            for i, ch in enumerate(text):
+                need = _needs_shift(ch)
+                if need and not shift and native_kb_down and native_kb_up:
+                    native_kb_down("Shift")
+                    shift = True
+                    time.sleep(_shift_lead_s())
+                # occasional fat-finger on unshifted alnum chars, then notice + correct
+                if not need and ch.isascii() and ch.isalnum() and random.random() < 0.02:
+                    try:
+                        _emit_key(_nearby_key(ch))
+                        time.sleep(_rand(120, 300) / 1000.0)
+                        native_kb_press("Backspace", delay=key_dwell(persona))
+                        time.sleep(_rand(80, 200) / 1000.0)
+                    except Exception:  # noqa: BLE001
+                        pass
                 try:
-                    _emit_key(_nearby_key(ch))
-                    time.sleep(_rand(120, 300) / 1000.0)
-                    native_kb_press("Backspace", delay=key_dwell(persona))
-                    time.sleep(_rand(80, 200) / 1000.0)
+                    _emit_key(ch)
+                except Exception:  # noqa: BLE001
+                    break
+                if shift and (i == n - 1 or not _needs_shift(text[i + 1])):
+                    time.sleep(_shift_lag_s())
+                    native_kb_up("Shift")
+                    shift = False
+                if i < n - 1:
+                    # gaussian inter-key cadence (a realistic distribution, not a uniform band)
+                    d = max(0.025, random.gauss(0.085, 0.045))   # ~85ms +- 45ms, floored at 25ms
+                    if ch in " \t\n":
+                        d += _rand(0.02, 0.10)                    # slight pause at word boundaries
+                    if random.random() < 0.06:
+                        d += _rand(0.18, 0.45)                    # occasional thinking pause
+                    time.sleep(d)
+        finally:
+            if shift:  # never leave Shift held for the caller's next keystroke
+                try:
+                    native_kb_up("Shift")
                 except Exception:  # noqa: BLE001
                     pass
-            try:
-                _emit_key(ch)
-            except Exception:  # noqa: BLE001
-                break
-            if i < n - 1:
-                # gaussian inter-key cadence (a realistic distribution, not a uniform band)
-                d = max(0.025, random.gauss(0.085, 0.045))   # ~85ms +- 45ms, floored at 25ms
-                if ch in " \t\n":
-                    d += _rand(0.02, 0.10)                    # slight pause at word boundaries
-                if random.random() < 0.06:
-                    d += _rand(0.18, 0.45)                    # occasional thinking pause
-                time.sleep(d)
 
     def hkb_type(text, **kw):
         _pointer_presence()

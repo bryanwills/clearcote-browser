@@ -53,6 +53,12 @@ export const CURSOR_OVERLAY = `(() => {
 })();`;
 
 const rand = (a: number, b: number) => a + Math.random() * (b - a);
+
+// The characters a US-layout keyboard (Playwright's, and the engine's keyboard.getLayoutMap())
+// types with Shift held: capitals and the shifted symbols.
+const SHIFTED_SYMBOLS = new Set('~!@#$%^&*()_+{}|:"<>?');
+/** @internal exported for tests */
+export const needsShift = (ch: string): boolean => (ch >= "A" && ch <= "Z" && ch.length === 1) || SHIFTED_SYMBOLS.has(ch);
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 // Same unseeded live source as rand() — the seeded persona rng stays inside motion.ts, this is only
 // for placing a point in a plausible spread instead of on an exact landmark.
@@ -345,6 +351,10 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
   const keyboard: any = page.keyboard;
   const nativeKbType = keyboard.type.bind(keyboard);
   const nativeKbPress = keyboard.press.bind(keyboard);
+  // A page-like keyboard without down/up still gets every other humanization; it just types
+  // capitals without the Shift key, as before.
+  const nativeKbDown = typeof keyboard.down === "function" ? keyboard.down.bind(keyboard) : undefined;
+  const nativeKbUp = typeof keyboard.up === "function" ? keyboard.up.bind(keyboard) : undefined;
 
   // Emit one character with a human keydown→keyup DWELL. keyboard.press's `delay` IS the hold
   // (keyboard.type's delay is only inter-key flight), so per-char press gives the missing dwell.
@@ -354,26 +364,50 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
     catch { try { await nativeKbType(ch); } catch { /* best-effort */ } }
   };
 
-  // Type text key-by-key with human timing. Each char goes through the native keyboard (trusted;
-  // shift/symbols handled by the engine), so this stays isTrusted===true.
+  // Type text key-by-key with human timing. Each char goes through the native keyboard (trusted),
+  // so this stays isTrusted===true.
+  //
+  // Capitals and shifted symbols are typed the way a person types them: ShiftLeft goes down a moment
+  // before the key (35-120 ms) and comes up just after it (10-70 ms), held across a run of them.
+  // Playwright's press("A") alone sent the key with shiftKey=false and no Shift key at all (measured
+  // on r28 with "Ab!") -- input no keyboard produces.
   const humanTypeText = async (text: string): Promise<void> => {
-    const n = text.length;
-    for (let i = 0; i < n; i++) {
-      const ch = text[i];
-      if (/[a-zA-Z0-9]/.test(ch) && Math.random() < 0.02) {
-        try {
-          await emitKey(nearbyKey(ch));
-          await sleep(rand(120, 300));
-          await nativeKbPress("Backspace", { delay: keyDwell(persona) });
-          await sleep(rand(80, 200));
-        } catch { /* typo path best-effort */ }
+    const chars = Array.from(text);
+    const n = chars.length;
+    let shift = false;
+    try {
+      for (let i = 0; i < n; i++) {
+        const ch = chars[i];
+        const need = needsShift(ch);
+        if (need && !shift && nativeKbDown && nativeKbUp) {
+          await nativeKbDown("Shift");
+          shift = true;
+          await sleep(rand(35, 120));
+        }
+        // occasional fat-finger on unshifted alnum chars, then notice + correct
+        if (!need && /[a-z0-9]/.test(ch) && Math.random() < 0.02) {
+          try {
+            await emitKey(nearbyKey(ch));
+            await sleep(rand(120, 300));
+            await nativeKbPress("Backspace", { delay: keyDwell(persona) });
+            await sleep(rand(80, 200));
+          } catch { /* typo path best-effort */ }
+        }
+        try { await emitKey(ch); } catch { break; }
+        if (shift && (i === n - 1 || !needsShift(chars[i + 1]))) {
+          await sleep(rand(10, 70));
+          await nativeKbUp!("Shift");
+          shift = false;
+        }
+        if (i < n - 1) {
+          if (Math.random() < 0.06) await sleep(rand(180, 450)); // brief thinking pause
+          else await sleep(rand(45, 150));
+          if (/\s/.test(ch)) await sleep(rand(20, 100)); // slight extra pause at word boundaries
+        }
       }
-      try { await emitKey(ch); } catch { break; }
-      if (i < n - 1) {
-        if (Math.random() < 0.06) await sleep(rand(180, 450)); // brief thinking pause
-        else await sleep(rand(45, 150));
-        if (/\s/.test(ch)) await sleep(rand(20, 100)); // slight extra pause at word boundaries
-      }
+    } finally {
+      // never leave Shift held for the caller's next keystroke
+      if (shift) { try { await nativeKbUp!("Shift"); } catch { /* best-effort */ } }
     }
   };
 
