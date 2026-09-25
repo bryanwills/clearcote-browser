@@ -301,4 +301,30 @@ public class ParityNetworkTests : IDisposable
         await License.AcquireLeaseAsync(new LicenseOptions { LicenseKey = key, LicenseApiBase = b, LicenseThroughProxy = true }, quiet: true, proxy: pxUser);
         Assert.Equal(3, api.Log.Count);
     }
+
+    // A rotating proxy changes the exit per connection (mirrors the Python and Node egress-drift tests).
+    [Fact]
+    public async Task Egress_drift_detects_a_rotating_exit_through_the_proxy()
+    {
+        var ip = "203.0.113.7";
+        await using var origin = new TestOrigin(_ => (200, ip));
+        await using var proxy = new TestHttpProxy();
+        GeoIp.IpEchoUrls = new[] { $"http://localhost:{origin.Port}/echo" };
+        var spec = new ProxyOptions { Server = $"http://127.0.0.1:{proxy.Port}" };
+
+        Assert.Null(await GeoIp.CheckEgressDriftAsync(spec, "203.0.113.7"));   // sticky: same exit
+        ip = "203.0.113.99";
+        Assert.Equal("203.0.113.99", await GeoIp.CheckEgressDriftAsync(spec, "203.0.113.7"));
+        Assert.Null(await GeoIp.CheckEgressDriftAsync(spec, "2001:db8::1"));   // other family
+        Assert.Null(await GeoIp.CheckEgressDriftAsync(null, "203.0.113.7"));   // no proxy
+        Assert.Equal(3, proxy.Log.Count);
+    }
+
+    [Fact]
+    public void Egress_drift_message_names_both_exits_and_the_fix()
+    {
+        var m = GeoIp.EgressDriftMessage("203.0.113.7", "203.0.113.99");
+        Assert.Contains("203.0.113.7 -> 203.0.113.99", m);
+        Assert.Contains("sticky session", m);
+    }
 }

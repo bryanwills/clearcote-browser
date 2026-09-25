@@ -25,7 +25,7 @@ import type {
 } from "playwright-core";
 import { checkInstall, ensureBinary, ensureVersion, proEnsureBinary, resolvedEngineVersion, resolveReleaseChannel, warmFiles, type DownloadOptions } from "./download.js";
 import { fingerprintArgs, isFingerprintPassthrough, splitFingerprintOptions, type FingerprintOptions } from "./fingerprint.js";
-import { resolveGeoDetailed, GeoipError, type Geo } from "./geoip.js";
+import { resolveGeoDetailed, startEgressDriftCheck, GeoipError, type Geo } from "./geoip.js";
 import { installHumanize, installHumanizeOnContext, type HumanizeOptions } from "./humanize.js";
 import { agentArgs, splitAgentOptions, type AgentOptions } from "./agent.js";
 import { resolveProfileOptions, Profile } from "./profile.js";
@@ -254,13 +254,13 @@ export interface PersistentContextOptions
  * mismatch geoip exists to prevent. A caller who set BOTH `timezone` and `acceptLanguage`
  * explicitly still launches (with a warning), since nothing geoip would fill is missing.
  */
-export async function applyGeoip(fp: FingerprintOptions, proxy: unknown, quiet?: boolean): Promise<void> {
+export async function applyGeoip(fp: FingerprintOptions, proxy: unknown, quiet?: boolean): Promise<Geo | undefined> {
   const result = await resolveGeoDetailed(proxy as { server?: string; username?: string; password?: string } | undefined, { quiet });
   const geo: Geo | null = result.geo;
   if (!geo || !geo.timezone) {
     if (fp.timezone && fp.acceptLanguage) {
       if (!quiet) console.warn(`clearcote: geoip could not resolve the region (${result.reason}); using the explicit timezone and acceptLanguage.`);
-      return;
+      return undefined;
     }
     throw new GeoipError(
       `geoip: could not resolve the ${proxy ? "proxy's" : "connection's"} region (${result.reason}). ` +
@@ -274,6 +274,7 @@ export async function applyGeoip(fp: FingerprintOptions, proxy: unknown, quiet?:
   // make WebRTC report the proxy egress IP too, coherent with HTTP egress (engine fabricates
   // the srflx candidate at this IP; no real STUN leaves the host).
   if (geo.ip && fp.webrtcIp == null) fp.webrtcIp = geo.ip;
+  return geo;
 }
 
 function ensureRunnableHere(exe: string): void {
@@ -734,7 +735,9 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
-  if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy, quiet);
+  const geo = geoip ? await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy, quiet) : undefined;
+  // A rotating proxy changes the exit per connection; checked alongside the launch, awaited at the end.
+  const egressDrift = startEgressDriftCheck((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, geo?.ip ?? undefined, quiet);
   // The binary is resolved before the proxy route is chosen: http(s) credentials go to the
   // engine's --proxy-auth only when THIS engine implements it (r19+); older engines keep
   // Playwright's handling, which authenticates (routing blindly would leave every request at 407).
@@ -791,6 +794,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   if (headed) installHeadedViewport(browser); // launch() takes no viewport option -> wrap newPage/newContext
   else if (geom) installHeadlessGeometry(browser, engineArgs);
   installHumanize(browser, { humanize, showCursor, seed: fingerprint.fingerprint }); // seed => stable motor persona
+  await egressDrift;
   return browser;
 }
 
@@ -807,7 +811,9 @@ export async function launchPersistentContext(
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
-  if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy, quiet);
+  const geo = geoip ? await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy, quiet) : undefined;
+  // A rotating proxy changes the exit per connection; checked alongside the launch, awaited at the end.
+  const egressDrift = startEgressDriftCheck((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, geo?.ip ?? undefined, quiet);
   const exe = await executablePath({ executablePath: exeOption, version, autoUpdate, cacheDir, quiet, releaseChannel, pro: proSelector(licenseKey, licenseApiBase) });  // capability-gated proxy route
   ensureRunnableHere(exe);
   await applyProfileAuto(profile, fingerprint, exe, { quiet, licenseKey, licenseApiBase, profileSelect });
@@ -875,6 +881,7 @@ export async function launchPersistentContext(
   if (lease) context.on("close", () => { void lease.stop(); launchToken?.release(); });
   if (geom) await installWindowFixup(context, engineArgs);
   installHumanizeOnContext(context, { humanize, showCursor, seed: fingerprint.fingerprint }); // seed => stable motor persona
+  await egressDrift;
   return context;
 }
 
@@ -1044,7 +1051,9 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined;
-  if (geoip) await applyGeoip(fingerprint, proxyOpt, quiet);
+  const geo = geoip ? await applyGeoip(fingerprint, proxyOpt, quiet) : undefined;
+  // A rotating proxy changes the exit per connection; checked alongside the launch, awaited at the end.
+  const egressDrift = startEgressDriftCheck(proxyOpt, geo?.ip ?? undefined, quiet);
   const exe = await executablePath({ executablePath: exeOption, version, autoUpdate, cacheDir, quiet, releaseChannel, pro: proSelector(licenseKey, licenseApiBase) });  // capability-gated proxy route
   ensureRunnableHere(exe);
   await applyProfileAuto(profile, fingerprint, exe, { quiet, licenseKey, licenseApiBase, profileSelect });
@@ -1140,6 +1149,7 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
       `[clearcote] CDP endpoint ready: ${srv.cdpUrl}\n` +
       `            attach any client: connectOverCDP(${JSON.stringify(srv.cdpUrl)}) / puppeteer.connect({ browserURL })\n`);
   }
+  await egressDrift;
   return srv;
 }
 

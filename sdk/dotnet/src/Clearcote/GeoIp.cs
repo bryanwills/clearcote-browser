@@ -132,6 +132,40 @@ public static class GeoIp
     public static async Task<GeoInfo?> ResolveAsync(ProxyOptions? proxy = null, bool quiet = false, int? timeoutMs = null)
         => (await ResolveDetailedAsync(proxy, quiet, timeoutMs).ConfigureAwait(false)).Geo;
 
+    /// Look the proxy's exit IP up once more. Returns the new IP when it differs from <paramref name="firstIp"/>
+    /// (same address family: an IPv4 answer after an IPv6 one is a different echo, not a rotation), else
+    /// null. Never throws.
+    public static async Task<string?> CheckEgressDriftAsync(ProxyOptions? proxy, string? firstIp, int timeoutMs = 8000)
+    {
+        if (string.IsNullOrEmpty(proxy?.Server) || string.IsNullOrEmpty(firstIp)) return null;
+        try
+        {
+            using var client = ProxiedHttp.Create(ProxySpec.From(proxy));
+            var ip = await ExitIpAsync(client, Stopwatch.StartNew(), timeoutMs).ConfigureAwait(false);
+            if (ip is not null && ip != firstIp && ip.Contains(':') == firstIp.Contains(':')) return ip;
+        }
+        catch (Exception) { /* never fails the launch */ }
+        return null;
+    }
+
+    internal static string EgressDriftMessage(string firstIp, string newIp)
+        => $"the proxy's exit IP changed between two lookups at launch ({firstIp} -> {newIp}): it rotates, so the " +
+           $"timezone, language and WebRTC IP taken from {firstIp} will not match the exit sites see. Use a " +
+           "sticky session (most providers take a session id in the proxy username).";
+
+    // geoip resolves the exit once; a proxy that hands out a new exit per connection makes that answer
+    // stale at once. Checked in the background (it never blocks or fails the launch), one warning.
+    private static void WarnOnEgressDrift(ProxyOptions? proxy, string? firstIp, bool quiet)
+    {
+        if (quiet || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CLEARCOTE_NO_WARN")) ||
+            string.IsNullOrEmpty(proxy?.Server) || string.IsNullOrEmpty(firstIp)) return;
+        _ = Task.Run(async () =>
+        {
+            var newIp = await CheckEgressDriftAsync(proxy, firstIp).ConfigureAwait(false);
+            if (newIp is not null) Console.Error.WriteLine($"clearcote: warning: {EgressDriftMessage(firstIp!, newIp)}");
+        });
+    }
+
     /// Fill unset Timezone/AcceptLanguage/Location/WebrtcIp on <paramref name="fp"/> from the exit-IP geo.
     ///
     /// FAILS CLOSED: throws <see cref="GeoipException"/> when the region cannot be resolved, unless the
@@ -157,6 +191,7 @@ public static class GeoIp
         if (string.IsNullOrEmpty(fp.AcceptLanguage) && !string.IsNullOrEmpty(geo.AcceptLanguage)) fp.AcceptLanguage = geo.AcceptLanguage;
         if (string.IsNullOrEmpty(fp.Location) && !string.IsNullOrEmpty(geo.Location)) fp.Location = geo.Location;
         if (string.IsNullOrEmpty(fp.WebrtcIp) && !string.IsNullOrEmpty(geo.Ip)) fp.WebrtcIp = geo.Ip;
+        WarnOnEgressDrift(proxy, geo.Ip, quiet);
     }
 
     // country (ISO-3166 alpha-2) -> the OS locale a machine there most plausibly runs. ONE tag, not a

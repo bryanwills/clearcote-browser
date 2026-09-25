@@ -288,6 +288,50 @@ def resolve_geo_detailed(proxy=None, quiet=False, timeout=None):
     return geo, reason, elapsed()
 
 
+def _same_family(a, b):
+    return (":" in a) == (":" in b)
+
+
+def check_egress_drift(proxy, first_ip, timeout=8.0):
+    """Look the proxy's exit IP up once more. Returns the new IP when it differs from ``first_ip``
+    (same address family: an IPv4 answer after an IPv6 one is a different echo, not a rotation),
+    else None. Never raises."""
+    if not proxy or not first_ip:
+        return None
+    try:
+        spec = to_proxy_spec(proxy)
+        ip = _exit_ip(spec, time.monotonic() + timeout, True)
+    except Exception:  # noqa: BLE001
+        return None
+    if ip and ip != first_ip and _same_family(ip, first_ip):
+        return ip
+    return None
+
+
+def egress_drift_message(first_ip, new_ip):
+    return ("the proxy's exit IP changed between two lookups at launch (%s -> %s): it rotates, so the "
+        "timezone, language and WebRTC IP taken from %s will not match the exit sites see. Use a "
+        "sticky session (most providers take a session id in the proxy username)." % (first_ip, new_ip, first_ip))
+
+
+def warn_on_egress_drift(proxy, first_ip, quiet=False):
+    """Check for a rotating exit in a daemon thread and print one warning if it moved. geoip resolves
+    the exit once; a proxy that hands out a new exit per connection makes that answer stale at once.
+    Never blocks or fails the launch. Returns the thread (or None when nothing is checked)."""
+    if quiet or os.environ.get("CLEARCOTE_NO_WARN") or not proxy or not first_ip:
+        return None
+
+    def run():
+        new_ip = check_egress_drift(proxy, first_ip)
+        if new_ip:
+            print("clearcote: warning: " + egress_drift_message(first_ip, new_ip),
+                  file=sys.stderr, flush=True)
+
+    thread = threading.Thread(target=run, name="clearcote-egress-drift", daemon=True)
+    thread.start()
+    return thread
+
+
 def resolve_geo(proxy=None, quiet=False, timeout=None):
     """Resolve geo for the egress (through ``proxy`` if given, else direct). Never raises — returns
     None on failure. geoip-all-in-one offline DB first, ip-api.com fallback. Returns a dict

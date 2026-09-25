@@ -82,7 +82,7 @@ from ._net import proxied_request, to_proxy_spec
 from .download import (
     ensure_binary, list_cached_builds, resolve_release_channel, resolved_engine_version, warm_files,
 )
-from .geoip import GeoipError, geoip_timeout_seconds, resolve_geo, resolve_geo_detailed
+from .geoip import GeoipError, geoip_timeout_seconds, resolve_geo, resolve_geo_detailed, warn_on_egress_drift
 from .release import RELEASE
 from ._serve import Server, serve
 
@@ -353,6 +353,8 @@ def apply_geoip(fp, proxy, quiet=False):
     # srflx candidate at this IP; no real STUN leaves the host).
     if geo.get("ip") and fp.get("webrtc_ip") is None:
         fp["webrtc_ip"] = geo["ip"]
+    # A rotating proxy changes the exit per connection, making all of the above stale at once.
+    warn_on_egress_drift(proxy, geo.get("ip"), quiet=quiet)
 
 
 def _prepare(kwargs):

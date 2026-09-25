@@ -346,3 +346,37 @@ def test_license_key_storage(home):
     assert _license.remove_license_key() is False
     with pytest.raises(_license.LicenseError):
         _license.save_license_key("   ")
+
+
+def _drift_setup(servers, monkeypatch, state):
+    from clearcote import geoip
+    origin = servers(start_origin(lambda m, path, h, b: (200, state["ip"])))
+    proxy = servers(start_http_proxy())
+    monkeypatch.setattr(geoip, "IPECHO_URLS", (f"http://localhost:{origin.port}/echo",))
+    return geoip, {"server": f"http://127.0.0.1:{proxy.port}"}, proxy
+
+
+def test_egress_drift_detects_a_rotating_exit(servers, monkeypatch):
+    state = {"ip": "203.0.113.7"}
+    geoip, spec, proxy = _drift_setup(servers, monkeypatch, state)
+    assert geoip.check_egress_drift(spec, "203.0.113.7") is None       # sticky: same exit
+    state["ip"] = "203.0.113.99"
+    assert geoip.check_egress_drift(spec, "203.0.113.7") == "203.0.113.99"
+    assert geoip.check_egress_drift(spec, "2001:db8::1") is None       # other family: not a rotation
+    assert geoip.check_egress_drift(None, "203.0.113.7") is None       # no proxy: nothing to check
+    assert len(proxy.log) == 3                                          # every lookup went via the proxy
+
+
+def test_egress_drift_warning_prints_once_and_respects_quiet(servers, monkeypatch, capsys):
+    state = {"ip": "203.0.113.99"}
+    geoip, spec, _proxy = _drift_setup(servers, monkeypatch, state)
+    monkeypatch.delenv("CLEARCOTE_NO_WARN", raising=False)
+    assert geoip.warn_on_egress_drift(spec, "203.0.113.7", quiet=True) is None
+    t = geoip.warn_on_egress_drift(spec, "203.0.113.7")
+    t.join(10)
+    err = capsys.readouterr().err
+    assert err.count("clearcote: warning:") == 1
+    assert "203.0.113.7 -> 203.0.113.99" in err and "sticky session" in err
+    state["ip"] = "203.0.113.7"
+    geoip.warn_on_egress_drift(spec, "203.0.113.7").join(10)
+    assert capsys.readouterr().err == ""

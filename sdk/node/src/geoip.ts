@@ -23,7 +23,8 @@ import { PROXIED_REQUEST_SCHEMES, proxiedRequest, toProxySpec, type ProxySpec } 
 
 const MMDB_URL = "https://github.com/daijro/geoip-all-in-one/releases/latest/download/geoip-aio-all.mmdb.zip";
 const MMDB_MAX_AGE_DAYS = 30;
-const IPECHO_URLS = ["http://api.ipify.org", "http://ip-api.com/line/?fields=query"];
+/** @internal mutable so tests can point the exit-IP echo at a local server */
+export const IPECHO_URLS: string[] = ["http://api.ipify.org", "http://ip-api.com/line/?fields=query"];
 const IPAPI_URL = "http://ip-api.com/json/?fields=status,message,countryCode,timezone,lat,lon,query";
 
 export interface Geo {
@@ -203,6 +204,46 @@ export interface GeoResult {
  * Resolve geo for the egress (through `proxy` if given — HTTP or SOCKS5 — else direct), reporting
  * why it failed. Never throws. Bounded by `timeoutMs` (default {@link geoipTimeoutMs}).
  */
+/**
+ * Look the proxy's exit IP up once more. Resolves to the new IP when it differs from `firstIp` (same
+ * address family: an IPv4 answer after an IPv6 one is a different echo, not a rotation), else null.
+ * Never rejects.
+ */
+export async function checkEgressDrift(
+  proxy: string | { server?: string; username?: string; password?: string } | undefined,
+  firstIp: string | undefined,
+  timeoutMs = 8000
+): Promise<string | null> {
+  if (!proxy || !firstIp) return null;
+  try {
+    const ip = await exitIp(toProxySpec(proxy ?? null), Date.now() + timeoutMs, true);
+    if (ip && ip !== firstIp && ip.includes(":") === firstIp.includes(":")) return ip;
+  } catch { /* never fails the launch */ }
+  return null;
+}
+
+export function egressDriftMessage(firstIp: string, newIp: string): string {
+  return `the proxy's exit IP changed between two lookups at launch (${firstIp} -> ${newIp}): it rotates, so the ` +
+    `timezone, language and WebRTC IP taken from ${firstIp} will not match the exit sites see. Use a ` +
+    "sticky session (most providers take a session id in the proxy username).";
+}
+
+/**
+ * Start the egress-drift check; the returned promise prints one warning if the exit moved and never
+ * rejects. The launch awaits it only once the browser is up, so the lookup overlaps the launch
+ * instead of adding to it (a pending socket would otherwise hold a short script open).
+ */
+export function startEgressDriftCheck(
+  proxy: string | { server?: string; username?: string; password?: string } | undefined,
+  firstIp: string | undefined,
+  quiet?: boolean
+): Promise<void> {
+  if (quiet || process.env.CLEARCOTE_NO_WARN || !proxy || !firstIp) return Promise.resolve();
+  return checkEgressDrift(proxy, firstIp).then((newIp) => {
+    if (newIp) process.stderr.write(`clearcote: warning: ${egressDriftMessage(firstIp, newIp)}\n`);
+  }, () => undefined);
+}
+
 export async function resolveGeoDetailed(
   proxy?: string | { server?: string; username?: string; password?: string },
   opts: { quiet?: boolean; timeoutMs?: number } = {},
