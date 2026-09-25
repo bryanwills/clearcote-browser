@@ -22,6 +22,7 @@
 
 import type { Browser, BrowserContext, Locator, Page } from "playwright-core";
 import { makePersona, planMove, dragDwell, clickHold, keyDwell, clickPoint, planAmbient, gaussFrom, type Persona, type Step } from "./motion.js";
+import { COVER_CHECK_MS, ISO_IS_FOCUSED, ISO_SELECT_PLAN, ISO_SELECTED_INDEX, ISO_VIEWPORT, worldFor } from "./isolated.js";
 
 export interface HumanizeOptions {
   /** Humanize all input (move/click/drag/scroll/type) as native trusted events. */
@@ -194,7 +195,7 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
   let vpCache: { width: number; height: number } | null = null;
   const viewport = async (): Promise<{ width: number; height: number }> => {
     try {
-      const wh = (await page.evaluate("() => [innerWidth, innerHeight]")) as [number, number];
+      const wh = await worldFor(page).evaluate<[number, number]>(ISO_VIEWPORT);
       if (wh && wh[0] && wh[1]) { vpCache = { width: wh[0], height: wh[1] }; return vpCache; }
     } catch { /* detached/navigating — fall through */ }
     return (page.viewportSize && page.viewportSize()) || vpCache || { width: 1280, height: 800 };
@@ -448,14 +449,9 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
   };
 
   // ------------------------------------------------------- page-level targeted helpers
-  const isFocused = async (selector: string): Promise<boolean> => {
-    try {
-      return await (page.evaluate as (fn: unknown, arg: unknown) => Promise<boolean>)((s: string) => {
-        const e: any = (globalThis as any).document.querySelector(s);
-        return !!e && e === (globalThis as any).document.activeElement;
-      }, selector);
-    } catch { return false; }
-  };
+  // Read in an isolated world (./isolated.ts): the page never sees the lookup.
+  const isFocused = async (selector: string): Promise<boolean> =>
+    Boolean(await worldFor(page).evaluate<boolean>(ISO_IS_FOCUSED, selector));
 
   const pointFor = async (selector: string, timeout: number): Promise<{ x: number; y: number } | null> => {
     const loc = page.locator(selector).first();
@@ -593,19 +589,15 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
         box = box2;
         const cp = clickPoint(box, st, persona);
         const x = cp.x, y = cp.y;
+        // covered-by: don't fire a trusted click at a point some overlay owns. A TRIAL action runs
+        // Playwright's own hit test at exactly this point, in its utility world, and dispatches
+        // nothing; the old page.evaluate(elementFromPoint) ran in the page's world, where a hooked
+        // prototype saw it. A covered point times out fast -> the native path waits for it.
         try {
-          const handle = await loc.elementHandle();
-          const covered =
-            handle &&
-            (await (page.evaluate as (fn: unknown, arg: unknown) => Promise<boolean>)(
-              ([px, py, el]: [number, number, any]) => {
-                const t: any = (globalThis as any).document.elementFromPoint(px, py);
-                return !(t && (t === el || el.contains(t) || t.contains(el)));
-              },
-              [x, y, handle]
-            ));
-          if (covered) return orig(selector, options); // covered -> let PW wait for it on top
-        } catch { /* covered-by check best-effort */ }
+          await orig(selector, { trial: true, timeout: COVER_CHECK_MS, position: { x: x - box.x, y: y - box.y } });
+        } catch {
+          return orig(selector, options); // covered -> let PW wait for it on top
+        }
         await glide(x, y);
         if (!noClick) { await sleep(rand(40, 130)); await nativeClick(x, y, { delay: clickHold(persona) }); }
         return;
@@ -650,17 +642,9 @@ async function trustedSelect(
       else if ((v as any).value != null) { by = "value"; want = (v as any).value; }
     } else if (typeof v === "string") { by = "value"; want = v; }
     if (by === null) return null;
-    const plan = await page.evaluate((a: any) => {
-      const el: any = (globalThis as any).document.querySelector(a.sel);
-      if (!el || el.multiple || el.disabled) return null;
-      const os: any[] = [...el.options];
-      let i = -1;
-      if (a.by === "index") i = a.want >= 0 && a.want < os.length ? a.want : -1;
-      else if (a.by === "label") i = os.findIndex((o: any) => (o.label || o.textContent || "").trim() === String(a.want).trim());
-      else i = os.findIndex((o: any) => o.value === a.want);
-      if (i < 0 || os[i].disabled) return null;
-      return { to: i, from: el.selectedIndex, ret: os[i].value };
-    }, { sel: selector, by, want });
+    // Read in an isolated world (./isolated.ts): the page never sees the option lookup.
+    const plan = await worldFor(page).evaluate<{ to: number; from: number; ret: string } | null>(
+      ISO_SELECT_PLAN, { sel: selector, by, want });
     if (!plan) return null;
     if (plan.to === plan.from) return [plan.ret];   // already selected; forge nothing
     await page.focus(selector, { timeout });
@@ -671,10 +655,7 @@ async function trustedSelect(
       await page.keyboard.press(step);
       await sleep(rand(45, 120));
     }
-    const got = await page.evaluate((q: string) => {
-      const e: any = (globalThis as any).document.querySelector(q);
-      return e ? e.selectedIndex : -1;
-    }, selector);
+    const got = await worldFor(page).evaluate<number>(ISO_SELECTED_INDEX, selector);
     if (got === plan.to) return [plan.ret];
   } catch { /* fall back */ }
   return null;
