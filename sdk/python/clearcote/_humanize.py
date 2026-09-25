@@ -28,6 +28,10 @@ Design notes:
 import random
 import time
 
+from ._isolated import (
+    COVER_CHECK_MS, IS_FOCUSED as ISO_IS_FOCUSED, SELECT_PLAN as ISO_SELECT_PLAN,
+    SELECTED_INDEX as ISO_SELECTED_INDEX, VIEWPORT as ISO_VIEWPORT, world_for,
+)
 from ._motion import make_persona, plan_move, drag_dwell, click_hold, key_dwell, click_point, plan_ambient
 
 # IIFE so it runs both as an add_init_script source AND when passed to page.evaluate().
@@ -327,7 +331,7 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
         the gate exists to prevent. innerWidth/innerHeight are the truth in both modes.
         """
         try:
-            wh = page.evaluate("() => [innerWidth, innerHeight]")
+            wh = world_for(page).evaluate(ISO_VIEWPORT)
             if wh and wh[0] and wh[1]:
                 return float(wh[0]), float(wh[1])
         except Exception:  # noqa: BLE001
@@ -512,10 +516,7 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
     # ------------------------------------------------------- page-level targeted helpers
     def _is_focused(selector):
         try:
-            return bool(page.evaluate(
-                "(s) => { const e = document.querySelector(s);"
-                " return !!e && e === document.activeElement; }",
-                selector))
+            return bool(world_for(page).evaluate(ISO_IS_FOCUSED, selector))
         except Exception:  # noqa: BLE001
             return False
 
@@ -686,17 +687,15 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
                     return _native(selector, options)
                 box = box2
                 x, y = click_point(box, st["pos"], persona)
-                # covered-by: don't fire a trusted click at a point some overlay owns
+                # covered-by: don't fire a trusted click at a point some overlay owns. A TRIAL action
+                # runs Playwright's own hit test at exactly this point, in its utility world, and
+                # dispatches nothing; the old page.evaluate(elementFromPoint) ran in the page's world,
+                # where a hooked prototype saw it. A covered point times out fast -> native path.
                 try:
-                    handle = loc.element_handle()
-                    if handle and page.evaluate(
-                        "([x, y, el]) => { const t = document.elementFromPoint(x, y);"
-                        " return !(t && (t === el || el.contains(t) || t.contains(el))); }",
-                        [x, y, handle],
-                    ):
-                        return _native(selector, options)  # covered -> let PW wait for it on top
+                    orig(selector, trial=True, timeout=COVER_CHECK_MS,
+                         position={"x": x - box["x"], "y": y - box["y"]})
                 except Exception:  # noqa: BLE001
-                    pass
+                    return _native(selector, options)  # covered -> let PW wait for it on top
                 _glide(x, y)
                 if not no_click:
                     time.sleep(_rand(40, 130) / 1000.0)
@@ -752,18 +751,8 @@ def _select_by_keyboard(page, selector, value, kw):
         by, wanted = "value", one(value)
     if by is None:
         return None
-    plan = page.evaluate(
-        """(a) => { const s = document.querySelector(a.sel);
-             if (!s || s.multiple || s.disabled) return null;
-             const os = [...s.options];
-             let i = -1;
-             if (a.by === 'index') i = (a.want >= 0 && a.want < os.length) ? a.want : -1;
-             else if (a.by === 'label') i = os.findIndex(o => (o.label || o.textContent || '').trim() === String(a.want).trim());
-             else i = os.findIndex(o => o.value === a.want);
-             if (i < 0 || os[i].disabled) return null;
-             return { to: i, from: s.selectedIndex, ret: os[i].value }; }""",
-        {"sel": selector, "by": by, "want": wanted},
-    )
+    # Read in an isolated world (see _isolated.py): the page never sees the option lookup.
+    plan = world_for(page).evaluate(ISO_SELECT_PLAN, {"sel": selector, "by": by, "want": wanted})
     if not plan:
         return None
     if plan["to"] == plan["from"]:
@@ -776,10 +765,7 @@ def _select_by_keyboard(page, selector, value, kw):
         # from the humanised press wrapper rather than being reapplied here.
         page.keyboard.press(step)
         time.sleep(_rand(45, 120) / 1000.0)
-    got = page.evaluate(
-        "(s) => { const e = document.querySelector(s); return e ? e.selectedIndex : -1; }",
-        selector,
-    )
+    got = world_for(page).evaluate(ISO_SELECTED_INDEX, selector)
     return [plan["ret"]] if got == plan["to"] else None
 
 

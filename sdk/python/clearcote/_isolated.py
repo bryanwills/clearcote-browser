@@ -80,6 +80,33 @@ class AsyncIsolatedWorld:
         return None
 
 
+def world_for(page):
+    """The page's IsolatedWorld (created on first use and kept on the page)."""
+    world = getattr(page, "_cc_isolated_world", None)
+    if world is None:
+        world = IsolatedWorld(page)
+        try:
+            page._cc_isolated_world = world
+        except Exception:  # noqa: BLE001
+            pass
+    return world
+
+
+def async_world_for(page):
+    """The page's AsyncIsolatedWorld (created on first use and kept on the page)."""
+    world = getattr(page, "_cc_isolated_world", None)
+    if world is None:
+        world = AsyncIsolatedWorld(page)
+        try:
+            page._cc_isolated_world = world
+        except Exception:  # noqa: BLE001
+            pass
+    return world
+
+
+# How long a trial action may look for a covered click point before the native path takes over.
+COVER_CHECK_MS = 400
+
 # The reads humanize makes, as functions of one JSON argument (run by IsolatedWorld.evaluate).
 VIEWPORT = "() => [innerWidth, innerHeight]"
 IS_FOCUSED = ("(s) => { const e = document.querySelector(s);"

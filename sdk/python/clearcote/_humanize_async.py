@@ -9,6 +9,10 @@ import asyncio
 import random
 
 from ._humanize import CURSOR_OVERLAY, _needs_shift, _rand, _shift_lag_s, _shift_lead_s
+from ._isolated import (
+    COVER_CHECK_MS, IS_FOCUSED as ISO_IS_FOCUSED, SELECT_PLAN as ISO_SELECT_PLAN,
+    SELECTED_INDEX as ISO_SELECTED_INDEX, VIEWPORT as ISO_VIEWPORT, async_world_for,
+)
 from ._motion import make_persona, plan_move, drag_dwell, click_hold, key_dwell, click_point, plan_ambient
 
 
@@ -203,7 +207,7 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
         re-homed a correctly-placed cursor on every scroll.
         """
         try:
-            wh = await page.evaluate("() => [innerWidth, innerHeight]")
+            wh = await async_world_for(page).evaluate(ISO_VIEWPORT)
             if wh and wh[0] and wh[1]:
                 return float(wh[0]), float(wh[1])
         except Exception:  # noqa: BLE001
@@ -292,16 +296,13 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
                     return await _native(selector, options)
                 box = box2
                 x, y = click_point(box, st["pos"], persona)
+                # covered-by: a TRIAL action runs Playwright's own hit test at this point in its
+                # utility world, invisible to the page (see _humanize.py); covered -> native path.
                 try:
-                    handle = await loc.element_handle()
-                    if handle and await page.evaluate(
-                        "([x, y, el]) => { const t = document.elementFromPoint(x, y);"
-                        " return !(t && (t === el || el.contains(t) || t.contains(el))); }",
-                        [x, y, handle],
-                    ):
-                        return await _native(selector, options)
+                    await orig(selector, trial=True, timeout=COVER_CHECK_MS,
+                               position={"x": x - box["x"], "y": y - box["y"]})
                 except Exception:  # noqa: BLE001
-                    pass
+                    return await _native(selector, options)
                 await _glide(x, y)
                 if not no_click:
                     await asyncio.sleep(_rand(40, 130) / 1000.0)
@@ -493,18 +494,9 @@ async def _select_by_keyboard(page, selector, value, kw):
         by, wanted = "value", one(value)
     if by is None:
         return None
-    plan = await page.evaluate(
-        """(a) => { const s = document.querySelector(a.sel);
-             if (!s || s.multiple || s.disabled) return null;
-             const os = [...s.options];
-             let i = -1;
-             if (a.by === 'index') i = (a.want >= 0 && a.want < os.length) ? a.want : -1;
-             else if (a.by === 'label') i = os.findIndex(o => (o.label || o.textContent || '').trim() === String(a.want).trim());
-             else i = os.findIndex(o => o.value === a.want);
-             if (i < 0 || os[i].disabled) return null;
-             return { to: i, from: s.selectedIndex, ret: os[i].value }; }""",
-        {"sel": selector, "by": by, "want": wanted},
-    )
+    # Read in an isolated world (see _isolated.py): the page never sees the option lookup.
+    plan = await async_world_for(page).evaluate(
+        ISO_SELECT_PLAN, {"sel": selector, "by": by, "want": wanted})
     if not plan:
         return None
     if plan["to"] == plan["from"]:
@@ -517,10 +509,7 @@ async def _select_by_keyboard(page, selector, value, kw):
         # wrapper rather than being reapplied here.
         await page.keyboard.press(step)
         await asyncio.sleep(_rand(45, 120) / 1000.0)
-    got = await page.evaluate(
-        "(s) => { const e = document.querySelector(s); return e ? e.selectedIndex : -1; }",
-        selector,
-    )
+    got = await async_world_for(page).evaluate(ISO_SELECTED_INDEX, selector)
     return [plan["ret"]] if got == plan["to"] else None
 
 
