@@ -126,8 +126,8 @@ public static class Humanize
     {
         try
         {
-            var r = await page.EvaluateAsync<JsonElement?>("() => [innerWidth, innerHeight]")
-                              .ConfigureAwait(false);
+            // Read in an isolated world (IsolatedWorld): the page never sees it.
+            var r = await IsolatedWorld.For(page).EvaluateAsync(IsolatedWorld.Viewport).ConfigureAwait(false);
             if (r is { } el && el.ValueKind == JsonValueKind.Array && el.GetArrayLength() == 2)
             {
                 double w = el[0].GetDouble(), h = el[1].GetDouble();
@@ -250,13 +250,8 @@ public static class Humanize
     {
         try
         {
-            var r = await page.EvaluateAsync<JsonElement?>(
-                @"() => {
-                    const el = document.activeElement;
-                    if (!el || el === document.body || el === document.documentElement) return null;
-                    const b = el.getBoundingClientRect();
-                    return (b.width && b.height) ? { x: b.x, y: b.y, w: b.width, h: b.height } : null;
-                }").ConfigureAwait(false);
+            // Read in an isolated world (IsolatedWorld): the page never sees it.
+            var r = await IsolatedWorld.For(page).EvaluateAsync(IsolatedWorld.FocusedRect).ConfigureAwait(false);
             if (r is { ValueKind: JsonValueKind.Object } rect)
                 return new Box(rect.GetProperty("x").GetDouble(), rect.GetProperty("y").GetDouble(),
                                rect.GetProperty("w").GetDouble(), rect.GetProperty("h").GetDouble());
@@ -612,20 +607,9 @@ public static class Humanize
 
         try
         {
-            var planJson = await locator.EvaluateAsync<JsonElement?>(
-                @"(el, want) => {
-                    if (!el || el.tagName !== 'SELECT' || el.multiple || el.disabled) return null;
-                    const os = [...el.options];
-                    const i = os.findIndex(o => o.value === want);
-                    if (i < 0 || os[i].disabled) return null;
-                    return { to: i, from: el.selectedIndex, ret: os[i].value };
-                }", value).ConfigureAwait(false);
-
-            if (planJson is { ValueKind: JsonValueKind.Object } plan)
+            if (await PlanSelectAsync(locator, value).ConfigureAwait(false) is { } plan)
             {
-                int to = plan.GetProperty("to").GetInt32();
-                int fromIdx = plan.GetProperty("from").GetInt32();
-                string ret = plan.GetProperty("ret").GetString() ?? value;
+                var (to, fromIdx, ret) = plan;
                 if (to == fromIdx) return new[] { ret };   // already selected; forge nothing
 
                 // Move to the control before operating it. Placement only, no press: the arrow-key
@@ -640,8 +624,7 @@ public static class Humanize
                     await page.HumanPressAsync(step).ConfigureAwait(false);
                     await Task.Delay((int)Rand(45, 120)).ConfigureAwait(false);
                 }
-                int got = await locator.EvaluateAsync<int>("el => el.selectedIndex").ConfigureAwait(false);
-                if (got == to) return new[] { ret };
+                if (await locator.InputValueAsync().ConfigureAwait(false) == ret) return new[] { ret };
             }
         }
         catch (PlaywrightException)
@@ -651,6 +634,38 @@ public static class Humanize
 
         var res = await locator.SelectOptionAsync(new[] { value }).ConfigureAwait(false);
         return res.ToArray();
+    }
+
+    /// <summary>
+    /// Where the keyboard route has to go: the target option's index, the current one, and the value.
+    /// Built only from Playwright's element queries (attributes, disabled state, text, input value),
+    /// which run in Playwright's utility world -- the page never sees them. A locator.EvaluateAsync
+    /// ran the lookup in the page's own world. Null when the route cannot apply (multi-select,
+    /// disabled, no such option).
+    /// </summary>
+    private static async Task<(int To, int From, string Ret)?> PlanSelectAsync(ILocator select, string value)
+    {
+        if (await select.GetAttributeAsync("multiple").ConfigureAwait(false) is not null) return null;
+        if (await select.IsDisabledAsync().ConfigureAwait(false)) return null;
+        var options = select.Locator("option");
+        int n = await options.CountAsync().ConfigureAwait(false);
+        var current = await select.InputValueAsync().ConfigureAwait(false);
+        int to = -1, from = -1;
+        for (int i = 0; i < n && (to < 0 || from < 0); i++)
+        {
+            var option = options.Nth(i);
+            // An option's value is its value attribute, else its text with whitespace collapsed.
+            var v = await option.GetAttributeAsync("value").ConfigureAwait(false)
+                    ?? string.Join(' ', ((await option.TextContentAsync().ConfigureAwait(false)) ?? "")
+                        .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+            if (from < 0 && v == current) from = i;
+            if (to < 0 && v == value)
+            {
+                if (await option.IsDisabledAsync().ConfigureAwait(false)) return null;
+                to = i;
+            }
+        }
+        return to < 0 || from < 0 ? null : (to, from, value);
     }
 
     /// <inheritdoc cref="HumanSelectOptionAsync(ILocator,string)"/>
