@@ -108,7 +108,60 @@ export function coherenceWarnings(
     warn("automation-arg",
       "your args re-introduce an automation flag (--enable-automation / --remote-debugging-port) the SDK " +
       "strips by default - a strong webdriver/CDP tell.");
+  if (opts.devtools || userArgs.some((a) => String(a).startsWith("--auto-open-devtools-for-tabs")))
+    warn("devtools-open",
+      "DevTools is set to open (devtools:true / --auto-open-devtools-for-tabs). Pages can detect an open " +
+      "DevTools (debugger and console timing probes; a docked panel also makes innerWidth/innerHeight " +
+      "disagree with outerWidth/outerHeight). Leave it closed for real runs.");
+  if (opts.userAgent || userArgs.some((a) => String(a).startsWith("--user-agent=")))
+    warn("custom-user-agent",
+      "a custom user agent (userAgent / --user-agent) replaces only the User-Agent string: " +
+      "navigator.userAgentData, the Sec-CH-UA headers, navigator.platform and the rest of the persona " +
+      "keep describing the persona, so a different OS or version in the string is a one-line mismatch. " +
+      "Use platform, brand and brandVersion to change what the browser claims.");
+  out.push(...cdpExposure(switchValue(userArgs, "--remote-debugging-address"), switchValue(userArgs, "--remote-allow-origins")));
   return out;
+}
+
+/** The value of the LAST `name=value` in `args` (Chromium keeps the last), else undefined. */
+function switchValue(args: readonly unknown[], name: string): string | undefined {
+  let value: string | undefined;
+  for (const a of args) {
+    const s = String(a);
+    if (s.startsWith(`${name}=`)) value = s.slice(name.length + 1);
+  }
+  return value;
+}
+
+function isLoopback(host: string): boolean {
+  const h = host.trim().replace(/^\[|\]$/g, "").toLowerCase();
+  return h === "localhost" || h === "::1" || h.startsWith("127.");
+}
+
+/** Warnings for a DevTools endpoint reachable beyond this machine or from any web page. */
+function cdpExposure(bindAddress: string | undefined, allowOrigins: string | undefined): CoherenceWarning[] {
+  const out: CoherenceWarning[] = [];
+  if (bindAddress !== undefined && !isLoopback(bindAddress))
+    out.push({ severity: "warn", code: "cdp-public-bind", message:
+      `the DevTools endpoint is bound to ${bindAddress}, not loopback: anyone who can reach that port can ` +
+      "drive the browser, read its cookies and run code in its pages. Keep it on 127.0.0.1 and tunnel to it " +
+      "if you need remote access." });
+  if (allowOrigins !== undefined && allowOrigins.split(",").some((o) => o.trim() === "*"))
+    out.push({ severity: "warn", code: "cdp-any-origin", message:
+      "--remote-allow-origins=* lets any web page this browser (or any browser on this machine) opens " +
+      "connect to the DevTools endpoint and take it over. List the origins you need instead." });
+  return out;
+}
+
+/** The cdp-public-bind / cdp-any-origin warnings for `serve({ host, allowOrigins })`. */
+export function serveExposureWarnings(host: string, allowOrigins: string): CoherenceWarning[] {
+  return cdpExposure(host, allowOrigins);
+}
+
+/** Print a list of warnings to stderr unless quiet or CLEARCOTE_NO_WARN. */
+export function emitWarnings(warnings: readonly CoherenceWarning[], quiet?: boolean): void {
+  if (quiet || process.env.CLEARCOTE_NO_WARN) return;
+  for (const w of warnings) process.stderr.write(`clearcote: ${w.severity === "warn" ? "warning" : "note"}: ${w.message}\n`);
 }
 
 /** Engine-behaviour advisories: true for every launch, so they live here rather than in

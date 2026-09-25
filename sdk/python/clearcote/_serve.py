@@ -136,6 +136,7 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     from ._fonts import linux_font_env, linux_locale_env
     from ._geometry import fit_served_window, served_geometry, validate_window_size
     from ._launchopts import serve_needs_no_sandbox
+    from ._warnings import emit_warnings, serve_exposure_warnings
 
     window_size = validate_window_size(window_size)
     light_stealth = bool(kwargs.get("light_stealth"))
@@ -160,6 +161,8 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
         user_data_dir = tempfile.mkdtemp(prefix="clearcote-serve-")
     origins = allow_origins if allow_origins is not None else \
         "http://%s:%d,http://localhost:%d" % (host, port, port)
+    # A non-loopback bind or a "*" origin list hands the browser to whoever can reach the port.
+    emit_warnings(serve_exposure_warnings(host, origins), quiet=quiet)
 
     cdp = [
         "--remote-debugging-port=%d" % port,

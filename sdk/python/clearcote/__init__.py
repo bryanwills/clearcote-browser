@@ -488,6 +488,7 @@ def _prepare(kwargs):
     # host's installed families is I/O and that function is documented (and tested) as pure.
     emit_coherence_warnings(
         {**fp, "proxy": proxy_opt, "geoip": geoip, "headless": kwargs.get("headless"),
+         "devtools": kwargs.get("devtools"), "user_agent": kwargs.get("user_agent"),
          "_user_args": user, "_font_reach": font_reachability(fp.get("fingerprint_profile"))},
         quiet=quiet, build_major=str(RELEASE["version"]).split(".")[0])
     # The motor-persona seed is the EFFECTIVE fingerprint (after the profile= merge above), i.e. the

@@ -56,7 +56,7 @@ import {
 } from "./launchopts.js";
 import { RELEASE, platformRelease } from "./release.js";
 import { fetchWidevine, seedWidevine, widevineArgs } from "./widevine.js";
-import { emitCoherenceWarnings } from "./warnings.js";
+import { emitCoherenceWarnings, emitWarnings, serveExposureWarnings } from "./warnings.js";
 import { fontLaunchEnv } from "./fonts.js";
 import { withShaderDialect, type ShaderDialect } from "./shaderdialect.js";
 import {
@@ -750,7 +750,9 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   if (proxy === undefined) delete (pwOptions as Record<string, unknown>).proxy;
   else (pwOptions as PlaywrightLaunchOptions).proxy = proxy as PlaywrightLaunchOptions["proxy"];
   emitCoherenceWarnings(
-    { ...fingerprint, proxy: proxyOpt, geoip, headless: (pwOptions as PlaywrightLaunchOptions).headless, _userArgs: args ?? [] },
+    { ...fingerprint, proxy: proxyOpt, geoip, headless: (pwOptions as PlaywrightLaunchOptions).headless,
+      devtools: (pwOptions as Record<string, unknown>).devtools, userAgent: (pwOptions as Record<string, unknown>).userAgent,
+      _userArgs: args ?? [] },
     quiet, process.platform, String(RELEASE.version).split(".")[0]);
   const headed = (pwOptions as PlaywrightLaunchOptions).headless === false;
   // License (opt-in): check out a concurrency slot and inject CLEARCOTE_RUN_TOKEN so the PRO
@@ -814,7 +816,9 @@ export async function launchPersistentContext(
   if (proxy === undefined) delete (pwOptions as Record<string, unknown>).proxy;
   else (pwOptions as PlaywrightLaunchOptions).proxy = proxy as PlaywrightLaunchOptions["proxy"];
   emitCoherenceWarnings(
-    { ...fingerprint, proxy: proxyOpt, geoip, headless: (pwOptions as PlaywrightLaunchOptions).headless, _userArgs: args ?? [] },
+    { ...fingerprint, proxy: proxyOpt, geoip, headless: (pwOptions as PlaywrightLaunchOptions).headless,
+      devtools: (pwOptions as Record<string, unknown>).devtools, userAgent: (pwOptions as Record<string, unknown>).userAgent,
+      _userArgs: args ?? [] },
     quiet, process.platform, String(RELEASE.version).split(".")[0]);
   const opts = pwOptions as PlaywrightLaunchOptions & BrowserContextOptions;
   // headed + no explicit viewport -> disable the emulated viewport (impossible-window tell)
@@ -1063,6 +1067,8 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   const ownUdd = !uddOption;
   const userDataDir = uddOption ?? mkdtempSync(join(tmpdir(), "clearcote-serve-"));
   const origins = allowOrigins ?? `http://${host}:${resolvedPort},http://localhost:${resolvedPort}`;
+  // A non-loopback bind or a "*" origin list hands the browser to whoever can reach the port.
+  emitWarnings(serveExposureWarnings(host, origins), quiet);
   const cdpArgs = [
     `--remote-debugging-port=${resolvedPort}`,
     `--remote-debugging-address=${host}`,

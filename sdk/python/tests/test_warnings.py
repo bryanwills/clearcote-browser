@@ -120,3 +120,50 @@ def test_engine_notes_fire_once_via_emitter(capsys, monkeypatch):
     monkeypatch.setattr(_warnings, "_seen_notes", set())
     _warnings.emit_coherence_warnings(opts, quiet=True, host_platform="win32", build_major="149")
     assert "page.on('console')" not in capsys.readouterr().err
+
+
+def test_devtools_open_is_flagged():
+    assert "devtools-open" in codes({"devtools": True})
+    assert "devtools-open" in codes({"_user_args": ["--auto-open-devtools-for-tabs"]})
+    assert "devtools-open" not in codes({"devtools": False})
+
+
+def test_custom_user_agent_is_flagged():
+    assert "custom-user-agent" in codes({"user_agent": "Mozilla/5.0 (Macintosh) Chrome/120"})
+    assert "custom-user-agent" in codes({"_user_args": ["--user-agent=Mozilla/5.0 Foo"]})
+    assert "custom-user-agent" not in codes({"user_agent": None})
+
+
+def test_cdp_exposure_in_args():
+    assert "cdp-public-bind" in codes({"_user_args": ["--remote-debugging-address=0.0.0.0"]})
+    assert "cdp-public-bind" not in codes({"_user_args": ["--remote-debugging-address=127.0.0.1"]})
+    # Chromium keeps the LAST value
+    assert "cdp-public-bind" not in codes(
+        {"_user_args": ["--remote-debugging-address=0.0.0.0", "--remote-debugging-address=::1"]})
+    assert "cdp-any-origin" in codes({"_user_args": ["--remote-allow-origins=*"]})
+    assert "cdp-any-origin" in codes({"_user_args": ["--remote-allow-origins=http://a.test, *"]})
+    assert "cdp-any-origin" not in codes({"_user_args": ["--remote-allow-origins=http://127.0.0.1:9222"]})
+
+
+def test_serve_exposure_warnings():
+    from clearcote._warnings import serve_exposure_warnings
+    c = lambda host, origins: {w["code"] for w in serve_exposure_warnings(host, origins)}
+    assert c("127.0.0.1", "http://127.0.0.1:9222,http://localhost:9222") == set()
+    assert c("localhost", "http://localhost:9222") == set()
+    assert c("[::1]", "http://localhost:9222") == set()
+    assert c("0.0.0.0", "http://0.0.0.0:9222") == {"cdp-public-bind"}
+    assert c("127.0.0.1", "*") == {"cdp-any-origin"}
+    assert c("10.0.0.5", "*") == {"cdp-public-bind", "cdp-any-origin"}
+
+
+def test_emit_warnings_respects_quiet(capsys, monkeypatch):
+    from clearcote._warnings import emit_warnings, serve_exposure_warnings
+    monkeypatch.delenv("CLEARCOTE_NO_WARN", raising=False)
+    emit_warnings(serve_exposure_warnings("0.0.0.0", "*"), quiet=True)
+    assert capsys.readouterr().err == ""
+    emit_warnings(serve_exposure_warnings("0.0.0.0", "*"))
+    err = capsys.readouterr().err
+    assert err.count("clearcote: warning:") == 2
+    monkeypatch.setenv("CLEARCOTE_NO_WARN", "1")
+    emit_warnings(serve_exposure_warnings("0.0.0.0", "*"))
+    assert capsys.readouterr().err == ""

@@ -175,7 +175,66 @@ def coherence_warnings(opts, host_platform=None, build_major=None):
         warn("automation-arg",
              "your args re-introduce an automation flag (--enable-automation / --remote-debugging-port) "
              "the SDK strips by default - a strong webdriver/CDP tell.")
+    if opts.get("devtools") or any(str(a).startswith("--auto-open-devtools-for-tabs") for a in user_args):
+        warn("devtools-open",
+             "DevTools is set to open (devtools=True / --auto-open-devtools-for-tabs). Pages can detect "
+             "an open DevTools (debugger and console timing probes; a docked panel also makes "
+             "innerWidth/innerHeight disagree with outerWidth/outerHeight). Leave it closed for real runs.")
+    if opts.get("user_agent") or any(str(a).startswith("--user-agent=") for a in user_args):
+        warn("custom-user-agent",
+             "a custom user agent (user_agent= / --user-agent) replaces only the User-Agent string: "
+             "navigator.userAgentData, the Sec-CH-UA headers, navigator.platform and the rest of the "
+             "persona keep describing the persona, so a different OS or version in the string is a "
+             "one-line mismatch. Use platform=, brand= and brand_version= to change what the browser "
+             "claims.")
+    out.extend(_cdp_exposure(_switch_value(user_args, "--remote-debugging-address"),
+                             _switch_value(user_args, "--remote-allow-origins")))
     return out
+
+
+def _switch_value(args, name):
+    """The value of the LAST ``name=value`` in ``args`` (Chromium keeps the last), else None."""
+    value = None
+    for a in args or ():
+        a = str(a)
+        if a.startswith(name + "="):
+            value = a.split("=", 1)[1]
+    return value
+
+
+def _is_loopback(host):
+    h = str(host or "").strip().strip("[]").lower()
+    return h in ("localhost", "::1") or h.startswith("127.")
+
+
+def _cdp_exposure(bind_address, allow_origins):
+    """Warnings for a DevTools endpoint reachable beyond this machine or from any web page."""
+    out = []
+    if bind_address is not None and not _is_loopback(bind_address):
+        out.append({"severity": "warn", "code": "cdp-public-bind", "message":
+                    "the DevTools endpoint is bound to %s, not loopback: anyone who can reach that port "
+                    "can drive the browser, read its cookies and run code in its pages. Keep it on "
+                    "127.0.0.1 and tunnel to it if you need remote access." % bind_address})
+    if allow_origins is not None and any(o.strip() == "*" for o in str(allow_origins).split(",")):
+        out.append({"severity": "warn", "code": "cdp-any-origin", "message":
+                    "--remote-allow-origins=* lets any web page this browser (or any browser on this "
+                    "machine) opens connect to the DevTools endpoint and take it over. List the origins "
+                    "you need instead."})
+    return out
+
+
+def serve_exposure_warnings(host, allow_origins):
+    """The cdp-public-bind / cdp-any-origin warnings for ``serve(host=, allow_origins=)``."""
+    return _cdp_exposure(host, allow_origins)
+
+
+def emit_warnings(warnings, quiet=False):
+    """Print a list of {severity, code, message} to stderr (unless quiet or CLEARCOTE_NO_WARN)."""
+    if quiet or os.environ.get("CLEARCOTE_NO_WARN"):
+        return
+    for w in warnings:
+        label = "warning" if w["severity"] == "warn" else "note"
+        print("clearcote: %s: %s" % (label, w["message"]), file=sys.stderr, flush=True)
 
 
 # Engine-behaviour advisories. These are not a property of the options - they hold for every
