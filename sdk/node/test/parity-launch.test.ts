@@ -33,7 +33,7 @@ function fakeEngine(switches: string[]): string {
 
 describe("GPU launch defaults (#1 + #2)", () => {
   it("strips Playwright's automation AND SwiftShader defaults", () => {
-    expect(DEFAULT_IGNORED_ARGS).toEqual(["--enable-automation", "--enable-unsafe-swiftshader"]);
+    expect(DEFAULT_IGNORED_ARGS).toEqual(["--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars"]);
   });
 
   it("adds --ignore-gpu-blocklist when headed, on any OS", () => {
@@ -127,7 +127,7 @@ describe("fingerprint pass-through (--fingerprint=off)", () => {
       "--fingerprint-passthrough",
       "--timezone=Europe/Berlin",
       "--accept-lang=de-DE,de",
-      "--lang=de-DE",
+      "--lang=de",
       "--webrtc-ip=1.2.3.4",
     ]);
   });

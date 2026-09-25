@@ -223,7 +223,7 @@ async def launch(**kwargs):
     launch_token = lease.bind_launch() if lease else None  # (file, release) or None; r23+ opt-in
     if lease:  # inject CLEARCOTE_RUN_TOKEN (+ the r23+ opt-in token FILE) so the gate lets it launch
         inject_run_token(pw_kwargs, lease.token, launch_token[0])
-    await asyncio.to_thread(apply_font_env, exe, pw_kwargs)  # Linux: bundled font clones (mirror sync)
+    await asyncio.to_thread(apply_font_env, exe, pw_kwargs, args)  # Linux: bundled font clones (mirror sync)
     apply_shader_dialect(shader_dialect, pw_kwargs)  # after fonts: that helper rebuilds the env
     headed = _headed_no_viewport(pw_kwargs)  # launch() takes no viewport kwarg -> wrap new_page/context
     # Headless: the display switches go on the command line, no_viewport rides on
@@ -272,7 +272,7 @@ async def launch_persistent_context(user_data_dir, **kwargs):
     launch_token = lease.bind_launch() if lease else None  # (file, release) or None; r23+ opt-in
     if lease:  # inject CLEARCOTE_RUN_TOKEN (+ the r23+ opt-in token FILE) so the gate lets it launch
         inject_run_token(pw_kwargs, lease.token, launch_token[0])
-    await asyncio.to_thread(apply_font_env, exe, pw_kwargs)  # Linux: bundled font clones (mirror sync)
+    await asyncio.to_thread(apply_font_env, exe, pw_kwargs, args)  # Linux: bundled font clones (mirror sync)
     apply_shader_dialect(shader_dialect, pw_kwargs)  # after fonts: that helper rebuilds the env
     geom = None
     if _headed_no_viewport(pw_kwargs):  # no_viewport IS a valid persistent-context option

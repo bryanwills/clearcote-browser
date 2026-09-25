@@ -11,6 +11,8 @@ import json
 import os
 import sys
 
+from ._languages import resolve_languages
+
 # kwargs accepted by launch()/launch_persistent_context() that are fingerprint options
 # (everything else is passed straight through to Playwright).
 FINGERPRINT_KEYS = (
@@ -209,6 +211,20 @@ _LOCALE_TZ = {
     "ko-KR": "Asia/Seoul", "zh-CN": "Asia/Shanghai", "zh-TW": "Asia/Taipei",
     "ru-RU": "Europe/Moscow", "tr-TR": "Europe/Istanbul", "ar-SA": "Asia/Riyadh",
     "hi-IN": "Asia/Kolkata", "id-ID": "Asia/Jakarta",
+    "en-IN": "Asia/Kolkata", "en-ZA": "Africa/Johannesburg", "en-SG": "Asia/Singapore",
+    "en-PH": "Asia/Manila", "fil-PH": "Asia/Manila", "de-CH": "Europe/Zurich",
+    "fr-CH": "Europe/Zurich", "it-CH": "Europe/Zurich", "fr-CA": "America/Toronto",
+    "fr-BE": "Europe/Brussels", "nl-BE": "Europe/Brussels", "es-AR": "America/Argentina/Buenos_Aires",
+    "es-CL": "America/Santiago", "es-CO": "America/Bogota", "es-US": "America/Los_Angeles",
+    "uk-UA": "Europe/Kyiv", "nb-NO": "Europe/Oslo", "da-DK": "Europe/Copenhagen",
+    "fi-FI": "Europe/Helsinki", "cs-CZ": "Europe/Prague", "ro-RO": "Europe/Bucharest",
+    "hu-HU": "Europe/Budapest", "el-GR": "Europe/Athens", "he-IL": "Asia/Jerusalem",
+    "ar-AE": "Asia/Dubai", "ar-EG": "Africa/Cairo", "zh-HK": "Asia/Hong_Kong",
+    "zh-SG": "Asia/Singapore", "th-TH": "Asia/Bangkok", "vi-VN": "Asia/Ho_Chi_Minh",
+    "ms-MY": "Asia/Kuala_Lumpur", "bg-BG": "Europe/Sofia", "hr-HR": "Europe/Zagreb",
+    "sk-SK": "Europe/Bratislava", "sl-SI": "Europe/Ljubljana", "sr-RS": "Europe/Belgrade",
+    "lt-LT": "Europe/Vilnius", "lv-LV": "Europe/Riga", "et-EE": "Europe/Tallinn",
+    "ca-ES": "Europe/Madrid", "es-419": "America/Mexico_City",
 }
 
 
@@ -218,7 +234,10 @@ def _default_timezone(primary_lang):
     Falls back by language subtag, then to America/New_York (matching the en-US Accept-Language default)."""
     if not primary_lang:
         return None
-    tag = primary_lang.strip()
+    tag = primary_lang.strip().replace("_", "-")
+    parts = tag.split("-")
+    if len(parts) >= 2 and len(parts[-1]) == 2:
+        tag = parts[0].lower() + "-" + parts[-1].upper()  # de-at / de_AT / zh-Hant-TW -> de-AT / zh-TW
     if tag in _LOCALE_TZ:
         return _LOCALE_TZ[tag]
     lang = tag.split("-")[0].lower()
@@ -303,11 +322,10 @@ def fingerprint_args(opts):
         if opts.get("timezone"):
             args.append(f"--timezone={opts['timezone']}")
         if opts.get("accept_language"):
-            clean = clean_accept_language(opts["accept_language"])
-            args.append(f"--accept-lang={clean}")
-            primary = clean.split(",")[0]
-            if primary:
-                args.append(f"--lang={primary}")
+            accept, ui_locale = resolve_languages(clean_accept_language(opts["accept_language"]))
+            args.append(f"--accept-lang={accept}")
+            if ui_locale:
+                args.append(f"--lang={ui_locale}")
         if opts.get("webrtc_ip"):
             args.append(f"--webrtc-ip={opts['webrtc_ip']}")
         return args
@@ -360,16 +378,20 @@ def fingerprint_args(opts):
         # build/OS locale, which can leak a language that mismatches the proxy's country/timezone
         # (e.g. en-GB on a US IP) — a geo-inconsistency tell. en-US,en is the common Chrome default;
         # set accept_language (or geoip) to match the proxy region.
-        accept_language = "en-US,en"
+        accept_language = "en-US"
     clean_lang = clean_accept_language(accept_language)
-    args.append(f"--accept-lang={clean_lang}")
-    # Also pin the UI/ICU locale to the PRIMARY Accept-Language tag, so Intl.DateTimeFormat /
-    # NumberFormat / Collator (main thread AND workers) resolve to the same locale as
-    # navigator.language. Without --lang, Chromium falls back to the build/OS locale (e.g. en-GB on an
-    # en-US persona) -- a locale-incoherence tell (navigator.language=en-US but Intl=en-GB).
+    # One tag is an OS locale and becomes Chrome's own default list for it (de-AT ->
+    # de-DE,de,en-US,en); a list is kept as given. See _languages.resolve_languages.
+    accept, ui_locale = resolve_languages(clean_lang)
+    args.append(f"--accept-lang={accept}")
+    # Also pin the UI locale (--lang), which Chrome resolves the way it resolves the OS locale and
+    # which drives Intl.DateTimeFormat / NumberFormat / Collator (main thread AND workers). Without
+    # it, Chromium falls back to the build/OS locale (e.g. en-GB on an en-US persona) -- a
+    # locale-incoherence tell. Genuine Chrome's Intl is the UI locale: "de", not "de-DE".
+    if ui_locale:
+        args.append(f"--lang={ui_locale}")
+    # The timezone default keys off the caller's own first tag: de-AT -> Europe/Vienna.
     primary_lang = clean_lang.split(",")[0]
-    if primary_lang:
-        args.append(f"--lang={primary_lang}")
     # Default the timezone to one coherent with the persona locale when none is set (and geoip didn't
     # resolve one), so a server/container run doesn't leak the host's UTC (a datacenter tell) while
     # navigator.language says e.g. en-US. geoip=True or an explicit timezone= override this.

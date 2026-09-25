@@ -40,8 +40,9 @@ def test_default_persona_on_linux_host(monkeypatch):
 
 def test_lang_derived_from_primary_accept_language():
     # Intl/locale coherence: --lang = the primary Accept-Language tag.
-    assert "--lang=fr-FR" in fingerprint_args({"accept_language": "fr-FR,fr"})
-    assert "--lang=de-DE" in fingerprint_args({"accept_language": "de-DE,de;q=0.7,en;q=0.3"})
+    # --lang is the UI locale Chrome resolves from the first tag (Intl is "fr", not "fr-FR")
+    assert "--lang=fr" in fingerprint_args({"accept_language": "fr-FR,fr"})
+    assert "--lang=de" in fingerprint_args({"accept_language": "de-DE,de;q=0.7,en;q=0.3"})
 
 
 def test_default_timezone_is_locale_coherent():
@@ -52,7 +53,8 @@ def test_default_timezone_is_locale_coherent():
     assert _default_timezone("en-US") == "America/New_York"
     assert _default_timezone("de-DE") == "Europe/Berlin"
     assert _default_timezone("ja-JP") == "Asia/Tokyo"
-    assert _default_timezone("en-ZA") == "America/New_York"  # en-* subtag fallback -> the en default
+    assert _default_timezone("en-ZA") == "Africa/Johannesburg"
+    assert _default_timezone("en-JM") == "America/New_York"  # en-* subtag fallback -> the en default
     assert _default_timezone("xx-YY") == "America/New_York"  # ultimate fallback
     assert "--timezone=Europe/Paris" in fingerprint_args({"accept_language": "fr-FR,fr"})
     # an explicit timezone always wins over the locale default

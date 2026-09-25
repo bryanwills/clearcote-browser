@@ -73,7 +73,7 @@ public class ParityNetworkTests : IDisposable
         await using var socks = new TestSocks5("alice", "s3cret");
         GeoIp.IpApiUrl = $"http://localhost:{api.Port}/json";
         var r = await GeoIp.ResolveDetailedAsync(new ProxyOptions { Server = $"socks5://alice:s3cret@127.0.0.1:{socks.Port}" }, quiet: true, timeoutMs: 5000);
-        Assert.Equal(new GeoInfo("203.0.113.7", "DE", "Europe/Berlin", "de-DE,de,en", "52.5,13.4"), r.Geo);
+        Assert.Equal(new GeoInfo("203.0.113.7", "DE", "Europe/Berlin", "de-DE", "52.5,13.4"), r.Geo);
         Assert.Null(r.Reason);
         // Hostname sent to the proxy, not resolved locally; credentials checked by the proxy.
         Assert.Equal(new[] { new SocksHit("localhost", api.Port, "alice") }, socks.Log.ToArray());

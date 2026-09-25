@@ -133,7 +133,7 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     """
     # Lazy import to avoid a circular import at module load (this module is imported by __init__).
     from . import _acquire_lease_from_kwargs, _prepare_or_release, _win_av_retry
-    from ._fonts import linux_font_env
+    from ._fonts import linux_font_env, linux_locale_env
     from ._geometry import fit_served_window, served_geometry, validate_window_size
     from ._launchopts import serve_needs_no_sandbox
 
@@ -188,6 +188,7 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     launch_token = lease.bind_launch() if lease else None  # (file, release) or None; r23+ opt-in
     env = dict(os.environ)
     env.update(linux_font_env(exe))  # Linux: FONTCONFIG_FILE -> bundled font clones (no-op elsewhere)
+    env.update(linux_locale_env(args))  # Linux: UI locale from --lang (no-op elsewhere)
     if lease and lease.token:
         # The PRO engine's gate reads this once at startup and exits if it is missing or invalid.
         env["CLEARCOTE_RUN_TOKEN"] = lease.token

@@ -476,8 +476,8 @@ def _prepare(kwargs):
     # came from.
     args, _gate_notes = gate_engine_switches(exe, args, quiet=quiet)
     # Drop Playwright's default automation flag so the engine's AutomationControlled feature stays
-    # OFF (it otherwise flips navigator.webdriver-adjacent tells), and --enable-unsafe-swiftshader
-    # (see DEFAULT_IGNORED_ARGS). The control transport (--remote-debugging-pipe) is left intact.
+    # OFF (it otherwise flips navigator.webdriver-adjacent tells), --enable-unsafe-swiftshader and the
+    # headless --hide-scrollbars (see DEFAULT_IGNORED_ARGS). The control transport (--remote-debugging-pipe) is left intact.
     # Caller can override via their own ignore_default_args.
     # NOTE: launch_persistent_context sets this BEFORE the Widevine helper so that helper appends
     # --disable-component-update rather than clobbering the automation strip.
@@ -820,7 +820,7 @@ def launch(**kwargs):
     lease = _acquire_lease_from_kwargs(kwargs)  # opt-in; None in free mode
     # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
     exe, args, pw_kwargs, humanize, show_cursor, seed = _prepare_or_release(kwargs, lease)
-    apply_font_env(exe, pw_kwargs)  # Linux: point FONTCONFIG_FILE at the bundled font clones
+    apply_font_env(exe, pw_kwargs, args)  # Linux: bundled font clones + UI-locale LANGUAGE
     apply_shader_dialect(shader_dialect, pw_kwargs)  # after fonts: that helper rebuilds the env
     launch_token = lease.bind_launch() if lease else None  # (file, release) or None; r23+ opt-in
     if lease:  # inject CLEARCOTE_RUN_TOKEN (+ the r23+ opt-in token FILE) so the gate lets it launch
@@ -864,7 +864,7 @@ def launch_persistent_context(user_data_dir, **kwargs):
     lease = _acquire_lease_from_kwargs(kwargs)  # opt-in; None in free mode
     # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
     exe, args, pw_kwargs, humanize, show_cursor, seed = _prepare_or_release(kwargs, lease)
-    apply_font_env(exe, pw_kwargs)  # Linux: point FONTCONFIG_FILE at the bundled font clones
+    apply_font_env(exe, pw_kwargs, args)  # Linux: bundled font clones + UI-locale LANGUAGE
     apply_shader_dialect(shader_dialect, pw_kwargs)  # after fonts: that helper rebuilds the env
     launch_token = lease.bind_launch() if lease else None  # (file, release) or None; r23+ opt-in
     if lease:  # inject CLEARCOTE_RUN_TOKEN (+ the r23+ opt-in token FILE) so the gate lets it launch

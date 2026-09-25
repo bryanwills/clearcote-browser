@@ -4,6 +4,7 @@
 import { gzipSync } from "node:zlib";
 import { existsSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { resolveLanguages } from "./languages.js";
 
 export interface FingerprintOptions {
   /**
@@ -411,6 +412,20 @@ const LOCALE_TZ: Record<string, string> = {
   "ko-KR": "Asia/Seoul", "zh-CN": "Asia/Shanghai", "zh-TW": "Asia/Taipei",
   "ru-RU": "Europe/Moscow", "tr-TR": "Europe/Istanbul", "ar-SA": "Asia/Riyadh",
   "hi-IN": "Asia/Kolkata", "id-ID": "Asia/Jakarta",
+  "en-IN": "Asia/Kolkata", "en-ZA": "Africa/Johannesburg", "en-SG": "Asia/Singapore",
+  "en-PH": "Asia/Manila", "fil-PH": "Asia/Manila", "de-CH": "Europe/Zurich",
+  "fr-CH": "Europe/Zurich", "it-CH": "Europe/Zurich", "fr-CA": "America/Toronto",
+  "fr-BE": "Europe/Brussels", "nl-BE": "Europe/Brussels", "es-AR": "America/Argentina/Buenos_Aires",
+  "es-CL": "America/Santiago", "es-CO": "America/Bogota", "es-US": "America/Los_Angeles",
+  "uk-UA": "Europe/Kyiv", "nb-NO": "Europe/Oslo", "da-DK": "Europe/Copenhagen",
+  "fi-FI": "Europe/Helsinki", "cs-CZ": "Europe/Prague", "ro-RO": "Europe/Bucharest",
+  "hu-HU": "Europe/Budapest", "el-GR": "Europe/Athens", "he-IL": "Asia/Jerusalem",
+  "ar-AE": "Asia/Dubai", "ar-EG": "Africa/Cairo", "zh-HK": "Asia/Hong_Kong",
+  "zh-SG": "Asia/Singapore", "th-TH": "Asia/Bangkok", "vi-VN": "Asia/Ho_Chi_Minh",
+  "ms-MY": "Asia/Kuala_Lumpur", "bg-BG": "Europe/Sofia", "hr-HR": "Europe/Zagreb",
+  "sk-SK": "Europe/Bratislava", "sl-SI": "Europe/Ljubljana", "sr-RS": "Europe/Belgrade",
+  "lt-LT": "Europe/Vilnius", "lv-LV": "Europe/Riga", "et-EE": "Europe/Tallinn",
+  "ca-ES": "Europe/Madrid", "es-419": "America/Mexico_City",
 };
 
 /**
@@ -420,7 +435,11 @@ const LOCALE_TZ: Record<string, string> = {
  */
 export function defaultTimezone(primaryLang: string): string | undefined {
   if (!primaryLang) return undefined;
-  const tag = primaryLang.trim();
+  let tag = primaryLang.trim().replace(/_/g, "-");
+  const parts = tag.split("-");
+  if (parts.length >= 2 && parts[parts.length - 1].length === 2) {
+    tag = `${parts[0].toLowerCase()}-${parts[parts.length - 1].toUpperCase()}`; // de-at / de_AT / zh-Hant-TW -> de-AT / zh-TW
+  }
   if (LOCALE_TZ[tag]) return LOCALE_TZ[tag];
   const lang = tag.split("-")[0].toLowerCase();
   for (const [key, tz] of Object.entries(LOCALE_TZ)) {
@@ -440,10 +459,9 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
     args.push("--fingerprint-passthrough");
     if (o.timezone) args.push(`--timezone=${o.timezone}`);
     if (o.acceptLanguage) {
-      const clean = cleanAcceptLanguage(String(o.acceptLanguage));
-      args.push(`--accept-lang=${clean}`);
-      const primary = clean.split(",")[0];
-      if (primary) args.push(`--lang=${primary}`);
+      const [accept, uiLocale] = resolveLanguages(cleanAcceptLanguage(String(o.acceptLanguage)));
+      args.push(`--accept-lang=${accept}`);
+      if (uiLocale) args.push(`--lang=${uiLocale}`);
     }
     if (o.webrtcIp) args.push(`--webrtc-ip=${o.webrtcIp}`);
     return args;
@@ -505,20 +523,24 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
   // Always send a coherent Accept-Language. Without --accept-lang Chromium falls back to the
   // build/OS locale, which can leak a language that mismatches the proxy's country/timezone
   // (e.g. en-GB on a US IP) — a geo-inconsistency tell. Prefer an explicit value, then an imported
-  // profile's languages, then en-US,en (the common Chrome default; set acceptLanguage or geoip to
+  // profile's languages, then en-US (the common Chrome default; set acceptLanguage or geoip to
   // match the proxy region).
   const acceptLanguage =
     o.acceptLanguage ||
     (o.fingerprintProfile ? profileAcceptLanguage(o.fingerprintProfile) : undefined) ||
-    "en-US,en";
+    "en-US";
   const cleanLang = cleanAcceptLanguage(String(acceptLanguage));
-  args.push(`--accept-lang=${cleanLang}`);
-  // Also pin the UI/ICU locale to the PRIMARY Accept-Language tag, so Intl.DateTimeFormat /
-  // NumberFormat / Collator (main thread AND workers) resolve to the same locale as
-  // navigator.language. Without --lang, Chromium falls back to the build/OS locale (e.g. en-GB on an
-  // en-US persona) — a locale-incoherence tell auditors flag (navigator.language=en-US but Intl=en-GB).
+  // One tag is an OS locale and becomes Chrome's own default list for it (de-AT ->
+  // de-DE,de,en-US,en); a list is kept as given. See ./languages.ts resolveLanguages.
+  const [accept, uiLocale] = resolveLanguages(cleanLang);
+  args.push(`--accept-lang=${accept}`);
+  // Also pin the UI locale (--lang), which Chrome resolves the way it resolves the OS locale and
+  // which drives Intl.DateTimeFormat / NumberFormat / Collator (main thread AND workers). Without it,
+  // Chromium falls back to the build/OS locale (e.g. en-GB on an en-US persona) — a
+  // locale-incoherence tell. Genuine Chrome's Intl is the UI locale: "de", not "de-DE".
+  if (uiLocale) args.push(`--lang=${uiLocale}`);
+  // The timezone default keys off the caller's own first tag: de-AT -> Europe/Vienna.
   const primaryLang = cleanLang.split(",")[0];
-  if (primaryLang) args.push(`--lang=${primaryLang}`);
   // Default the timezone to one coherent with the persona locale when none is set (and geoip didn't
   // resolve one), so a server/container run doesn't leak the host's UTC (a datacenter tell) while
   // navigator.language says e.g. en-US. geoip=True or an explicit timezone= override this.

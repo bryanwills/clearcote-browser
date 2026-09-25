@@ -38,14 +38,37 @@ def linux_font_env(exe_path):
         return {}  # never block a launch on font wiring
 
 
-def apply_font_env(exe_path, pw_kwargs):
-    """Merge the bundled-font FONTCONFIG_FILE into ``pw_kwargs['env']`` for Playwright's launch.
+def linux_locale_env(args, platform=None):
+    """Return ``{"LANGUAGE": <ui locale>}`` on Linux when ``args`` pin a UI locale with ``--lang``.
+
+    Chrome on Linux takes its UI locale (browser strings such as a form's validationMessage, and
+    before r29 also Intl) from the environment -- LANGUAGE, LC_ALL, LC_MESSAGES, LANG, in GLib's
+    order -- and engines before 153 r29 ignore ``--lang`` there, so a German persona on a Linux host
+    still spoke English. LANGUAGE is read first and only steers message catalogues, so it fixes that
+    without touching the C library locale (LANG/LC_* would also change number parsing and
+    fontconfig's default language). ``de`` -> ``de``, ``en-GB`` -> ``en_GB``.
+    """
+    if (platform or sys.platform) != "linux":
+        return {}
+    lang = None
+    for arg in args or ():
+        if isinstance(arg, str) and arg.startswith("--lang="):
+            lang = arg.split("=", 1)[1].strip()  # the last one wins, as in Chromium
+    if not lang:
+        return {}
+    return {"LANGUAGE": lang.replace("-", "_")}
+
+
+def apply_font_env(exe_path, pw_kwargs, args=()):
+    """Merge the bundled-font FONTCONFIG_FILE (and, from ``args``, the Linux UI-locale LANGUAGE --
+    see linux_locale_env) into ``pw_kwargs['env']`` for Playwright's launch.
 
     Playwright replaces the child env when ``env`` is set, so we include ``os.environ`` too.
-    Precedence: os.environ < bundled fonts < caller-supplied env. No-op when there's nothing
+    Precedence: os.environ < bundled fonts + locale < caller-supplied env. No-op when there's nothing
     to add (leaves ``pw_kwargs`` untouched so Playwright uses the default env).
     """
-    font_env = linux_font_env(exe_path)
+    font_env = dict(linux_font_env(exe_path))
+    font_env.update(linux_locale_env(args))
     user_env = pw_kwargs.get("env")
     if not font_env and not user_env:
         return

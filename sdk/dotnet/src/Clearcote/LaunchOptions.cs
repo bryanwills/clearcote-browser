@@ -96,8 +96,8 @@ public class LaunchOptions : FingerprintOptions
     public string? Channel { get; set; }
     /// Slow down operations by N ms (Playwright slowMo).
     public float? SlowMo { get; set; }
-    /// Override the default strip of Playwright's <c>--enable-automation</c> and
-    /// <c>--enable-unsafe-swiftshader</c> (Playwright ignoreDefaultArgs). See <see cref="LaunchOpts.DefaultIgnoredArgs"/>.
+    /// Override the default strip of Playwright's <c>--enable-automation</c>,
+    /// <c>--enable-unsafe-swiftshader</c> and <c>--hide-scrollbars</c> (Playwright ignoreDefaultArgs). See <see cref="LaunchOpts.DefaultIgnoredArgs"/>.
     public IReadOnlyList<string>? IgnoreDefaultArgs { get; set; }
     /// Emulated viewport for the context. Leave unset to take the SDK's default: NoViewport when
     /// headed or when a persona owns the screen, otherwise a screen-fitted viewport (see

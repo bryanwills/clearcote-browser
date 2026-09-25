@@ -47,8 +47,9 @@ describe("fingerprintArgs", () => {
   });
 
   it("derives --lang from the primary Accept-Language tag (Intl/locale coherence)", () => {
-    expect(fingerprintArgs({ acceptLanguage: "fr-FR,fr" })).toContain("--lang=fr-FR");
-    expect(fingerprintArgs({ acceptLanguage: "de-DE,de;q=0.7,en;q=0.3" })).toContain("--lang=de-DE");
+    // --lang is the UI locale Chrome resolves from the first tag (Intl is "fr", not "fr-FR")
+    expect(fingerprintArgs({ acceptLanguage: "fr-FR,fr" })).toContain("--lang=fr");
+    expect(fingerprintArgs({ acceptLanguage: "de-DE,de;q=0.7,en;q=0.3" })).toContain("--lang=de");
   });
 
   it("maps every fingerprint option to its Chromium switch", () => {
@@ -217,7 +218,8 @@ describe("default timezone (locale-coherent, no UTC leak)", () => {
     expect(defaultTimezone("en-US")).toBe("America/New_York");
     expect(defaultTimezone("de-DE")).toBe("Europe/Berlin");
     expect(defaultTimezone("ja-JP")).toBe("Asia/Tokyo");
-    expect(defaultTimezone("en-ZA")).toBe("America/New_York"); // en-* subtag fallback -> the en default
+    expect(defaultTimezone("en-ZA")).toBe("Africa/Johannesburg");
+    expect(defaultTimezone("en-JM")).toBe("America/New_York"); // en-* subtag fallback -> the en default
     expect(defaultTimezone("xx-YY")).toBe("America/New_York"); // ultimate fallback
   });
   it("emits a locale-coherent --timezone by default; explicit + geoip win", () => {

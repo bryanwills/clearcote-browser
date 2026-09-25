@@ -28,8 +28,9 @@ public class FingerprintTests
     public void Lang_derived_from_primary_accept_language_tag()
     {
         using var _ = new Sandbox().Os("windows");
-        Assert.Contains("--lang=fr-FR", Fingerprint.Args(new FingerprintOptions { AcceptLanguage = "fr-FR,fr" }));
-        Assert.Contains("--lang=de-DE", Fingerprint.Args(new FingerprintOptions { AcceptLanguage = "de-DE,de;q=0.7,en;q=0.3" }));
+        // --lang is the UI locale Chrome resolves from the first tag (Intl is "fr", not "fr-FR")
+        Assert.Contains("--lang=fr", Fingerprint.Args(new FingerprintOptions { AcceptLanguage = "fr-FR,fr" }));
+        Assert.Contains("--lang=de", Fingerprint.Args(new FingerprintOptions { AcceptLanguage = "de-DE,de;q=0.7,en;q=0.3" }));
     }
 
     [Fact]
@@ -160,7 +161,8 @@ public class FingerprintTests
     [InlineData("en-US", "America/New_York")]
     [InlineData("de-DE", "Europe/Berlin")]
     [InlineData("ja-JP", "Asia/Tokyo")]
-    [InlineData("en-ZA", "America/New_York")]
+    [InlineData("en-ZA", "Africa/Johannesburg")]
+    [InlineData("en-JM", "America/New_York")]
     [InlineData("xx-YY", "America/New_York")]
     public void DefaultTimezone(string lang, string tz)
         => Assert.Equal(tz, Fingerprint.DefaultTimezone(lang));

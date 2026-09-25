@@ -37,13 +37,33 @@ export function linuxFontEnv(exePath: string): Record<string, string> {
 type EnvMap = { [key: string]: string | undefined };
 
 /**
- * Build the `env` to pass to Playwright's launch so the bundled fonts resolve.
+ * `{ LANGUAGE: <ui locale> }` on Linux when `args` pin a UI locale with `--lang`, else `{}`.
+ *
+ * Chrome on Linux takes its UI locale (browser strings such as a form's validationMessage, and
+ * before r29 also Intl) from the environment -- LANGUAGE, LC_ALL, LC_MESSAGES, LANG, in GLib's
+ * order -- and engines before 153 r29 ignore `--lang` there, so a German persona on a Linux host
+ * still spoke English. LANGUAGE is read first and only steers message catalogues, so it fixes that
+ * without touching the C library locale (LANG/LC_* would also change number parsing and
+ * fontconfig's default language). `de` -> `de`, `en-GB` -> `en_GB`.
+ */
+export function linuxLocaleEnv(args: readonly string[] | undefined, platform: string = process.platform): Record<string, string> {
+  if (platform !== "linux") return {};
+  let lang: string | undefined;
+  for (const arg of args ?? []) {
+    if (typeof arg === "string" && arg.startsWith("--lang=")) lang = arg.slice("--lang=".length).trim(); // last wins, as in Chromium
+  }
+  return lang ? { LANGUAGE: lang.replace(/-/g, "_") } : {};
+}
+
+/**
+ * Build the `env` to pass to Playwright's launch so the bundled fonts resolve (and, from `args`,
+ * the Linux UI-locale LANGUAGE -- see linuxLocaleEnv).
  * Merges process.env (Playwright replaces the env when `env` is set, so we must include it),
- * the bundled-font FONTCONFIG_FILE, then any caller-supplied `env` (caller wins).
+ * the bundled-font FONTCONFIG_FILE + locale, then any caller-supplied `env` (caller wins).
  * Returns `undefined` when there is nothing to add (preserve Playwright's default env).
  */
-export function fontLaunchEnv(exePath: string, userEnv?: EnvMap): EnvMap | undefined {
-  const fontEnv = linuxFontEnv(exePath);
+export function fontLaunchEnv(exePath: string, userEnv?: EnvMap, args?: readonly string[]): EnvMap | undefined {
+  const fontEnv = { ...linuxFontEnv(exePath), ...linuxLocaleEnv(args) };
   if (Object.keys(fontEnv).length === 0 && !userEnv) return undefined;
   return { ...process.env, ...fontEnv, ...(userEnv ?? {}) };
 }

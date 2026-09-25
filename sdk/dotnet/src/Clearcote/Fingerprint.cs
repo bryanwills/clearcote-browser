@@ -136,6 +136,20 @@ public static class Fingerprint
         ["ko-KR"] = "Asia/Seoul", ["zh-CN"] = "Asia/Shanghai", ["zh-TW"] = "Asia/Taipei",
         ["ru-RU"] = "Europe/Moscow", ["tr-TR"] = "Europe/Istanbul", ["ar-SA"] = "Asia/Riyadh",
         ["hi-IN"] = "Asia/Kolkata", ["id-ID"] = "Asia/Jakarta",
+        ["en-IN"] = "Asia/Kolkata", ["en-ZA"] = "Africa/Johannesburg", ["en-SG"] = "Asia/Singapore",
+        ["en-PH"] = "Asia/Manila", ["fil-PH"] = "Asia/Manila", ["de-CH"] = "Europe/Zurich",
+        ["fr-CH"] = "Europe/Zurich", ["it-CH"] = "Europe/Zurich", ["fr-CA"] = "America/Toronto",
+        ["fr-BE"] = "Europe/Brussels", ["nl-BE"] = "Europe/Brussels", ["es-AR"] = "America/Argentina/Buenos_Aires",
+        ["es-CL"] = "America/Santiago", ["es-CO"] = "America/Bogota", ["es-US"] = "America/Los_Angeles",
+        ["uk-UA"] = "Europe/Kyiv", ["nb-NO"] = "Europe/Oslo", ["da-DK"] = "Europe/Copenhagen",
+        ["fi-FI"] = "Europe/Helsinki", ["cs-CZ"] = "Europe/Prague", ["ro-RO"] = "Europe/Bucharest",
+        ["hu-HU"] = "Europe/Budapest", ["el-GR"] = "Europe/Athens", ["he-IL"] = "Asia/Jerusalem",
+        ["ar-AE"] = "Asia/Dubai", ["ar-EG"] = "Africa/Cairo", ["zh-HK"] = "Asia/Hong_Kong",
+        ["zh-SG"] = "Asia/Singapore", ["th-TH"] = "Asia/Bangkok", ["vi-VN"] = "Asia/Ho_Chi_Minh",
+        ["ms-MY"] = "Asia/Kuala_Lumpur", ["bg-BG"] = "Europe/Sofia", ["hr-HR"] = "Europe/Zagreb",
+        ["sk-SK"] = "Europe/Bratislava", ["sl-SI"] = "Europe/Ljubljana", ["sr-RS"] = "Europe/Belgrade",
+        ["lt-LT"] = "Europe/Vilnius", ["lv-LV"] = "Europe/Riga", ["et-EE"] = "Europe/Tallinn",
+        ["ca-ES"] = "Europe/Madrid", ["es-419"] = "America/Mexico_City",
     };
 
     // Coherent Windows-plausible desktop/laptop metadata bundles, indexed by a hash of the seed:
@@ -206,7 +220,10 @@ public static class Fingerprint
     public static string? DefaultTimezone(string primaryLang)
     {
         if (string.IsNullOrEmpty(primaryLang)) return null;
-        var tag = primaryLang.Trim();
+        var tag = primaryLang.Trim().Replace('_', '-');
+        var parts = tag.Split('-');
+        if (parts.Length >= 2 && parts[^1].Length == 2)
+            tag = $"{parts[0].ToLowerInvariant()}-{parts[^1].ToUpperInvariant()}"; // de-at / de_AT / zh-Hant-TW -> de-AT / zh-TW
         if (LocaleTz.TryGetValue(tag, out var tz)) return tz;
         var lang = tag.Split('-')[0].ToLowerInvariant();
         foreach (var (key, value) in LocaleTz)
@@ -301,10 +318,9 @@ public static class Fingerprint
             if (!string.IsNullOrEmpty(o.Timezone)) pt.Add($"--timezone={o.Timezone}");
             if (!string.IsNullOrEmpty(o.AcceptLanguage))
             {
-                var clean = CleanAcceptLanguage(o.AcceptLanguage);
-                pt.Add($"--accept-lang={clean}");
-                var primary = clean.Split(',')[0];
-                if (primary.Length > 0) pt.Add($"--lang={primary}");
+                var (ptAccept, ptUiLocale) = Languages.ResolveLanguages(CleanAcceptLanguage(o.AcceptLanguage));
+                pt.Add($"--accept-lang={ptAccept}");
+                if (!string.IsNullOrEmpty(ptUiLocale)) pt.Add($"--lang={ptUiLocale}");
             }
             if (!string.IsNullOrEmpty(o.WebrtcIp)) pt.Add($"--webrtc-ip={o.WebrtcIp}");
             return pt;
@@ -354,17 +370,22 @@ public static class Fingerprint
         Set("fingerprint-storage-quota", o.StorageQuota);
         Set("timezone", o.Timezone);
 
-        // Always send a coherent Accept-Language: explicit > imported-profile languages > en-US,en.
+        // Always send a coherent Accept-Language: explicit > imported-profile languages > en-US.
         var acceptLanguage = o.AcceptLanguage;
         if (string.IsNullOrEmpty(acceptLanguage) && o.FingerprintProfile is not null)
             acceptLanguage = ProfileAcceptLanguage(o.FingerprintProfile);
-        if (string.IsNullOrEmpty(acceptLanguage)) acceptLanguage = "en-US,en";
+        if (string.IsNullOrEmpty(acceptLanguage)) acceptLanguage = "en-US";
         var cleanLang = CleanAcceptLanguage(acceptLanguage);
-        args.Add($"--accept-lang={cleanLang}");
+        // One tag is an OS locale and becomes Chrome's own default list for it (de-AT ->
+        // de-DE,de,en-US,en); a list is kept as given. See Languages.ResolveLanguages.
+        var (accept, uiLocale) = Languages.ResolveLanguages(cleanLang);
+        args.Add($"--accept-lang={accept}");
 
-        // Pin the UI/ICU locale to the primary tag so Intl resolves to the same locale as navigator.language.
+        // Pin the UI locale (--lang), which Chrome resolves the way it resolves the OS locale and which
+        // drives Intl (main thread AND workers). Genuine Chrome's Intl is the UI locale: "de", not "de-DE".
+        if (!string.IsNullOrEmpty(uiLocale)) args.Add($"--lang={uiLocale}");
+        // The timezone default keys off the caller's own first tag: de-AT -> Europe/Vienna.
         var primaryLang = cleanLang.Split(',')[0];
-        if (!string.IsNullOrEmpty(primaryLang)) args.Add($"--lang={primaryLang}");
 
         // Default a locale-coherent timezone when none is set (avoid leaking host UTC on servers).
         if (string.IsNullOrEmpty(o.Timezone))

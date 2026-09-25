@@ -98,7 +98,8 @@ public static class Clearcote
         // Bind a per-launch run-token file so a supporting engine (r23+) can stop a running free
         // browser once the token stops advancing; passed ALONGSIDE CLEARCOTE_RUN_TOKEN. Inert in free mode.
         var launchToken = lease?.BindLaunch();
-        var env = lease is not null ? License.WithRunToken(lease.Token, options.Env, launchToken?.File) : options.Env;
+        var callerEnv = Languages.ApplyLinuxLanguage(args, options.Env);  // Linux: UI locale from --lang
+        var env = lease is not null ? License.WithRunToken(lease.Token, callerEnv, launchToken?.File) : callerEnv;
         env = ShaderDialect.Apply(options.ShaderDialect, env);  // opt-in; no-op when unset
 
         // Headless: the display is browser-wide, so it applies even here (see the geometry caveat).
@@ -198,7 +199,8 @@ public static class Clearcote
         // Bind a per-launch run-token file (r23+ engine online-enforcement opt-in); passed ALONGSIDE
         // CLEARCOTE_RUN_TOKEN. Inert in free mode.
         var launchToken = lease?.BindLaunch();
-        var env = lease is not null ? License.WithRunToken(lease.Token, options.Env, launchToken?.File) : options.Env;
+        var callerEnv = Languages.ApplyLinuxLanguage(args, options.Env);  // Linux: UI locale from --lang
+        var env = lease is not null ? License.WithRunToken(lease.Token, callerEnv, launchToken?.File) : callerEnv;
         env = ShaderDialect.Apply(options.ShaderDialect, env);  // opt-in; no-op when unset
 
         var geometry = Geometry.ResolveHeadless(
@@ -300,6 +302,9 @@ public static class Clearcote
             // only the one variable needs setting.
             var dialect = ShaderDialect.Normalize(options.ShaderDialect);
             if (dialect is not null) psi.Environment[ShaderDialect.EnvVar] = dialect;
+            // Linux: the UI locale from --lang (engines before 153 r29 read it only from the env).
+            var language = Languages.LinuxLanguageEnv(engineArgs);
+            if (language is not null) psi.Environment["LANGUAGE"] = language;
             var p = Process.Start(psi) ?? throw new Exception("clearcote serve: failed to start the engine process.");
             return Task.FromResult(p);
         }, exe)).ConfigureAwait(false);

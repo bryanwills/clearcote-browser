@@ -339,7 +339,10 @@ def resolve_proxy(proxy, engine_supports_proxy_auth=False):
 # Stripping it on its own is NOT safe: measured on a GPU-less Linux host, a HEADED launch then has no
 # WebGL at all. It is only removed together with gpu_blocklist_args(), which restores WebGL through
 # the normal GPU path. A caller's own ``ignore_default_args`` always wins.
-DEFAULT_IGNORED_ARGS = ("--enable-automation", "--enable-unsafe-swiftshader")
+# ``--hide-scrollbars`` is added by Playwright to every HEADLESS launch; with it the page measures
+# 0 px scrollbars, while genuine Chrome shows 15 px on Windows -- headed OR plain ``--headless=new``
+# (measured on Chrome 154). Stripping it only restores Chrome's own default; it is a no-op headed.
+DEFAULT_IGNORED_ARGS = ("--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars")
 
 
 def gpu_blocklist_args(headed, platform=None, user_args=()):

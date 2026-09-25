@@ -3,16 +3,16 @@ import { acceptLanguageForCountry, resolveGeo } from "../src/geoip.js";
 
 describe("acceptLanguageForCountry", () => {
   it("maps known countries (case-insensitive)", () => {
-    expect(acceptLanguageForCountry("US")).toBe("en-US,en");
-    expect(acceptLanguageForCountry("de")).toBe("de-DE,de,en");
-    expect(acceptLanguageForCountry("BR")).toBe("pt-BR,pt,en");
-    expect(acceptLanguageForCountry("JP")).toBe("ja-JP,ja,en");
+    expect(acceptLanguageForCountry("US")).toBe("en-US");
+    expect(acceptLanguageForCountry("de")).toBe("de-DE");
+    expect(acceptLanguageForCountry("BR")).toBe("pt-BR");
+    expect(acceptLanguageForCountry("JP")).toBe("ja-JP");
   });
 
-  it("falls back to en-US,en for unknown / empty", () => {
-    expect(acceptLanguageForCountry("ZZ")).toBe("en-US,en");
-    expect(acceptLanguageForCountry("")).toBe("en-US,en");
-    expect(acceptLanguageForCountry(undefined)).toBe("en-US,en");
+  it("falls back to en-US for unknown / empty", () => {
+    expect(acceptLanguageForCountry("ZZ")).toBe("en-US");
+    expect(acceptLanguageForCountry("")).toBe("en-US");
+    expect(acceptLanguageForCountry(undefined)).toBe("en-US");
   });
 
   it("never returns ;q= weights (Chromium --accept-lang would DCHECK)", () => {

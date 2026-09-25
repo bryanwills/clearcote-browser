@@ -211,9 +211,12 @@ public static class LaunchOpts
     /// <c>--enable-unsafe-swiftshader</c> is added by Playwright (1.49+) to every Chromium launch; it lets
     /// WebGL fall back to SwiftShader software rendering, which real Chrome no longer does for WebGL.
     /// Stripping it on its own is NOT safe: on a GPU-less Linux host a HEADED launch then has no WebGL
-    /// at all, so it is only removed together with <see cref="GpuBlocklistArgs"/>. A caller's own
-    /// IgnoreDefaultArgs always wins.</para>
-    public static readonly IReadOnlyList<string> DefaultIgnoredArgs = new[] { "--enable-automation", "--enable-unsafe-swiftshader" };
+    /// at all, so it is only removed together with <see cref="GpuBlocklistArgs"/>.
+    /// <c>--hide-scrollbars</c> is added by Playwright to every HEADLESS launch; with it the page measures
+    /// 0 px scrollbars, while genuine Chrome shows 15 px on Windows -- headed OR plain <c>--headless=new</c>
+    /// (measured on Chrome 154). Stripping it only restores Chrome's own default; it is a no-op headed.
+    /// A caller's own IgnoreDefaultArgs always wins.</para>
+    public static readonly IReadOnlyList<string> DefaultIgnoredArgs = new[] { "--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars" };
 
     /// <c>--ignore-gpu-blocklist</c> for headed launches and for every launch on Windows.
     ///

@@ -2,16 +2,17 @@ from clearcote.geoip import accept_language_for_country, resolve_geo
 
 
 def test_accept_language_for_country():
-    assert accept_language_for_country("US") == "en-US,en"
-    assert accept_language_for_country("de") == "de-DE,de,en"  # case-insensitive
-    assert accept_language_for_country("BR") == "pt-BR,pt,en"
-    assert accept_language_for_country("JP") == "ja-JP,ja,en"
+    # one OS-locale tag per country; launch() expands it to Chrome's own list (see test_languages)
+    assert accept_language_for_country("US") == "en-US"
+    assert accept_language_for_country("de") == "de-DE"  # case-insensitive
+    assert accept_language_for_country("BR") == "pt-BR"
+    assert accept_language_for_country("JP") == "ja-JP"
 
 
 def test_accept_language_fallback():
-    assert accept_language_for_country("ZZ") == "en-US,en"
-    assert accept_language_for_country("") == "en-US,en"
-    assert accept_language_for_country(None) == "en-US,en"
+    assert accept_language_for_country("ZZ") == "en-US"
+    assert accept_language_for_country("") == "en-US"
+    assert accept_language_for_country(None) == "en-US"
 
 
 def test_accept_language_has_no_q_weights():

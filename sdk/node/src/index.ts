@@ -760,12 +760,13 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
     // resolved lazily on cold checkout only (never per launch); telemetry, never gates the lease
     engineVersion: () => resolvedEngineVersion(version, !!resolveLicenseKey(licenseKey)),
   });
-  // On Linux, point FONTCONFIG_FILE at the bundled metric-compatible clones (Segoe UI, Arial, …).
-  const launchEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (pwOptions as PlaywrightLaunchOptions).env));
-  const launchToken = lease?.bindLaunch();
-  const runtimeEnv = lease ? withRunToken(lease.token, launchEnv, launchToken?.file) : launchEnv;
   const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? [], proxyOpt as PwProxy | undefined, socks5Udp,
     { exe, headed, quiet, allowThirdPartyCookies, transparentProxy });
+  // On Linux, point FONTCONFIG_FILE at the bundled metric-compatible clones (Segoe UI, Arial, …)
+  // and LANGUAGE at the persona's UI locale (after engineArgs: it reads their --lang).
+  const launchEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (pwOptions as PlaywrightLaunchOptions).env, engineArgs));
+  const launchToken = lease?.bindLaunch();
+  const runtimeEnv = lease ? withRunToken(lease.token, launchEnv, launchToken?.file) : launchEnv;
   // Headless: screen.* has to be handled alongside the viewport or the window reports a geometry no
   // real browser can (see ./geometry.ts). Probe a copy — viewport is a context option, which
   // chromium.launch() does not take — and carry the result to newPage/newContext. The display
@@ -774,9 +775,9 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
     ? null
     : applyHeadlessGeometry({ ...(pwOptions as Record<string, unknown>) }, fingerprint.fingerprint, engineArgs, fingerprint);
   const browser = await releaseLeaseOnFailure(lease, () => winAvRetry((exePath) => chromium.launch({
-    // Drop Playwright's --enable-automation (keeps AutomationControlled off) and
-    // --enable-unsafe-swiftshader (see DEFAULT_IGNORED_ARGS; paired with --ignore-gpu-blocklist in
-    // assembleArgs). Caller can override via ignoreDefaultArgs.
+    // Drop Playwright's --enable-automation (keeps AutomationControlled off), --enable-unsafe-swiftshader
+    // (see DEFAULT_IGNORED_ARGS; paired with --ignore-gpu-blocklist in assembleArgs) and the headless
+    // --hide-scrollbars. Caller can override via ignoreDefaultArgs.
     ignoreDefaultArgs: [...DEFAULT_IGNORED_ARGS],
     ...(pwOptions as PlaywrightLaunchOptions),
     executablePath: exePath,
@@ -849,11 +850,11 @@ export async function launchPersistentContext(
     // resolved lazily on cold checkout only (never per launch); telemetry, never gates the lease
     engineVersion: () => resolvedEngineVersion(version, !!resolveLicenseKey(licenseKey)),
   });
-  const ctxEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (opts as PlaywrightLaunchOptions).env));
-  const launchToken = lease?.bindLaunch();
-  const runtimeEnv = lease ? withRunToken(lease.token, ctxEnv, launchToken?.file) : ctxEnv;
   const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs, proxyOpt as PwProxy | undefined, socks5Udp,
     { exe, headed: opts.headless === false, quiet, allowThirdPartyCookies, transparentProxy });
+  const ctxEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (opts as PlaywrightLaunchOptions).env, engineArgs));
+  const launchToken = lease?.bindLaunch();
+  const runtimeEnv = lease ? withRunToken(lease.token, ctxEnv, launchToken?.file) : ctxEnv;
   // headless: the persona owns screen when it is running, so only the window needs fitting; with no
   // persona the SDK sets the headless display itself (see ./geometry.ts). Headed already set
   // viewport: null.
@@ -1088,7 +1089,7 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
     engineVersion: () => resolvedEngineVersion(version, !!resolveLicenseKey(licenseKey)),
   });
   const launchToken = lease?.bindLaunch();
-  const env = { ...process.env, ...(withShaderDialect(shaderDialect, fontLaunchEnv(exe, undefined)) ?? {}), ...(lease ? { CLEARCOTE_RUN_TOKEN: lease.token, ...(launchToken ? { CLEARCOTE_RUN_TOKEN_FILE: launchToken.file } : {}) } : {}) };
+  const env = { ...process.env, ...(withShaderDialect(shaderDialect, fontLaunchEnv(exe, undefined, engineArgs)) ?? {}), ...(lease ? { CLEARCOTE_RUN_TOKEN: lease.token, ...(launchToken ? { CLEARCOTE_RUN_TOKEN_FILE: launchToken.file } : {}) } : {}) };
   // Launched DIRECTLY (no Playwright) => no --enable-automation => navigator.webdriver stays false.
   // Wrap in winAvRetry so a just-extracted binary survives the Windows SxS/AV first-launch race
   // ("spawn UNKNOWN"), same as launch(): warm + back off + retry, then recover from a fresh copy.

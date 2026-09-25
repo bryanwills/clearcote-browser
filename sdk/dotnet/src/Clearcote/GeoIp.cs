@@ -159,26 +159,27 @@ public static class GeoIp
         if (string.IsNullOrEmpty(fp.WebrtcIp) && !string.IsNullOrEmpty(geo.Ip)) fp.WebrtcIp = geo.Ip;
     }
 
-    // country (ISO-3166 alpha-2) -> Accept-Language. Plain comma list (Chromium adds ;q= weights).
-    private static readonly Dictionary<string, string> CountryLang = new()
+    // country (ISO-3166 alpha-2) -> the OS locale a machine there most plausibly runs. ONE tag, not a
+    // list: the launch expands it the way Chrome does (DE -> de-DE -> UI "de", languages de-DE,de,en-US,en;
+    // CA -> en-CA -> en-GB,en-US,en; MY -> ms-MY -> Intl "ms" with en-US,en). See Languages.ResolveLanguages.
+    // Multi-language countries take the majority language (BE nl, CH de, CA en, IN en).
+    public static readonly IReadOnlyDictionary<string, string> CountryLang = new Dictionary<string, string>
     {
-        ["US"] = "en-US,en", ["GB"] = "en-GB,en", ["CA"] = "en-CA,en,fr-CA", ["AU"] = "en-AU,en", ["NZ"] = "en-NZ,en",
-        ["IE"] = "en-IE,en", ["IN"] = "en-IN,en,hi", ["ZA"] = "en-ZA,en", ["SG"] = "en-SG,en",
-        ["DE"] = "de-DE,de,en", ["AT"] = "de-AT,de,en", ["CH"] = "de-CH,de,fr,en",
-        ["FR"] = "fr-FR,fr,en", ["BE"] = "nl-BE,nl,fr,en", ["NL"] = "nl-NL,nl,en",
-        ["ES"] = "es-ES,es,en", ["MX"] = "es-MX,es,en", ["AR"] = "es-AR,es,en", ["CL"] = "es-CL,es,en",
-        ["CO"] = "es-CO,es,en", ["PT"] = "pt-PT,pt,en", ["BR"] = "pt-BR,pt,en",
-        ["IT"] = "it-IT,it,en", ["PL"] = "pl-PL,pl,en", ["RU"] = "ru-RU,ru,en", ["UA"] = "uk-UA,uk,ru,en",
-        ["SE"] = "sv-SE,sv,en", ["NO"] = "nb-NO,no,en", ["DK"] = "da-DK,da,en", ["FI"] = "fi-FI,fi,en",
-        ["CZ"] = "cs-CZ,cs,en", ["RO"] = "ro-RO,ro,en", ["HU"] = "hu-HU,hu,en", ["GR"] = "el-GR,el,en",
-        ["TR"] = "tr-TR,tr,en", ["IL"] = "he-IL,he,en", ["SA"] = "ar-SA,ar,en", ["AE"] = "ar-AE,ar,en",
-        ["EG"] = "ar-EG,ar,en", ["JP"] = "ja-JP,ja,en", ["KR"] = "ko-KR,ko,en",
-        ["CN"] = "zh-CN,zh,en", ["HK"] = "zh-HK,zh,en", ["TW"] = "zh-TW,zh,en",
-        ["TH"] = "th-TH,th,en", ["VN"] = "vi-VN,vi,en", ["ID"] = "id-ID,id,en",
-        ["MY"] = "ms-MY,ms,en", ["PH"] = "en-PH,en,fil",
+        ["US"] = "en-US", ["GB"] = "en-GB", ["CA"] = "en-CA", ["AU"] = "en-AU", ["NZ"] = "en-NZ", ["IE"] = "en-IE",
+        ["IN"] = "en-IN", ["ZA"] = "en-ZA", ["SG"] = "en-SG", ["PH"] = "en-PH",
+        ["DE"] = "de-DE", ["AT"] = "de-AT", ["CH"] = "de-CH", ["FR"] = "fr-FR", ["BE"] = "nl-BE", ["NL"] = "nl-NL",
+        ["ES"] = "es-ES", ["MX"] = "es-MX", ["AR"] = "es-AR", ["CL"] = "es-CL", ["CO"] = "es-CO", ["PE"] = "es-PE",
+        ["VE"] = "es-VE", ["EC"] = "es-EC", ["UY"] = "es-UY", ["PT"] = "pt-PT", ["BR"] = "pt-BR",
+        ["IT"] = "it-IT", ["PL"] = "pl-PL", ["RU"] = "ru-RU", ["UA"] = "uk-UA", ["SE"] = "sv-SE", ["NO"] = "nb-NO",
+        ["DK"] = "da-DK", ["FI"] = "fi-FI", ["CZ"] = "cs-CZ", ["SK"] = "sk-SK", ["RO"] = "ro-RO", ["HU"] = "hu-HU",
+        ["GR"] = "el-GR", ["BG"] = "bg-BG", ["HR"] = "hr-HR", ["SI"] = "sl-SI", ["RS"] = "sr-RS", ["LT"] = "lt-LT",
+        ["LV"] = "lv-LV", ["EE"] = "et-EE", ["TR"] = "tr-TR", ["IL"] = "he-IL", ["SA"] = "ar-SA", ["AE"] = "ar-AE",
+        ["EG"] = "ar-EG", ["JP"] = "ja-JP", ["KR"] = "ko-KR", ["CN"] = "zh-CN", ["HK"] = "zh-HK", ["TW"] = "zh-TW",
+        ["TH"] = "th-TH", ["VN"] = "vi-VN", ["ID"] = "id-ID", ["MY"] = "ms-MY",
     };
 
-    /// Accept-Language for an ISO country code (en-US,en when unknown).
+    /// The OS-locale tag for an ISO country code ("DE" -> "de-DE"), en-US when unknown. It is a valid one-tag
+    /// Accept-Language; the launch turns it into Chrome's own language list.
     public static string AcceptLanguageForCountry(string? cc)
-        => cc is { Length: > 0 } && CountryLang.TryGetValue(cc.ToUpperInvariant(), out var v) ? v : "en-US,en";
+        => cc is { Length: > 0 } && CountryLang.TryGetValue(cc.ToUpperInvariant(), out var v) ? v : "en-US";
 }
