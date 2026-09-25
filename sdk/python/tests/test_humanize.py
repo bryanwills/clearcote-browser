@@ -88,3 +88,43 @@ def test_needs_shift_is_the_us_layout():
     from clearcote._humanize import _needs_shift
     assert all(_needs_shift(c) for c in 'AZ~!@#$%^&*()_+{}|:"<>?')
     assert not any(_needs_shift(c) for c in "az09`-=[];',./ \t\\\u00f6")
+
+
+class _DisabledLocator:
+    first = property(lambda self: self)
+
+    def wait_for(self, **kw):
+        pass
+
+    def scroll_into_view_if_needed(self, **kw):
+        pass
+
+    def is_enabled(self):
+        return False
+
+
+class _ClickPage(_SyncPage):
+    """A page whose element is disabled, so the humanized click falls back to Playwright's own."""
+
+    def __init__(self):
+        super().__init__()
+        self.native_clicks = []
+
+    def click(self, selector, **kw):
+        self.native_clicks.append((selector, kw))
+
+    def hover(self, selector, **kw):
+        self.native_clicks.append(("hover:" + selector, kw))
+
+    def locator(self, selector):
+        return _DisabledLocator()
+
+
+def test_click_fallback_reaches_playwright_once():
+    # 0.21.0-0.31.1: the fallback helper called itself, so every fallback raised RecursionError.
+    from clearcote._humanize import attach_humanize
+    page = _ClickPage()
+    attach_humanize(None, page, humanize=True)
+    page.click("#b", timeout=1234)
+    page.hover("#h")
+    assert page.native_clicks == [("#b", {"timeout": 1234}), ("hover:#h", {})]

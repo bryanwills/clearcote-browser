@@ -271,7 +271,7 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
             sync file: leaving placed False here makes the next wheel anchor jump the cursor away
             from the element the fallback click just left."""
             try:
-                return await _native(selector, options)
+                return await orig(selector, **options)
             finally:
                 st["placed"] = True
 

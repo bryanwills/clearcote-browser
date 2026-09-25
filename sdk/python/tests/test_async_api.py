@@ -268,3 +268,24 @@ async def test_humanize_types_without_shift_when_keyboard_has_no_down_up():
     await attach_humanize(None, page, humanize=True)
     await page.keyboard.type("Ab")
     assert [p for p in page.keyboard.presses if p in ("A", "b")] == ["A", "b"]
+
+
+
+class _DisabledLoc(_FakeLocator):
+    async def is_enabled(self):
+        return False
+
+
+async def test_humanize_click_fallback_reaches_playwright_once():
+    # 0.21.0-0.31.1: the fallback helper called itself, so every fallback raised RecursionError.
+    page = _FakePage()
+    page.loc = _DisabledLoc()
+    calls = []
+
+    async def native_click(sel, **k):
+        calls.append((sel, k))
+
+    page.click = native_click
+    await attach_humanize(None, page, humanize=True)
+    await page.click("#b", timeout=1234)
+    assert calls == [("#b", {"timeout": 1234})]

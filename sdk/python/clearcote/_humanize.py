@@ -659,7 +659,7 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
             precisely the non-human motion this module exists to avoid.
             """
             try:
-                return _native(selector, options)
+                return orig(selector, **options)
             finally:
                 st["placed"] = True
 
