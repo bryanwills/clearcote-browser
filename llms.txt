@@ -25,7 +25,7 @@ Command line (SDK 0.29.0, Python and Node): `clearcote install`, `clearcote info
 ## Tiers
 - Open source: no account, reproducible from public source, full engine-level fingerprint control.
 - Free with GitHub: the licensed build — newest Chromium, recorded human motion, private stealth patches, profile library, older builds and pinning — free for ONE browser at a time. Sign in at https://clearcotelabs.com with a GitHub account at least 30 days old and claim a key under Licenses; it renews every 30 days. Needs SDK 0.29.0+.
-- Pro ($49/month): the same licensed build with as many browsers at once as you need, plus email support from the owner.
+- Pro ($49/month): the same licensed build with up to 250 browsers at once (more on request; subscriptions started before 26 September 2026 keep their previous uncapped terms), plus email support from the owner.
 Use a key with `CLEARCOTE_LICENSE_KEY=cc_lic_...`, `license_key=` / `licenseKey`, or `clearcote login`. The licensed build is not reproducible from public source; no tier unlocks more spoofing. Pricing: https://clearcotelabs.com/pricing
 
 ## Principles

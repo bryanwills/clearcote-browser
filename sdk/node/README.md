@@ -492,7 +492,7 @@ The identity surface is **free in full**. A licence does not unlock "more spoofi
 control below is in the open build. The licensed build adds behavioural realism that needs recorded
 data or engine work held out of the public tree. **It is free with GitHub for one browser at a time**
 (sign in at [clearcotelabs.com](https://clearcotelabs.com/pricing#free), needs SDK 0.29.0+); **PRO**
-runs as many browsers at once as you need and adds email support.
+runs up to 250 browsers at once and adds email support.
 
 | Capability | Open source | Free with GitHub | PRO |
 |---|:---:|:---:|:---:|
@@ -508,7 +508,7 @@ runs as many browsers at once as you need and adds email support.
 | **Coherent WebRTC srflx fabrication** (`webrtcIp`) | — | ✅ | ✅ |
 | **WebRTC host-candidate concealment** (`.local` names) | — | ✅ | ✅ |
 | **Request-header hygiene** on revalidation | — | ✅ | ✅ |
-| Floating-concurrency licensing + run-token gate | — | 1 browser | ✅ unlimited |
+| Floating-concurrency licensing + run-token gate | — | 1 browser | ✅ up to 250 |
 | Email support from the owner | — | — | ✅ |
 
 The mouse tier is decided **at runtime** from a signed claim in the run-token — same SDK call,
