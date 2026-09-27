@@ -19,7 +19,10 @@ import os
 import sys
 from contextlib import asynccontextmanager
 
-from mcp.server.fastmcp import FastMCP
+try:  # mcp 2.x renamed FastMCP to MCPServer and removed mcp.server.fastmcp
+    from mcp.server.mcpserver import MCPServer
+except ImportError:  # mcp 1.x
+    from mcp.server.fastmcp import FastMCP as MCPServer
 from mcp.types import ToolAnnotations
 
 from ._facade import ClearcoteBrowser
@@ -190,7 +193,7 @@ async def _lifespan(_server):
             _browser = None
 
 
-mcp = FastMCP("Clearcote Stealth Browser", lifespan=_lifespan)
+mcp = MCPServer("Clearcote Stealth Browser", lifespan=_lifespan)
 
 
 # ── tools ─────────────────────────────────────────────────────────────────────
