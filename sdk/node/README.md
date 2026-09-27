@@ -198,6 +198,8 @@ if (!verdict.coherent) console.warn(verdict.warnings);
 
 It reads the (unmasked) WebGL vendor/renderer the page sees, flags a software rasterizer (a fatal headless tell — enable the canvas bridge or run headed on a real GPU) and an incoherent vendor/renderer pair. Pass a second arg (`claimedGpu`) to also assert the rendered family.
 
+The renderer *string* alone is not enough: a persona renames the backend, so a SwiftShader fallback stops looking like one. The check therefore also measures limits the string cannot move — `MAX_TEXTURE_SIZE`, the vertex/fragment uniform-vector pair, and an actual 16384-wide texture allocation — and reports them as `maxTextureSize`, `maxVertexUniformVectors`, `maxFragmentUniformVectors` and `canAllocate16kTexture`. A renderer naming a desktop GPU while `MAX_TEXTURE_SIZE` is below 16384 is a spoof over a software rasterizer and comes back `coherent: false`. **Headless on Linux with no GPU hits exactly this** — Chromium falls back to SwiftShader (8192) whatever the persona claims, and no launch flag changes it on a display-less host. Run headed under Xvfb, or use the canvas bridge.
+
 ### Hardened launch defaults
 
 Every `launch()` already, with no extra options: **drops Playwright's `--enable-automation`** (so the engine's `AutomationControlled` feature stays off — pass your own `ignoreDefaultArgs` to override); **disables QUIC/HTTP-3 when a proxy is set** (a SOCKS5/HTTP proxy carries only TCP, so no UDP egresses around it); and prints a one-line **coherence warning** to stderr for incoherent option combos (silence with `quiet: true` or `CLEARCOTE_NO_WARN=1`).

@@ -235,3 +235,52 @@ class TestResolveLocal:
     def test_missing_directory_explains_how_to_populate(self):
         with pytest.raises(ValueError, match=r"no local profile directory[\s\S]*convert_dataset"):
             resolve_local(HOST, os.path.join(ROOT, "nope"))
+
+
+# -- host cache key + engine major -----------------------------------------------------------
+
+class TestHostCacheKey:
+    """The host probe is the one path that launches a second browser, so a cache MISS is
+    expensive. It used to key on the caller's literal path string, so the same binary spelled
+    another way (slashes, ``./``, a symlink, Windows case) re-measured every launch."""
+
+    def test_same_binary_spelled_differently_hits(self, tmp_path, monkeypatch):
+        import os
+
+        from clearcote import _profilesource as PS
+
+        monkeypatch.setattr(PS, "profile_cache_dir", lambda: str(tmp_path))
+        exe = tmp_path / "chrome"
+        exe.write_bytes(b"x")
+        facts = {"os_family": "linux", "browser_major": 153, "gpu_vendor": "intel"}
+        PS.write_cached_host(str(exe), facts)
+
+        other = os.path.join(str(tmp_path), ".", "chrome")
+        assert PS.read_cached_host(other) is not None
+        assert PS.read_cached_host(str(exe))["browser_major"] == 153
+        assert PS.read_cached_host(str(tmp_path / "other-chrome")) is None
+
+
+class TestEngineMajor:
+    """``browser_major`` is a HARD filter on profile selection, so it has to describe the binary
+    that will actually run -- not whatever release this SDK happens to pin."""
+
+    def test_reads_the_major_off_the_running_browser(self):
+        from clearcote._profilesource import _engine_major
+
+        class B:
+            version = "153.0.8010.36"
+
+        assert _engine_major(B(), 149) == 153
+
+    def test_falls_back_when_the_version_is_unusable(self):
+        from clearcote._profilesource import _engine_major
+
+        class NoVersion:
+            pass
+
+        class Junk:
+            version = "not-a-version"
+
+        assert _engine_major(NoVersion(), 149) == 149
+        assert _engine_major(Junk(), 149) == 149

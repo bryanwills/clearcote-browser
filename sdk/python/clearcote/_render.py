@@ -39,6 +39,24 @@ PROBE_JS = r"""
       out.unmaskedRenderer = gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) || "";
     }
     out.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 0;
+    out.maxRenderbufferSize = gl.getParameter(gl.MAX_RENDERBUFFER_SIZE) || 0;
+    const vp = gl.getParameter(gl.MAX_VIEWPORT_DIMS);
+    out.maxViewportDims = vp ? Array.from(vp) : [];
+    out.maxVertexUniformVectors = gl.getParameter(gl.MAX_VERTEX_UNIFORM_VECTORS) || 0;
+    out.maxFragmentUniformVectors = gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS) || 0;
+    // Capability probe, not a declared value: a spoofed renderer string is free, an actual
+    // 16384-wide texture allocation is not. A software-rasterizer backend refuses it.
+    // The error queue is drained first: getError() is sticky, so a flag left behind by anything
+    // above would otherwise be read back as "the allocation failed".
+    try {
+      let drain = 0;
+      while (gl.getError() !== gl.NO_ERROR && drain++ < 32) {}
+      const t = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 16384, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      out.canAllocate16k = gl.getError() === gl.NO_ERROR;
+      gl.deleteTexture(t);
+    } catch (e) { out.canAllocate16k = null; }
   } catch (e) { out.error = String(e); }
   return out;
 }
@@ -57,6 +75,21 @@ _FAMILY_KEYS = (
     ("apple", "apple"), ("m1", "apple"), ("m2", "apple"), ("m3", "apple"), ("m4", "apple"),
     ("mali", "mali"), ("adreno", "adreno"), ("powervr", "powervr"),
 )
+
+# Desktop/laptop GPU families. A persona that names one of these is claiming a machine whose
+# driver backs a 16384 texture; the mobile families (mali/adreno/powervr) legitimately sit below
+# that, so the capability floor below is not applied to them.
+_DESKTOP_FAMILIES = ("nvidia", "amd", "intel", "apple")
+
+# Capability floor for a desktop-class GPU claim, measured rather than assumed:
+#   SwiftShader (ANGLE/Vulkan, genuine Chrome 153 headless Linux) ....... 8192
+#   Mesa llvmpipe (LLVM 15, genuine Chrome 153 headed Linux) ........... 16384
+#   ANGLE/D3D11 on a GeForce RTX 3070 (genuine Chrome 153 Windows) ..... 16384
+# 16384 is also the D3D11 feature-level-11 2D texture cap (every desktop GPU since ~2010) and the
+# Mesa GL limit for Intel Gen7+. So a renderer string naming a desktop GPU while MAX_TEXTURE_SIZE
+# is below 16384 means the string was spoofed over a software rasterizer that _SOFTWARE_MARKERS
+# can no longer see -- the exact case the string check misses once the persona renames the backend.
+_HW_MIN_MAX_TEXTURE_SIZE = 16384
 
 
 def _family(s):
@@ -91,7 +124,48 @@ def evaluate_render_info(info, claimed_gpu=None):
         )
 
     rfam, vfam = _family(rl), _family(vl)
+
+    # Capability floor. The string check above is defeated the moment the persona renames the
+    # backend, so verify the claim against a limit the renderer string cannot move: a software
+    # rasterizer reports (and allocates) 8192 where every desktop GPU does 16384.
+    max_tex = info.get("maxTextureSize") or 0
+    can_16k = info.get("canAllocate16k")
+    if rfam in _DESKTOP_FAMILIES and max_tex and max_tex < _HW_MIN_MAX_TEXTURE_SIZE:
+        software = True
+        warnings.append(
+            f"the WebGL renderer names a desktop GPU ({renderer!r}) but MAX_TEXTURE_SIZE is "
+            f"{max_tex}, below the {_HW_MIN_MAX_TEXTURE_SIZE} current desktop drivers report "
+            "(only pre-feature-level-11 D3D parts cap at 8192) - on a stealth build this means the "
+            "renderer string was spoofed over a software rasterizer (headless Linux falls back to "
+            "SwiftShader). Run headed, or use the canvas bridge."
+        )
+    elif rfam in _DESKTOP_FAMILIES and can_16k is False:
+        software = True
+        warnings.append(
+            f"the WebGL renderer names a desktop GPU ({renderer!r}) and reports MAX_TEXTURE_SIZE "
+            f"{max_tex}, but a {_HW_MIN_MAX_TEXTURE_SIZE}-wide texture fails to allocate - the "
+            "reported limit is not backed by the real rendering backend."
+        )
+
+    # Uniform-vector split. Pass-through and persona-spoofed limits can end up on different sides
+    # of the same context: an ANGLE-over-GL/Mesa renderer reports vertex == fragment on every real
+    # driver (measured: SwiftShader 4096/4096, llvmpipe 1024/1024), so a mismatch under a GL-backed
+    # renderer string is a half-applied persona. ANGLE/D3D11 legitimately differs (4095/1024), so
+    # the check is limited to the non-D3D backends.
+    vuv = info.get("maxVertexUniformVectors") or 0
+    fuv = info.get("maxFragmentUniformVectors") or 0
+    incoherent = False
+    if vuv and fuv and vuv != fuv and "d3d" not in rl and "direct3d" not in rl:
+        incoherent = True
+        warnings.append(
+            f"MAX_VERTEX_UNIFORM_VECTORS ({vuv}) and MAX_FRAGMENT_UNIFORM_VECTORS ({fuv}) disagree "
+            f"under a non-D3D renderer ({renderer!r}); every GL backend measured here reports them "
+            "equal (SwiftShader 4096/4096, llvmpipe 1024/1024), so the persona applied to one and "
+            "not the other."
+        )
+
     if rfam and vfam and rfam != vfam:
+        incoherent = True
         warnings.append(
             f"WebGL vendor and renderer disagree on GPU family (vendor~{vfam}, renderer~{rfam}) - "
             "an incoherent persona."
@@ -100,18 +174,25 @@ def evaluate_render_info(info, claimed_gpu=None):
     if claimed_gpu:
         cfam = _family(claimed_gpu)
         if cfam and rfam and cfam != rfam:
+            incoherent = True
             warnings.append(
                 f"the claimed GPU ({claimed_gpu!r}, family ~{cfam}) does not match the WebGL "
                 f"renderer family (~{rfam})."
             )
 
-    coherent = has_webgl and not software and not any("disagree" in w or "does not match" in w for w in warnings)
+    # Set by the branches above rather than by matching warning text: the verdict must not depend
+    # on the wording of a message.
+    coherent = has_webgl and not software and not incoherent
     return {
         "vendor": vendor,
         "renderer": renderer,
         "webgl": has_webgl,
         "webgl2": bool(info.get("webgl2")),
         "max_texture_size": info.get("maxTextureSize") or 0,
+        "max_renderbuffer_size": info.get("maxRenderbufferSize") or 0,
+        "max_vertex_uniform_vectors": vuv,
+        "max_fragment_uniform_vectors": fuv,
+        "can_allocate_16k_texture": can_16k,
         "software_suspected": software,
         "coherent": coherent,
         "warnings": warnings,

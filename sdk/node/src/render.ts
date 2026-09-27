@@ -27,6 +27,24 @@ const PROBE_JS = `() => {
       out.unmaskedRenderer = gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) || "";
     }
     out.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 0;
+    out.maxRenderbufferSize = gl.getParameter(gl.MAX_RENDERBUFFER_SIZE) || 0;
+    const vp = gl.getParameter(gl.MAX_VIEWPORT_DIMS);
+    out.maxViewportDims = vp ? Array.from(vp) : [];
+    out.maxVertexUniformVectors = gl.getParameter(gl.MAX_VERTEX_UNIFORM_VECTORS) || 0;
+    out.maxFragmentUniformVectors = gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS) || 0;
+    // Capability probe, not a declared value: a spoofed renderer string is free, an actual
+    // 16384-wide texture allocation is not. A software-rasterizer backend refuses it.
+    // The error queue is drained first: getError() is sticky, so a flag left behind by anything
+    // above would otherwise be read back as "the allocation failed".
+    try {
+      let drain = 0;
+      while (gl.getError() !== gl.NO_ERROR && drain++ < 32) {}
+      const t = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 16384, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      out.canAllocate16k = gl.getError() === gl.NO_ERROR;
+      gl.deleteTexture(t);
+    } catch (e) { out.canAllocate16k = null; }
   } catch (e) { out.error = String(e); }
   return out;
 }`;
@@ -44,6 +62,17 @@ const FAMILY_KEYS: [string, string][] = [
   ["mali", "mali"], ["adreno", "adreno"], ["powervr", "powervr"],
 ];
 
+// Desktop/laptop GPU families. A persona naming one of these claims a machine whose driver backs a
+// 16384 texture; the mobile families legitimately sit below that, so the floor skips them.
+const DESKTOP_FAMILIES = ["nvidia", "amd", "intel", "apple"];
+
+// Capability floor for a desktop-class GPU claim, measured rather than assumed:
+//   SwiftShader (ANGLE/Vulkan, genuine Chrome 153 headless Linux) ....... 8192
+//   Mesa llvmpipe (LLVM 15, genuine Chrome 153 headed Linux) ........... 16384
+//   ANGLE/D3D11 on a GeForce RTX 3070 (genuine Chrome 153 Windows) ..... 16384
+// 16384 is also the D3D11 feature-level-11 2D texture cap and the Mesa GL limit for Intel Gen7+.
+const HW_MIN_MAX_TEXTURE_SIZE = 16384;
+
 /** Best-effort GPU family from a vendor/renderer string ('' if unknown). */
 export function gpuFamily(s: string | undefined): string {
   const l = (s || "").toLowerCase();
@@ -59,6 +88,11 @@ export interface RenderInfo {
   unmaskedVendor?: string;
   unmaskedRenderer?: string;
   maxTextureSize?: number;
+  maxRenderbufferSize?: number;
+  maxViewportDims?: number[];
+  maxVertexUniformVectors?: number;
+  maxFragmentUniformVectors?: number;
+  canAllocate16k?: boolean | null;
 }
 
 export interface RenderVerdict {
@@ -67,6 +101,10 @@ export interface RenderVerdict {
   webgl: boolean;
   webgl2: boolean;
   maxTextureSize: number;
+  maxRenderbufferSize: number;
+  maxVertexUniformVectors: number;
+  maxFragmentUniformVectors: number;
+  canAllocate16kTexture?: boolean | null;
   softwareSuspected: boolean;
   coherent: boolean;
   warnings: string[];
@@ -87,7 +125,7 @@ export function evaluateRenderInfo(info: RenderInfo, claimedGpu?: string): Rende
     );
   }
 
-  const software = SOFTWARE_MARKERS.some((m) => rl.includes(m) || vl.includes(m));
+  let software = SOFTWARE_MARKERS.some((m) => rl.includes(m) || vl.includes(m));
   if (software) {
     warnings.push(
       `software rasterizer detected in the WebGL renderer (${JSON.stringify(renderer)}) - a definitive ` +
@@ -97,7 +135,48 @@ export function evaluateRenderInfo(info: RenderInfo, claimedGpu?: string): Rende
 
   const rfam = gpuFamily(rl);
   const vfam = gpuFamily(vl);
+
+  // Capability floor. The string check above is defeated the moment the persona renames the
+  // backend, so verify the claim against a limit the renderer string cannot move: a software
+  // rasterizer reports (and allocates) 8192 where every desktop GPU does 16384.
+  const maxTex = info.maxTextureSize || 0;
+  const can16k = info.canAllocate16k;
+  const vuv = info.maxVertexUniformVectors || 0;
+  const fuv = info.maxFragmentUniformVectors || 0;
+  if (DESKTOP_FAMILIES.includes(rfam) && maxTex && maxTex < HW_MIN_MAX_TEXTURE_SIZE) {
+    software = true;
+    warnings.push(
+      `the WebGL renderer names a desktop GPU (${JSON.stringify(renderer)}) but MAX_TEXTURE_SIZE is ` +
+        `${maxTex}, below the ${HW_MIN_MAX_TEXTURE_SIZE} current desktop drivers report (only ` +
+        "pre-feature-level-11 D3D parts cap at 8192) - on a stealth build this means the renderer " +
+        "string was spoofed over a software rasterizer (headless Linux falls back to SwiftShader). " +
+        "Run headed, or use the canvas bridge."
+    );
+  } else if (DESKTOP_FAMILIES.includes(rfam) && can16k === false) {
+    software = true;
+    warnings.push(
+      `the WebGL renderer names a desktop GPU (${JSON.stringify(renderer)}) and reports ` +
+        `MAX_TEXTURE_SIZE ${maxTex}, but a ${HW_MIN_MAX_TEXTURE_SIZE}-wide texture fails to ` +
+        "allocate - the reported limit is not backed by the real rendering backend."
+    );
+  }
+
+  // Uniform-vector split: an ANGLE-over-GL/Mesa renderer reports vertex == fragment on every real
+  // driver (measured: SwiftShader 4096/4096, llvmpipe 1024/1024). ANGLE/D3D11 legitimately differs
+  // (4095/1024), so the check is limited to the non-D3D backends.
+  let incoherent = false;
+  if (vuv && fuv && vuv !== fuv && !rl.includes("d3d") && !rl.includes("direct3d")) {
+    incoherent = true;
+    warnings.push(
+      `MAX_VERTEX_UNIFORM_VECTORS (${vuv}) and MAX_FRAGMENT_UNIFORM_VECTORS (${fuv}) disagree under ` +
+        `a non-D3D renderer (${JSON.stringify(renderer)}); every GL backend measured here reports ` +
+        "them equal (SwiftShader 4096/4096, llvmpipe 1024/1024), so the persona applied to one and " +
+        "not the other."
+    );
+  }
+
   if (rfam && vfam && rfam !== vfam) {
+    incoherent = true;
     warnings.push(
       `WebGL vendor and renderer disagree on GPU family (vendor~${vfam}, renderer~${rfam}) - an incoherent persona.`
     );
@@ -106,20 +185,26 @@ export function evaluateRenderInfo(info: RenderInfo, claimedGpu?: string): Rende
   if (claimedGpu) {
     const cfam = gpuFamily(claimedGpu);
     if (cfam && rfam && cfam !== rfam) {
+      incoherent = true;
       warnings.push(
         `the claimed GPU (${JSON.stringify(claimedGpu)}, family ~${cfam}) does not match the WebGL renderer family (~${rfam}).`
       );
     }
   }
 
-  const coherent =
-    hasWebgl && !software && !warnings.some((w) => w.includes("disagree") || w.includes("does not match"));
+  // Set by the branches above rather than by matching warning text: the verdict must not depend on
+  // the wording of a message.
+  const coherent = hasWebgl && !software && !incoherent;
   return {
     vendor,
     renderer,
     webgl: hasWebgl,
     webgl2: !!info.webgl2,
     maxTextureSize: info.maxTextureSize || 0,
+    maxRenderbufferSize: info.maxRenderbufferSize || 0,
+    maxVertexUniformVectors: vuv,
+    maxFragmentUniformVectors: fuv,
+    canAllocate16kTexture: can16k,
     softwareSuspected: software,
     coherent,
     warnings,

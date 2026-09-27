@@ -267,6 +267,16 @@ fatal headless tell — enable the canvas bridge or run headed on a real GPU) an
 vendor/renderer pair. Pass `claimed_gpu=...` to also assert the rendered family. The async API
 exposes the same as `await clearcote.async_api.check_render_coherence(page)`.
 
+The renderer *string* alone is not enough: a persona renames the backend, so a SwiftShader fallback
+stops looking like one. The check therefore also measures limits the string cannot move —
+`MAX_TEXTURE_SIZE`, the vertex/fragment uniform-vector pair, and an actual 16384-wide texture
+allocation — and reports them as `max_texture_size`, `max_vertex_uniform_vectors`,
+`max_fragment_uniform_vectors` and `can_allocate_16k_texture`. A renderer naming a desktop GPU while
+`MAX_TEXTURE_SIZE` is below 16384 is a spoof over a software rasterizer and comes back
+`coherent: False`. **Headless on Linux with no GPU hits exactly this** — Chromium falls back to
+SwiftShader (8192) whatever the persona claims, and no launch flag changes it on a display-less
+host. Run headed under Xvfb, or use the canvas bridge.
+
 ### Hardened launch defaults
 
 Every `launch()` already does, with no extra options:

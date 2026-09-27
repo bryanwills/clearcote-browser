@@ -106,7 +106,7 @@ class TestPrepareRouting:
         # broke every async test that ran after it.
         monkeypatch.setattr(clearcote, "_resolve_binary", lambda *a, **k: "/path/chrome")
         monkeypatch.setattr(clearcote, "_apply_auto_profile",
-                            lambda fp, exe, select, quiet=False, pro=None: routed.append(exe))
+                            lambda fp, exe, select, quiet=False, pro=None, lease=None: routed.append(exe))
         clearcote._prepare({"profile": "auto", "quiet": True})
         assert routed == ["/path/chrome"]
 
@@ -145,6 +145,29 @@ class TestNestedProbeLaunchIsLicensed:
         # The probe reads GPU/display off about:blank and needs no profile: it must not pay for a
         # throwaway profile directory on every "auto" resolution.
         assert seen["ephemeral_profile"] is False
+
+    def test_probe_launch_borrows_the_callers_lease(self, stubbed, monkeypatch):
+        """The probe runs INSIDE a launch that already holds a concurrency slot. Checking out a
+        second one deadlocks that launch against itself on a per-browser plan (see
+        tests/test_license_per_browser.py), so the caller's lease is handed down."""
+        seen = {}
+        sentinel = object()
+
+        def fake_measure(launch_fn, exe, major):
+            launch_fn(executable_path=exe, headless=True, quiet=True)
+            return HOST
+
+        def fake_launch(**kw):
+            seen.update(kw)
+            raise RuntimeError("stop here - the kwargs are the assertion")
+
+        monkeypatch.setattr(clearcote, "measure_host", fake_measure)
+        monkeypatch.setattr(clearcote, "launch", fake_launch)
+
+        with pytest.raises(RuntimeError):
+            clearcote._apply_auto_profile({}, "/path/chrome", {}, quiet=True, lease=sentinel)
+
+        assert seen["_cc_lease"] is sentinel
 
 
 class TestPrivacySandboxDefault:
