@@ -323,10 +323,7 @@ const LIGHT_STEALTH_PROFILES: readonly (readonly [number, number, number, number
  * binary). The seed->row mapping matches the Python SDK (full sha256 digest as a big integer mod N).
  */
 export function lightStealthValues(seed?: string | number): Partial<FingerprintOptions> {
-  const key = seed === undefined || seed === null || String(seed) === "" ? "clearcote-light-stealth" : String(seed);
-  const hex = createHash("sha256").update(key, "utf8").digest("hex");
-  const idx = Number(BigInt("0x" + hex) % BigInt(LIGHT_STEALTH_PROFILES.length));
-  const row = LIGHT_STEALTH_PROFILES[idx];
+  const row = lightStealthRow(seed);
   return {
     devicePixelRatio: row[4],
     colorDepth: row[5],
@@ -335,6 +332,23 @@ export function lightStealthValues(seed?: string | number): Partial<FingerprintO
     maxTouchPoints: 0,
     brand: "chrome",
   };
+}
+
+function lightStealthRow(seed?: string | number) {
+  const key = seed === undefined || seed === null || String(seed) === "" ? "clearcote-light-stealth" : String(seed);
+  const hex = createHash("sha256").update(key, "utf8").digest("hex");
+  return LIGHT_STEALTH_PROFILES[Number(BigInt("0x" + hex) % BigInt(LIGHT_STEALTH_PROFILES.length))];
+}
+
+/**
+ * The display of the same `lightStealth` row {@link lightStealthValues} draws its DPR from, so a
+ * seed's screen and devicePixelRatio stay a pair (1536x864 comes with 1.25: a 1080p laptop at 125%).
+ * Never spoofed through the `--fingerprint-screen-*` switches (see `lightStealth`): `serve()` makes
+ * it the headless display itself, which the page, media queries and the window all agree on.
+ */
+export function lightStealthScreen(seed?: string | number): { width: number; height: number; availWidth: number; availHeight: number } {
+  const row = lightStealthRow(seed);
+  return { width: row[0], height: row[1], availWidth: row[2], availHeight: row[3] };
 }
 
 /**

@@ -71,3 +71,77 @@ describe("evaluateRenderInfo", () => {
     expect(v.coherent).toBe(true);
   });
 });
+
+// -- capability floor: the string check is defeated once the persona renames the backend ---------
+// Values below are measured on a GPU-less Linux VPS with clearcote 153 r25 and genuine Chrome 153.
+
+const MESA_UHD770 =
+  "ANGLE (Intel, Mesa Intel(R) UHD Graphics 770 (RPL-S), OpenGL 4.6 (Core Profile) Mesa 23.2.1-1ubuntu3.1~22.04.2)";
+
+describe("capability floor", () => {
+  it("catches a renderer string spoofed over SwiftShader", () => {
+    const v = evaluateRenderInfo({
+      webgl: true, webgl2: true,
+      vendor: "Google Inc. (Intel)", renderer: MESA_UHD770,
+      maxTextureSize: 8192, maxRenderbufferSize: 8192,
+      maxVertexUniformVectors: 4096, maxFragmentUniformVectors: 4096,
+      canAllocate16k: false,
+    });
+    expect(v.softwareSuspected).toBe(true);
+    expect(v.coherent).toBe(false);
+    expect(v.warnings.some((w) => w.includes("MAX_TEXTURE_SIZE is 8192"))).toBe(true);
+  });
+
+  it("leaves a headed llvmpipe-backed persona coherent", () => {
+    const v = evaluateRenderInfo({
+      webgl: true, webgl2: true,
+      vendor: "Google Inc. (Intel)", renderer: MESA_UHD770,
+      maxTextureSize: 16384, maxRenderbufferSize: 16384,
+      maxVertexUniformVectors: 1024, maxFragmentUniformVectors: 1024,
+      canAllocate16k: true,
+    });
+    expect(v.coherent).toBe(true);
+    expect(v.warnings).toEqual([]);
+  });
+
+  it("does not fire on a genuine ANGLE/D3D11 vertex-fragment split", () => {
+    const v = evaluateRenderInfo({
+      webgl: true, webgl2: true,
+      vendor: "Google Inc. (Intel)",
+      renderer: "ANGLE (Intel, Intel(R) UHD Graphics 770 (0xA780) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+      maxTextureSize: 16384, maxVertexUniformVectors: 4095, maxFragmentUniformVectors: 1024,
+      canAllocate16k: true,
+    });
+    expect(v.coherent).toBe(true);
+    expect(v.warnings).toEqual([]);
+  });
+
+  it("catches a half-applied persona that splits uniform vectors under a GL renderer", () => {
+    const v = evaluateRenderInfo({
+      webgl: true, webgl2: true,
+      vendor: "Google Inc. (Intel)", renderer: MESA_UHD770,
+      maxTextureSize: 16384, maxVertexUniformVectors: 4096, maxFragmentUniformVectors: 1024,
+      canAllocate16k: true,
+    });
+    expect(v.coherent).toBe(false);
+    expect(v.warnings.some((w) => w.includes("MAX_VERTEX_UNIFORM_VECTORS"))).toBe(true);
+  });
+
+  it("skips mobile GPU families, which legitimately report 8192", () => {
+    const v = evaluateRenderInfo({
+      webgl: true, webgl2: true, vendor: "ARM", renderer: "Mali-G78",
+      maxTextureSize: 8192, maxVertexUniformVectors: 1024, maxFragmentUniformVectors: 1024,
+    });
+    expect(v.softwareSuspected).toBe(false);
+    expect(v.coherent).toBe(true);
+  });
+
+  it("is inert when the probe did not report limits", () => {
+    const v = evaluateRenderInfo({
+      webgl: true, vendor: "Google Inc. (Intel)",
+      renderer: "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics, D3D11)",
+    });
+    expect(v.coherent).toBe(true);
+    expect(v.warnings).toEqual([]);
+  });
+});

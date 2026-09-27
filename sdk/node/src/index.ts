@@ -60,8 +60,7 @@ import { emitCoherenceWarnings } from "./warnings.js";
 import { fontLaunchEnv } from "./fonts.js";
 import { withShaderDialect, type ShaderDialect } from "./shaderdialect.js";
 import {
-  applyHeadlessGeometry, fitWindowToPersona, installWindowFixup, moveWindowToOrigin,
-  type AppliedGeometry,
+  applyHeadlessGeometry, fitServedWindow, fitWindowToWorkArea, installWindowFixup, servedGeometry,
 } from "./geometry.js";
 import { acquireLease, resolveLicenseKey, withRunToken, type LicenseOptions, type LeaseSession } from "./license.js";
 
@@ -350,36 +349,26 @@ export async function download(
   return executablePath({ version, releaseChannel, pro: proSelector(licenseKey, licenseApiBase), ...dl });
 }
 
-/** Headless: the geometry defaults are CONTEXT options and `chromium.launch()` takes none, so they
- * ride on newPage/newContext instead — persona regime gets `viewport: null` plus a window fit, no-
- * persona regime gets the screen + viewport override. See ./geometry.ts for why each is needed. */
-function installHeadlessGeometry(
-  browser: Browser,
-  geom: AppliedGeometry,
-  args?: readonly string[] | null,
-): void {
-  // chromium.launch() accepts no context options, so the headless geometry default has to ride on
-  // newPage/newContext — the same shape as installHeadedViewport. In persona mode each new context
-  // is a new window, so each also gets the window fit. Any per-call geometry option wins.
-  const persona = geom.mode === "persona";
-  const defaults: Record<string, unknown> = persona
-    ? { viewport: null }
-    : { screen: geom.screen, viewport: geom.viewport };
+/** Headless: `viewport: null` is a CONTEXT option and `chromium.launch()` takes none, so it rides on
+ * newPage/newContext instead, with the window fit to the work area (the persona's, or the display
+ * `--screen-info` set). See ./geometry.ts for why each is needed. */
+function installHeadlessGeometry(browser: Browser, args?: readonly string[] | null): void {
+  // Same shape as installHeadedViewport. Each new context is a new window, so each also gets the
+  // window fit. Any per-call geometry option wins.
   const merge = (o: Record<string, unknown> = {}) =>
-    "viewport" in o || "screen" in o ? o : { ...o, ...defaults };
+    "viewport" in o || "screen" in o ? o : { ...o, viewport: null };
   const origNewPage = browser.newPage.bind(browser);
   const origNewContext = browser.newContext.bind(browser);
   (browser as unknown as { newPage: (o?: Record<string, unknown>) => Promise<Page> }).newPage =
     async (o = {}) => {
       const page = await origNewPage(merge(o) as Parameters<typeof origNewPage>[0]);
-      if (persona) await fitWindowToPersona(page, args);
-      else await moveWindowToOrigin(page, args);
+      await fitWindowToWorkArea(page, args);
       return page;
     };
   (browser as unknown as { newContext: (o?: Record<string, unknown>) => Promise<BrowserContext> }).newContext =
     async (o = {}) => {
       const context = await origNewContext(merge(o) as Parameters<typeof origNewContext>[0]);
-      await installWindowFixup(context, args, persona);
+      await installWindowFixup(context, args);
       return context;
     };
 }
@@ -736,11 +725,12 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? [], proxyOpt as PwProxy | undefined, socks5Udp,
     { exe, headed, quiet, allowThirdPartyCookies, transparentProxy });
   // Headless: screen.* has to be handled alongside the viewport or the window reports a geometry no
-  // real browser can (see ./geometry.ts). Probe a copy — viewport/screen are context options, which
-  // chromium.launch() does not take — and carry the result to newPage/newContext.
+  // real browser can (see ./geometry.ts). Probe a copy — viewport is a context option, which
+  // chromium.launch() does not take — and carry the result to newPage/newContext. The display
+  // switches go on the command line; the fit keeps reading the caller's own engineArgs.
   const geom = headed
     ? null
-    : applyHeadlessGeometry({ ...(pwOptions as Record<string, unknown>) }, fingerprint.fingerprint, engineArgs);
+    : applyHeadlessGeometry({ ...(pwOptions as Record<string, unknown>) }, fingerprint.fingerprint, engineArgs, fingerprint);
   const browser = await releaseLeaseOnFailure(lease, () => winAvRetry((exePath) => chromium.launch({
     // Drop Playwright's --enable-automation (keeps AutomationControlled off) and
     // --enable-unsafe-swiftshader (see DEFAULT_IGNORED_ARGS; paired with --ignore-gpu-blocklist in
@@ -749,12 +739,12 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
     ...(pwOptions as PlaywrightLaunchOptions),
     executablePath: exePath,
     ...(runtimeEnv ? { env: runtimeEnv } : {}),
-    args: engineArgs,
+    args: [...engineArgs, ...(geom?.args ?? [])],
   }), exe));
   // Release the concurrency slot + remove the run-token file when the browser closes.
   if (lease) browser.on("disconnected", () => { void lease.stop(); launchToken?.release(); });
   if (headed) installHeadedViewport(browser); // launch() takes no viewport option -> wrap newPage/newContext
-  else if (geom) installHeadlessGeometry(browser, geom, engineArgs);
+  else if (geom) installHeadlessGeometry(browser, engineArgs);
   installHumanize(browser, { humanize, showCursor, seed: fingerprint.fingerprint }); // seed => stable motor persona
   return browser;
 }
@@ -821,19 +811,20 @@ export async function launchPersistentContext(
   const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs, proxyOpt as PwProxy | undefined, socks5Udp,
     { exe, headed: opts.headless === false, quiet, allowThirdPartyCookies, transparentProxy });
   // headless: the persona owns screen when it is running, so only the window needs fitting; with no
-  // persona the SDK overrides screen itself (see ./geometry.ts). Headed already set viewport: null.
+  // persona the SDK sets the headless display itself (see ./geometry.ts). Headed already set
+  // viewport: null.
   const geom = opts.headless === false
     ? null
-    : applyHeadlessGeometry(opts as unknown as Record<string, unknown>, fingerprint.fingerprint, engineArgs);
+    : applyHeadlessGeometry(opts as unknown as Record<string, unknown>, fingerprint.fingerprint, engineArgs, fingerprint);
   const context = await releaseLeaseOnFailure(lease, () => winAvRetry((exePath) => chromium.launchPersistentContext(userDataDir, {
     ...opts,
     ignoreDefaultArgs,  // keep AutomationControlled off (+ component updater on when widevine)
     executablePath: exePath,
     ...(runtimeEnv ? { env: runtimeEnv } : {}),
-    args: engineArgs,
+    args: [...engineArgs, ...(geom?.args ?? [])],
   }), exe));
   if (lease) context.on("close", () => { void lease.stop(); launchToken?.release(); });
-  if (geom) await installWindowFixup(context, engineArgs, geom.mode === "persona");
+  if (geom) await installWindowFixup(context, engineArgs);
   installHumanizeOnContext(context, { humanize, showCursor, seed: fingerprint.fingerprint }); // seed => stable motor persona
   return context;
 }
@@ -893,6 +884,12 @@ export interface ServeOptions extends LaunchOptions {
   headless?: boolean;
   /** How long to wait for the CDP endpoint to come up (ms; default 30000). */
   readyTimeoutMs?: number;
+  /**
+   * Headless: the outer window size in CSS px, clamped to the display's work area so the window can
+   * never be larger than its screen. Default: the whole work area (a maximized window). Ignored when
+   * headed, and when `args` carries a window or display switch (the caller then owns geometry).
+   */
+  windowSize?: { width: number; height: number };
 }
 
 /** Handle for a standing clearcote CDP endpoint. Use `.cdpUrl` with any CDP client. */
@@ -975,10 +972,17 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
     userDataDir: uddOption,
     headless = true,
     readyTimeoutMs = 30000,
+    windowSize,
     humanize: _humanize, // Playwright-only; not applicable to a direct launch
     showCursor: _showCursor,
     ...launchOpts
   } = options;
+  if (windowSize !== undefined) {
+    const ok = (v: unknown) => typeof v === "number" && Number.isInteger(v) && v >= 100 && v <= 10000;
+    if (!windowSize || !ok(windowSize.width) || !ok(windowSize.height)) {
+      throw new TypeError("clearcote serve: windowSize must be { width, height } in whole CSS px, 100-10000");
+    }
+  }
 
   // Build the same stealth arg set as launch(), then launch the binary ourselves.
   const merged = launchOpts.profile
@@ -1022,6 +1026,10 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   // Chromium refuses to start as root without --no-sandbox, and serve spawns the binary itself, so
   // Playwright's own --no-sandbox is missing: `clearcote serve` in a root container just timed out.
   if (serveNeedsNoSandbox(process.platform, process.getuid?.(), engineArgs)) cdpArgs.push("--no-sandbox");
+  // Headless geometry for a raw endpoint: the display and window are set browser-wide, since no
+  // client's context options or CDP overrides would reach every page (see ./geometry.ts).
+  const geometry = servedGeometry(engineArgs, fingerprint, headless);
+  if (geometry) cdpArgs.push(...geometry.args);
 
   // License (opt-in): check out a concurrency slot + inject CLEARCOTE_RUN_TOKEN. Inert in free mode.
   const lease = await acquireLease({
@@ -1067,6 +1075,9 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   }
   const srv = new Server(proc, host, resolvedPort, userDataDir, ownUdd, lease, launchToken);
   process.once("exit", () => { void srv.close(); });
+  // Before any client attaches: the window onto the work area (and, under a persona, the headless
+  // display onto the persona's). Its own connection, closed again; never fails the launch.
+  if (geometry) await fitServedWindow(await srv.wsUrl().catch(() => undefined), { persona: geometry.persona, windowSize });
   if (!quiet) {
     process.stderr.write(
       `[clearcote] CDP endpoint ready: ${srv.cdpUrl}\n` +

@@ -125,6 +125,11 @@ Console.WriteLine(srv.CdpUrl);        // e.g. http://127.0.0.1:53522
 await srv.CloseAsync();
 ```
 
+Headless, `ServeAsync` gives the browser a real-size display (the persona's, or one drawn from real
+desktops) and maximizes its window onto the work area before any client attaches, so every page, tab
+and popup reports a window that fits its screen. Set `WindowSize` for a smaller window (clamped to the
+work area), or pass your own `--window-size` / `--screen-info` in `Args` to opt out.
+
 ## Just the binary
 
 ```csharp
@@ -159,16 +164,18 @@ var path = await Clearcote.Clearcote.DownloadAsync();
 window geometry by default (0.24.0+), so `screen`, `availWidth/Height`, `innerWidth/Height` and
 `outerWidth/Height` agree with each other the way a real window's do. With a `Fingerprint` seed the
 engine's own screen and work area are used and the window is sized to them; without a seed the SDK
-applies a screen size drawn from real captured desktops and fits the viewport to it. It is applied at
-launch, before your first navigation. Set `ViewportSize` or `ScreenSize` to opt out.
+sets the headless display to a screen size drawn from real captured desktops (with a taskbar on
+Windows) and sizes the window to its work area the same way. It is applied at launch, before your
+first navigation. Set `ViewportSize` or `ScreenSize` to opt out.
 
-`LaunchAsync` cannot do this — it returns an `IBrowser` whose `NewPageAsync`/`NewContextAsync` you call
-yourself, and those take the context options. Prefer `LaunchEphemeralProfileAsync` (also recommended for
-DRM/CDM reasons), or pass the values through yourself:
+`LaunchAsync` can only do half of this: it sets the display, but it returns an `IBrowser` whose
+`NewPageAsync`/`NewContextAsync` you call yourself, and a page with Playwright's default emulated
+viewport still reports a window larger than its screen. Prefer `LaunchEphemeralProfileAsync` (also
+recommended for DRM/CDM reasons), or finish it yourself:
 
 ```csharp
-var (screen, viewport) = Geometry.HeadlessGeometry(options.Fingerprint);
-var page = await browser.NewPageAsync(new() { ScreenSize = screen, ViewportSize = viewport });
+var page = await browser.NewPageAsync(new() { ViewportSize = ViewportSize.NoViewport });
+await Geometry.FitWindowToWorkAreaAsync(page);
 ```
 
 ## Environment variables

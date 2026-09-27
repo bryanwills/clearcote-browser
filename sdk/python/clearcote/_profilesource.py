@@ -171,13 +171,26 @@ def _host_cache_path() -> str:
     return os.path.join(profile_cache_dir(), "host.json")
 
 
+def _exe_key(exe: str) -> str:
+    """One cache key per BINARY, not per spelling of its path.
+
+    The caller's literal string used to be the key, so the same file spelled with backslashes
+    and with forward slashes (or ``dir/./chrome``, or through a symlink) missed
+    the cache and re-measured the host -- which is the one path that launches a second browser.
+    """
+    try:
+        return os.path.normcase(os.path.realpath(exe))
+    except OSError:
+        return os.path.normcase(exe)
+
+
 def read_cached_host(exe: str) -> Optional[dict[str, Any]]:
     import time
 
     try:
         with open(_host_cache_path(), "r", encoding="utf-8") as f:
             c = json.load(f)
-        if c.get("_exe") != exe:
+        if c.get("_exe") != _exe_key(exe):
             return None  # different binary: re-measure
         if time.time() - c.get("_at", 0) > _HOST_CACHE_MAX_AGE:
             return None
@@ -191,9 +204,24 @@ def write_cached_host(exe: str, facts: dict[str, Any]) -> None:
 
     try:
         with open(_host_cache_path(), "w", encoding="utf-8") as f:
-            json.dump({**facts, "_exe": exe, "_at": time.time()}, f)
+            json.dump({**facts, "_exe": _exe_key(exe), "_at": time.time()}, f)
     except OSError:
         pass  # a cache write failure must never fail a launch
+
+
+def _engine_major(browser, fallback: int) -> int:
+    """The Chromium major of the binary that is actually running.
+
+    ``browser_major`` is a HARD filter on profile selection, and the value handed in is the SDK's
+    PINNED release -- which is whatever build this SDK ships by default, not the engine the caller
+    pointed at (``executable_path=``, ``version=``, a PRO revision). Ask the running browser.
+    """
+    try:
+        v = str(getattr(browser, "version", "") or "")
+        digits = v.split(".")[0].strip()
+        return int(digits) if digits.isdigit() else fallback
+    except Exception:  # noqa: BLE001 - never fail a launch over a version string
+        return fallback
 
 
 def measure_host(launch_fn, exe: str, browser_major: int) -> dict[str, Any]:
@@ -209,7 +237,7 @@ def measure_host(launch_fn, exe: str, browser_major: int) -> dict[str, Any]:
         facts = page.evaluate(PROBE_EXPR)
         out = {
             "os_family": host_os_family(),
-            "browser_major": browser_major,
+            "browser_major": _engine_major(browser, browser_major),
             "gpu_vendor": gpu_vendor_class(facts.get("renderer")),
             "screen_width": facts.get("screen_width"),
             "screen_height": facts.get("screen_height"),

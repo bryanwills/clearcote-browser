@@ -122,4 +122,9 @@ public class ServeOptions : LaunchOptions
     public string? UserDataDir { get; set; }
     /// How long to wait for the CDP endpoint to come up, in ms. Default 30000.
     public int ReadyTimeoutMs { get; set; } = 30000;
+    /// Headless: the outer window size in CSS px (100-10000), clamped to the display's work area so
+    /// the window can never be larger than its screen. Default: the whole work area (a maximized
+    /// window). Ignored when headed, and when Args carries a window or display switch (the caller then
+    /// owns geometry).
+    public ViewportSize? WindowSize { get; set; }
 }

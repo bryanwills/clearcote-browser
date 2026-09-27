@@ -3,7 +3,7 @@
 Headed launches take their geometry from the real display and the SDK keeps the page on it
 (``no_viewport``), so ``screen`` / ``avail`` / ``inner`` / ``outer`` agree by construction. Headless
 has no display, and what it reports depends on whether the engine's persona machinery is running.
-Both regimes were measured on 149.0.7827.114/linux-x64; the SDK needs a different answer for each.
+Regime 1 was measured on 149.0.7827.114/linux-x64, regime 2 on win-x64 149 and 153 (below).
 
 REGIME 1 — a persona is active (``--fingerprint=<seed>`` on the command line).
     The engine spoofs ``screen`` AND ``avail`` from the seed, including a taskbar
@@ -24,24 +24,30 @@ REGIME 2 — no persona (the default seedless launch, ``light_stealth``, which d
 seed — measured: an imported profile only supplies screen/avail when a persona is ALSO running, so
 without a seed its display is inert and this regime applies. When a profile is present its own screen
 is used instead of a corpus pick.).
-    Nothing spoofs ``screen``, so Chromium reports ``screen`` == the emulated viewport and then
-    synthesizes a frame on top of it::
+    Nothing spoofs ``screen``, so a page sees the 800x600 headless surface, and Playwright's
+    emulated viewport then synthesizes a window on top of it::
 
         screen 1280x720   avail 1280x720   inner 1280x720   outer 1288x851   <- outer > screen
 
     A window larger than its own screen is not a statistical tell but an impossible state, readable
     in two property lookups. It was present on every headless shape reachable through the SDK
     (default viewport, explicit viewport, ``no_viewport``, ``no_viewport`` + ``--window-size``).
-    Here the SDK does have a lever — CDP ``Emulation.setDeviceMetricsOverride`` via Playwright's
-    context ``screen`` option, the only thing that moves ``screen.*`` in headless. (The engine's own
-    ``--fingerprint-screen-*`` / ``--fingerprint-avail-*`` switches are inert without a persona:
-    verified through the SDK kwargs and passed raw, headless and headed.) So pick a screen size real
-    machines have and size the viewport so the frame lands exactly on the screen edge.
+    The fix is ``--screen-info``, which makes the headless DISPLAY a real-machine size (with a
+    taskbar on Windows) before the first document exists, then the same ``no_viewport`` + work-area
+    fit as regime 1. Measured on 153.0.8010.36/win-x64, persistent and non-persistent contexts::
 
-    CDP LIMIT: the override sets ``availWidth/availHeight`` equal to ``screen.*``, so regime 2 always
-    reports no taskbar. Not invented — 78 of 432 real desktop captures (23 of 79 networks) report
-    ``avail == screen`` too. A minority shape, and the only one available here. Regime 1 is the more
-    faithful of the two for that reason: prefer a seeded launch when it is an option.
+        screen 1920x1080  avail 1920x1040  inner 1904x911  outer 1920x1040   (popups clamp inside it)
+
+    This used to be a CDP screen override (Playwright's ``screen`` option) with the viewport sized as
+    screen minus a hardcoded engine frame. Two faults: the override forces ``avail == screen`` (no
+    taskbar, a minority shape), and the frame around an emulated viewport is per-platform — 8x131 on
+    linux-x64 but 16x134 on win-x64 (measured on 149.0.7827.114 and 153.0.8010.36) — so on Windows
+    the window landed 8x3 px past the screen edge. With a real display nothing is sized against the
+    frame. (The engine's ``--fingerprint-screen-*`` switches are no substitute: device-width media
+    queries keep answering 800x600.)
+
+    PARITY: the seed still selects the same screen row in every SDK (``headless_geometry``); only
+    how it is applied changed.
 
 PROVENANCE of the regime-2 table: the ``audit_profiles`` corpus (real captures from the public
 fingerprint audit), desktop rows whose geometry is self-consistent and which are not themselves
@@ -63,22 +69,23 @@ import gzip
 import hashlib
 import json
 import logging
+import sys
 
 logger = logging.getLogger("clearcote")
 
 # ---------------------------------------------------------------------------
-# Regime-2 engine window-frame delta: outer = inner + (WIDTH, HEIGHT).
+# The linux-x64 engine's window frame around an EMULATED viewport: outer = inner + (WIDTH, HEIGHT).
 #
-# Measured with no persona on 149.0.7827.114/linux-x64, and re-confirmed on the 150 build a
-# default launch resolves (same 8/131). Constant across every viewport probed
-# (1280x720 -> 1288x851, 1920x947 -> 1928x1078, 1912x909 -> 1920x1040, 2552x1269 -> 2560x1400).
-# The regime-2 viewport is sized against these, so an engine that changed them would put headless
-# windows back outside their screen. tests/test_geometry.py measures the running engine and fails on
-# drift — keep it in the release gate. (Regime 1 needs no constant: the window is fitted to the
-# persona's work area and the engine computes its own frame.)
+# Measured with no persona on 149.0.7827.114/linux-x64 (same 8/131 on 150), constant across every
+# viewport probed. win-x64 draws 16/134 instead, which is why launch no longer sizes anything
+# against these (see the module docstring). They remain the shared cross-SDK constants behind
+# ``headless_geometry``'s viewport and the floor a usable imported-profile screen must clear.
 # ---------------------------------------------------------------------------
 ENGINE_FRAME_WIDTH = 8
 ENGINE_FRAME_HEIGHT = 131
+
+# Windows' taskbar at 100% scaling; the engine's persona table uses the same 40px.
+WINDOWS_TASKBAR_HEIGHT = 40
 
 # (screen_width, screen_height, weight, os_hint) — weight is distinct /24s in the corpus.
 HEADLESS_SCREEN_PROFILES = (
@@ -94,8 +101,10 @@ HEADLESS_SCREEN_PROFILES = (
 
 # Geometry the caller may have chosen; any of them means hands off.
 _CALLER_GEOMETRY_KEYS = ("viewport", "no_viewport", "screen")
-# Window flags that mean the caller sized the window themselves (regime 1 skips its resize).
+# Window flags that mean the caller sized the window themselves (the fit skips its resize).
 _CALLER_WINDOW_FLAGS = ("--window-size", "--window-position", "--start-maximized")
+# Switches that mean the caller set the headless display themselves.
+_CALLER_DISPLAY_FLAGS = ("--screen-info",)
 
 
 def persona_active(args):
@@ -164,21 +173,90 @@ def _geometry_for(screen):
 
 
 def headless_geometry(seed=None):
-    """Regime-2 context geometry: ``{"screen": {...}, "viewport": {...}}``.
+    """A seed's regime-2 screen row: ``{"screen": {...}, "viewport": {...}}``.
 
-    The viewport is the screen minus the engine's frame, so the synthesized ``outerWidth/Height``
-    lands exactly on the screen edge (a maximized window) instead of past it.
+    The viewport is the screen minus the linux engine frame. This is the cross-SDK parity contract
+    (see the PARITY vector in the tests); launch takes only the screen from it.
     """
     sw, sh, _weight, _os = _pick(seed)
     return _geometry_for((sw, sh))
 
 
+def _switch_value(args, name):
+    """The value of the last ``--name=value`` on the command line, or None."""
+    prefix = f"--{name}="
+    found = None
+    for a in (args or []):
+        a = str(a)
+        if a.startswith(prefix):
+            found = a[len(prefix):]
+    return found
+
+
+def _switch_int(args, name):
+    try:
+        v = int(_switch_value(args, name))
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+_HOST_PLATFORM = {"win32": "windows", "linux": "linux", "darwin": "macos"}.get(sys.platform, "windows")
+
+
+def headless_display(seed=None, args=None, light_stealth=False):
+    """The regime-2 headless display, as ``{"width", "height", "avail_width", "avail_height"}``.
+
+    In order: an explicit ``--fingerprint-screen-width/height`` (already spoofed into ``screen.*``
+    by the engine, so the display must agree), an imported profile's screen, with ``light_stealth``
+    (``serve()`` only) the lightStealth row that also supplies the seed's DPR, and otherwise the
+    seed's corpus row (``headless_geometry``, identical in every SDK). A Windows platform gets a
+    taskbar; others report ``avail == screen``, which real captures do too. Everything else is read
+    off the command line, where the platform always is (it defaults to the host OS).
+    """
+    windows = (_switch_value(args, "fingerprint-platform") or _HOST_PLATFORM) == "windows"
+
+    def with_taskbar(width, height):
+        return {"width": width, "height": height, "avail_width": width,
+                "avail_height": height - WINDOWS_TASKBAR_HEIGHT if windows else height}
+
+    sw, sh = _switch_int(args, "fingerprint-screen-width"), _switch_int(args, "fingerprint-screen-height")
+    if sw and sh:
+        d = with_taskbar(sw, sh)
+        d["avail_width"] = min(_switch_int(args, "fingerprint-avail-width") or d["avail_width"], sw)
+        d["avail_height"] = min(_switch_int(args, "fingerprint-avail-height") or d["avail_height"], sh)
+        return d
+    from_profile = profile_screen_from_args(args)
+    if from_profile:
+        return with_taskbar(*from_profile)
+    if light_stealth:
+        from ._fingerprint import _light_stealth_screen
+        d = _light_stealth_screen(seed)
+        return d if windows else with_taskbar(d["width"], d["height"])
+    sw, sh, _weight, _os = _pick(seed)
+    return with_taskbar(sw, sh)
+
+
+def screen_info_switch(display):
+    """``--screen-info`` for a display: its size plus the work-area insets the taskbar takes."""
+    insets = "".join(
+        f" {k}={v}" for k, v in (("workAreaRight", display["width"] - display["avail_width"]),
+                                 ("workAreaBottom", display["height"] - display["avail_height"]))
+        if v > 0)
+    return f"--screen-info={{{display['width']}x{display['height']}{insets}}}"
+
+
 def apply_headless_geometry(pw_kwargs, seed=None, args=None):
     """Default a headless launch's geometry in place. Returns what was applied, or None.
 
-    ``{"mode": "persona"}`` means regime 1: ``no_viewport`` was set and the window still needs
-    fitting to the persona's work area (see ``fit_window_to_persona``). ``{"mode": "profile", ...}``
-    means regime 2: ``screen`` + ``viewport`` were set and nothing else is needed.
+    Both regimes set ``no_viewport`` (``inner`` tracks the real window) and leave the window to be
+    fitted to the work area on the first page (see ``fit_window_to_work_area``). The result's
+    ``"args"`` are switches to APPEND to the command line — in regime 2 the ones that give the
+    browser its headless display; the fit and skip checks keep reading the caller's own ``args``.
+
+    ``{"mode": "persona", "args": []}`` is regime 1. ``{"mode": "display", "display": ..., "args":
+    [...]}`` is regime 2; ``display`` is None when the caller passed their own ``--screen-info``.
+    A caller's own window switch keeps their window (the display is still set under it).
 
     Skipped when the launch is headed (the real window is already coherent) and when the caller
     expressed ANY geometry intent. ``headless`` unset means headless, matching Playwright.
@@ -187,20 +265,24 @@ def apply_headless_geometry(pw_kwargs, seed=None, args=None):
         return None
     if any(k in pw_kwargs for k in _CALLER_GEOMETRY_KEYS):
         return None
+    pw_kwargs["no_viewport"] = True
     if persona_active(args):
-        pw_kwargs["no_viewport"] = True
-        return {"mode": "persona"}
-    # An imported profile carries its own display; prefer it over a corpus pick so the identity the
-    # caller imported is the one the page sees (and so profile launches don't all share one screen).
-    from_profile = profile_screen_from_args(args)
-    geom = _geometry_for(from_profile) if from_profile else headless_geometry(seed)
-    pw_kwargs.update(geom)
-    return {"mode": "profile", "source": "imported" if from_profile else "corpus", **geom}
+        return {"mode": "persona", "args": []}
+    display = None if caller_set_the_display(args) else headless_display(seed, args)
+    extra = [screen_info_switch(display)] if display else []
+    if not caller_sized_the_window(args):
+        extra.append("--window-position=0,0")
+    return {"mode": "display", "display": display, "args": extra}
 
 
 def caller_sized_the_window(args):
     """True when the caller passed their own window geometry flag."""
     return any(str(a).split("=", 1)[0] in _CALLER_WINDOW_FLAGS for a in (args or []))
+
+
+def caller_set_the_display(args):
+    """True when the caller passed their own headless display switch."""
+    return any(str(a).split("=", 1)[0] in _CALLER_DISPLAY_FLAGS for a in (args or []))
 
 
 # A plain expression, NOT "() => [...]": Playwright's JS/.NET bindings evaluate an
@@ -211,9 +293,9 @@ _OUTER_JS = "[outerWidth, outerHeight]"
 
 
 def _plausible(area):
-    """Guard against fitting the window to a nonsense work area: if the persona did not engage the
-    page reports the headless default (800x600), and 'maximizing' to that would be worse than
-    leaving the window alone."""
+    """Guard against fitting the window to a nonsense work area: with no display set the page
+    reports the headless default (800x600), and 'maximizing' to that would be worse than leaving
+    the window alone."""
     return bool(area) and len(area) == 2 and area[0] >= 1024 and area[1] >= 600
 
 
@@ -239,10 +321,10 @@ def _fit_plan(avail, outer):
     return (avail[0] + max(dw, 0), avail[1] + max(dh, 0))
 
 
-def fit_window_to_persona(page, args=None):
-    """Regime 1: size the headless window to the persona's own work area, so the page reports a
-    maximized window (``outer == avail``) instead of the 800x600 headless default sitting inside a
-    spoofed 1920x1080 screen.
+def fit_window_to_work_area(page, args=None):
+    """Size the headless window to the display's work area — the persona's (regime 1) or the one
+    ``--screen-info`` set (regime 2) — so the page reports a maximized window (``outer == avail``)
+    instead of the headless default window sitting inside a much larger screen.
 
     Note ``--start-maximized`` and CDP ``windowState: "maximized"`` are both no-ops in headless
     (measured — the window stays at its default size), which is why this sets explicit bounds.
@@ -280,8 +362,8 @@ def fit_window_to_persona(page, args=None):
         return None
 
 
-async def fit_window_to_persona_async(page, args=None):
-    """Async mirror of ``fit_window_to_persona``."""
+async def fit_window_to_work_area_async(page, args=None):
+    """Async mirror of ``fit_window_to_work_area``."""
     if caller_sized_the_window(args):
         return None
     try:
@@ -311,51 +393,6 @@ async def fit_window_to_persona_async(page, args=None):
         return None
 
 
-def _cdp_window(page):
-    """The CDP session + window id for ``page``'s browser window."""
-    cdp = page.context.new_cdp_session(page)
-    return cdp, cdp.send("Browser.getWindowForTarget")["windowId"]
-
-
-def move_window_to_origin(page, args=None):
-    """Regime 2: move the real window to (0, 0).
-
-    Regime 2 leaves the real window at the headless default position — measured (10, 10) — while the
-    emulated viewport makes ``outerWidth/Height`` span the whole spoofed screen. ``screenX +
-    outerWidth`` then exceeds ``screen.width``: the window hangs 10px past the screen edge on both
-    axes. Only 6% of real single-display captures do that, so it is a weak but free tell. Moving the
-    window costs one CDP call and leaves the emulated viewport untouched (verified: inner/outer
-    unchanged, screenX/Y become 0).
-
-    Returns the position applied, or None if skipped. Never raises.
-    """
-    if caller_sized_the_window(args):
-        return None
-    try:
-        cdp, window_id = _cdp_window(page)
-        # left/top only — sending width/height here would fight the emulated viewport.
-        cdp.send("Browser.setWindowBounds", {"windowId": window_id, "bounds": {"left": 0, "top": 0}})
-        return (0, 0)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("window move skipped: %s", exc)
-        return None
-
-
-async def move_window_to_origin_async(page, args=None):
-    """Async mirror of ``move_window_to_origin``."""
-    if caller_sized_the_window(args):
-        return None
-    try:
-        cdp = await page.context.new_cdp_session(page)
-        window = await cdp.send("Browser.getWindowForTarget")
-        await cdp.send("Browser.setWindowBounds",
-                       {"windowId": window["windowId"], "bounds": {"left": 0, "top": 0}})
-        return (0, 0)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("window move skipped: %s", exc)
-        return None
-
-
 def geometry_is_coherent(screen, avail, inner, outer):
     """``inner <= outer <= avail <= screen`` on both axes — the chain a real window satisfies.
 
@@ -366,3 +403,157 @@ def geometry_is_coherent(screen, avail, inner, outer):
         and outer[0] <= avail[0] and outer[1] <= avail[1]
         and avail[0] <= screen[0] and avail[1] <= screen[1]
     )
+
+
+# ---------------------------------------------------------------------------------------------------
+# serve(): a raw CDP endpoint. Port of the Node SDK's section of the same name.
+#
+# Everything above rides on Playwright: ``no_viewport`` is a context option and the fit runs on each
+# context's first page. A raw endpoint has neither, and a CDP emulation override would not survive
+# either, being scoped to the session that set it. What every target and every client of a served
+# browser inherits is the headless DISPLAY and the real WINDOW, both browser-level. Untouched, a
+# served headless browser reports the 800x600 surface as its screen (measured on 153/win-x64).
+#
+# REGIME 2 (no persona): ``--screen-info``, as in launch, makes the headless display a real-machine
+# size before the first document exists, so screen.*, device-width media queries, window clamping
+# and popup placement all agree. The one difference from launch is which row: serve() takes a
+# light_stealth seed's own row (its DPR's pair), launch the cross-SDK one.
+#
+# REGIME 1 (persona): the persona picks its display inside the engine, so it is only known once a
+# page can be asked. ``Emulation.updateScreen`` (headless-only, browser-level, outlives the session
+# that sent it) then resizes the headless display to match.
+#
+# BOTH: one ``Browser.setWindowBounds`` puts the first window on the work area, and
+# ``--window-position`` puts later windows at the work-area origin. Deliberately no ``--window-size``:
+# it forces every popup to that size, ignoring the window.open() features real Chrome honours.
+# ---------------------------------------------------------------------------------------------------
+
+def served_geometry(engine_args, seed=None, light_stealth=False, headless=True):
+    """What serve() adds for a headless launch, or None to leave geometry alone (headed, or the
+    caller passed a window or display switch of their own; the SDK's own android ``--window-size``
+    counts, since a phone persona sizes itself).
+
+    Returns ``{"persona": bool, "display": dict|None, "args": [...]}``.
+    """
+    if not headless or caller_sized_the_window(engine_args) or caller_set_the_display(engine_args):
+        return None
+    origin = "--window-position=0,0"
+    if persona_active(engine_args):
+        return {"persona": True, "display": None, "args": [origin]}
+    display = headless_display(seed, engine_args, light_stealth=light_stealth)
+    return {"persona": False, "display": display, "args": [screen_info_switch(display), origin]}
+
+
+def validate_window_size(window_size):
+    """``window_size`` as ``(width, height)`` whole CSS px in 100-10000, or None. Accepts a
+    ``{"width", "height"}`` dict or a pair; anything else raises ``TypeError``."""
+    if window_size is None:
+        return None
+    if isinstance(window_size, dict):
+        pair = (window_size.get("width"), window_size.get("height"))
+    elif isinstance(window_size, (tuple, list)) and len(window_size) == 2:
+        pair = tuple(window_size)
+    else:
+        pair = None
+    if not pair or not all(isinstance(v, int) and not isinstance(v, bool) and 100 <= v <= 10000
+                           for v in pair):
+        raise TypeError(
+            "clearcote serve: window_size must be {'width', 'height'} in whole CSS px, 100-10000")
+    return pair
+
+
+_DISPLAY_JS = ("[screen.width, screen.height, screen.availLeft, screen.availTop, "
+               "screen.availWidth, screen.availHeight]")
+
+
+def fit_window_over_cdp(cdp, persona, window_size=None):
+    """Put the served browser's first window on its display's work area (or ``window_size``, clamped
+    into it); under a persona, first make the headless display the persona's own.
+
+    Over a browser-level CDP connection (anything with ``send(method, params, session_id)``), on the
+    first page target. Only Target/Emulation/Browser commands plus one Runtime.evaluate (never
+    Runtime.enable) on that page, and every change is browser-level, so nothing lingers on the page
+    when the connection closes.
+
+    Returns ``{"display": {...}, "outer": (w, h)}``, or None when it could not act (no page, an
+    implausible display, or an engine without ``Emulation.updateScreen`` under a persona, whose
+    window cannot outgrow 800x600 without it). Never raises.
+    """
+    session_id = None
+    try:
+        targets = cdp.send("Target.getTargets").get("targetInfos") or []
+        page = next((t for t in targets if t.get("type") == "page"), None)
+        if not page:
+            return None
+        session_id = cdp.send("Target.attachToTarget",
+                              {"targetId": page["targetId"], "flatten": True})["sessionId"]
+
+        def read(expression):
+            res = cdp.send("Runtime.evaluate",
+                           {"expression": expression, "returnByValue": True}, session_id)
+            return res["result"]["value"]
+
+        sw, sh, al, at, aw, ah = read(_DISPLAY_JS)
+        if not _plausible([aw, ah]) or aw > sw or ah > sh:
+            return None
+        if persona:
+            screens = cdp.send("Emulation.getScreenInfos").get("screenInfos") or []
+            primary = next((s for s in screens if s.get("isPrimary")), screens[0] if screens else None)
+            if not primary:
+                return None
+            cdp.send("Emulation.updateScreen", {
+                "screenId": primary["id"], "left": 0, "top": 0, "width": sw, "height": sh,
+                "workAreaInsets": {"left": al, "top": at,
+                                   "right": sw - al - aw, "bottom": sh - at - ah},
+            })
+        # The asked-for size, never past the work area; a window smaller than it sits 10px in, like
+        # Chrome's own first placement.
+        w = min(int(round(window_size[0])), aw) if window_size else aw
+        h = min(int(round(window_size[1])), ah) if window_size else ah
+        left, top = al + min(10, aw - w), at + min(10, ah - h)
+        window_id = cdp.send("Browser.getWindowForTarget",
+                             {"targetId": page["targetId"]})["windowId"]
+
+        def set_bounds(bw, bh):
+            cdp.send("Browser.setWindowBounds", {"windowId": window_id, "bounds": {
+                "left": left, "top": top, "width": int(round(bw)), "height": int(round(bh))}})
+
+        set_bounds(w, h)
+        outer = read(_OUTER_JS)
+        # Same self-tuning as fit_window_to_work_area: an engine that reports less than the bounds
+        # it was given gets the shortfall added back, and an overshoot is reverted.
+        plan = _fit_plan((w, h), outer)
+        if plan:
+            set_bounds(*plan)
+            outer = read(_OUTER_JS)
+            if outer[0] > w or outer[1] > h:
+                set_bounds(w, h)
+                outer = read(_OUTER_JS)
+        return {"display": {"width": sw, "height": sh, "avail_width": aw, "avail_height": ah},
+                "outer": (outer[0], outer[1])}
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("served window fit skipped: %s", exc)
+        return None
+    finally:
+        if session_id:
+            try:
+                cdp.send("Target.detachFromTarget", {"sessionId": session_id})
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def fit_served_window(ws_url, persona, window_size=None, timeout=5.0):
+    """``fit_window_over_cdp`` on the SDK's own short connection to a served browser. Never raises."""
+    if not ws_url:
+        return None
+    from ._cdpws import CdpConnection
+    cdp = None
+    try:
+        cdp = CdpConnection(ws_url, timeout=timeout)
+        return fit_window_over_cdp(cdp, persona, window_size)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("served window fit skipped: %s", exc)
+        return None
+    finally:
+        if cdp:
+            cdp.close()

@@ -426,3 +426,66 @@ def test_run_token_file_env_carries_file_alongside_token():
     L.inject_run_token(pw2, "tok.sig")
     assert pw2["env"]["CLEARCOTE_RUN_TOKEN"] == "tok.sig"
     assert "CLEARCOTE_RUN_TOKEN_FILE" not in pw2["env"]
+
+
+# -- profile="auto" must not deadlock the caller against its own slot -----------------------
+
+class _FakeBrowser:
+    def on(self, *a, **k):
+        pass
+
+    def new_page(self, **kw):
+        return kw
+
+    def new_context(self, **kw):
+        return kw
+
+    def close(self):
+        pass
+
+
+def _fake_driver(monkeypatch):
+    """Playwright stand-in: both launch entry points hand back the same fake browser."""
+    class _Chromium:
+        def launch(self, **kw):
+            return _FakeBrowser()
+
+        def launch_persistent_context(self, *a, **kw):
+            return _FakeBrowser()
+
+    class _PW:
+        chromium = _Chromium()
+
+    monkeypatch.setattr(clearcote, "_playwright", lambda: _PW())
+    monkeypatch.setattr(clearcote, "install_humanize", lambda *a, **k: None)
+    monkeypatch.setattr(clearcote, "install_humanize_on_context", lambda *a, **k: None)
+
+
+def test_free_auto_profile_probe_runs_on_the_callers_slot(env, monkeypatch, tmp_path):
+    """profile="auto" launches the engine a second time to read the host. On a per-browser plan
+    that probe used to check out its OWN slot while the caller's was already live, so the launch
+    was refused by its own lease: ConcurrencyLimitError from a call the caller never wrote."""
+    _, be = env("free")
+    _fake_driver(monkeypatch)
+    probe = {"lease_kw": None}
+
+    def fake_measure(launch_fn, exe, major):
+        # the real one launches the engine with no persona — the part that matters here
+        probe["browser"] = launch_fn(executable_path=exe, headless=True, quiet=True)
+        return {"os_family": "linux", "browser_major": major, "gpu_vendor": "intel",
+                "screen_width": 1920, "screen_height": 1080, "device_pixel_ratio": 1,
+                "hardware_concurrency": 8, "device_memory": 8}
+
+    monkeypatch.setattr(clearcote, "measure_host", fake_measure)
+    monkeypatch.setattr(clearcote, "resolve_auto", lambda host, **kw: {
+        "profile": {"navigator": {"user_agent": "ua"}}, "selection": {"entry": {"id": "p1"}},
+        "source": "service"})
+    exe = tmp_path / "chrome"
+    exe.write_bytes(bytes([0]))
+
+    ctx = clearcote.launch_persistent_context(str(tmp_path / "udd"), profile="auto",
+                                              executable_path=str(exe), quiet=True)
+
+    assert ctx is not None
+    assert probe["browser"] is not None          # the probe really did launch
+    assert len(be.eps("checkout")) == 1          # ...on the caller's slot, not a second one

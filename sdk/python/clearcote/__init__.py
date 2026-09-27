@@ -29,7 +29,7 @@ from ._fingerprint import FINGERPRINT_KEYS, fingerprint_args, is_fingerprint_pas
 from ._fontpersona import ensure_persona_fonts, font_reachability
 from ._fonts import apply_font_env
 from ._shaderdialect import apply_shader_dialect
-from ._geometry import apply_headless_geometry, fit_window_to_persona, move_window_to_origin
+from ._geometry import apply_headless_geometry, fit_window_to_work_area
 from ._humanize import install_humanize, install_humanize_on_context
 from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for tests)
     DEFAULT_IGNORED_ARGS,
@@ -147,7 +147,7 @@ __all__ = [
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.30.0"
+__version__ = "0.31.0"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -278,7 +278,7 @@ def _guard(exe):
         )
 
 
-def _apply_auto_profile(fp, exe, select, quiet=False, pro=None):
+def _apply_auto_profile(fp, exe, select, quiet=False, pro=None, lease=None):
     """Resolve ``profile="auto"`` into ``fingerprint_profile``, in place.
 
     Host GPU/display can only be read by rendering, so this may launch the engine once with NO
@@ -306,9 +306,12 @@ def _apply_auto_profile(fp, exe, select, quiet=False, pro=None):
     # ephemeral_profile=False: the host probe reads GPU + display off about:blank and needs no
     # profile, so it takes the cheap incognito path rather than creating and deleting a directory
     # on every "auto" resolution.
+    # _cc_lease: run the probe on the CALLER's slot. Checking out a second one deadlocks the
+    # caller against itself on a per-browser plan, and the probe is strictly inside this launch.
     host = measure_host(
         lambda **kw: launch(
-            license_key=license_key, license_api_base=api_base, ephemeral_profile=False, **kw
+            license_key=license_key, license_api_base=api_base, ephemeral_profile=False,
+            _cc_lease=lease, **kw
         ),
         exe,
         major,
@@ -378,6 +381,7 @@ def _prepare(kwargs):
     agent = {k: kwargs.pop(k) for k in list(kwargs) if k in AGENT_KEYS}
     exe_path = kwargs.pop("executable_path", None)
     _cc_pro = kwargs.pop("_cc_pro", None)  # (license_key, api_base) or None -> pick PRO vs free binary
+    outer_lease = kwargs.pop("_cc_lease", None)  # this launch's slot; the "auto" probe reuses it
     extra_args = kwargs.pop("args", None)
     extensions = kwargs.pop("extensions", None)
     portable_profile = kwargs.pop("portable_profile", False)
@@ -429,7 +433,7 @@ def _prepare(kwargs):
     # Pass-through (fingerprint="off") runs with NO persona, so "auto" has nothing to apply.
     if kwargs.pop("_cc_is_auto", False) and not passthrough:
         _apply_auto_profile(fp, exe, kwargs.pop("_cc_auto_profile", None) or {},
-                            quiet=quiet, pro=_cc_pro)
+                            quiet=quiet, pro=_cc_pro, lease=outer_lease)
     else:
         kwargs.pop("_cc_auto_profile", None)
     # Fonts are the most identifying surface measured -- 9.45 bits of entropy, and 35% of real
@@ -525,19 +529,23 @@ def _install_headed_viewport(browser):
 def _headless_geometry_kwargs(pw_kwargs, seed, args=None):
     """The headless geometry defaults for this launch, or None if they don't apply.
 
-    ``apply_headless_geometry`` mutates, and ``chromium.launch()`` accepts neither ``viewport`` nor
-    ``screen`` (they are context options), so probe a copy and carry the result to the context.
+    ``apply_headless_geometry`` mutates, and ``chromium.launch()`` accepts no ``no_viewport`` (a
+    context option), so probe a copy and carry the result to the context.
     """
     return apply_headless_geometry(dict(pw_kwargs), seed, args)
 
 
-def _install_window_fixup(container, args, persona):
-    """Apply the headless window fixup once, on the first page.
+def _with_geometry_args(args, geom):
+    """The command line plus the headless display switches ``geom`` asks for (regime 2)."""
+    return list(args) + list((geom or {}).get("args") or [])
 
-    Persona regime: fit the window to the persona's work area. Profile regime: move the window to the
-    origin so it stops overhanging the spoofed screen edge. A persistent context already owns a page,
-    so act immediately; a browser-level context does not, so defer to its first ``new_page``.
-    Idempotent — later tabs share the window.
+
+def _install_window_fixup(container, args):
+    """Fit the headless window to the display's work area once, on the first page.
+
+    A persistent context already owns a page, so act immediately; a browser-level context does not,
+    so defer to its first ``new_page``. Idempotent — later tabs share the window. ``args`` are the
+    caller's, so a window switch of theirs is respected.
     """
     done = []
 
@@ -545,10 +553,7 @@ def _install_window_fixup(container, args, persona):
         if done:
             return page
         done.append(True)
-        if persona:
-            fit_window_to_persona(page, args)
-        else:
-            move_window_to_origin(page, args)
+        fit_window_to_work_area(page, args)
         return page
 
     pages = getattr(container, "pages", None)
@@ -563,35 +568,30 @@ def _install_window_fixup(container, args, persona):
     return None
 
 
-def _install_headless_geometry(browser, geom, args=None):
-    """Default a headless browser's new pages/contexts to ``geom``.
+def _install_headless_geometry(browser, args=None):
+    """Default a headless browser's new pages/contexts to ``no_viewport`` plus a window fit.
 
     ``chromium.launch()`` accepts no context options, so the default has to ride on
-    ``new_page``/``new_context`` — the same shape as ``_install_headed_viewport``. In persona mode
-    each new context is a new window, so each also gets the window fit. A caller who passes any of
-    ``viewport`` / ``no_viewport`` / ``screen`` per call keeps full control.
+    ``new_page``/``new_context`` — the same shape as ``_install_headed_viewport``. Each new context
+    is a new window, so each also gets the window fit (to the persona's work area, or the display
+    ``--screen-info`` set). A caller who passes any of ``viewport`` / ``no_viewport`` / ``screen``
+    per call keeps full control.
     """
-    persona = geom.get("mode") == "persona"
-    defaults = {"no_viewport": True} if persona else {
-        k: v for k, v in geom.items() if k in ("screen", "viewport")}
     orig_new_page, orig_new_context = browser.new_page, browser.new_context
 
     def _merge(kw):
         if not any(k in kw for k in ("viewport", "no_viewport", "screen")):
-            kw.update(defaults)
+            kw["no_viewport"] = True
         return kw
 
     def new_page(**kw):
         page = orig_new_page(**_merge(kw))
-        if persona:
-            fit_window_to_persona(page, args)
-        else:
-            move_window_to_origin(page, args)
+        fit_window_to_work_area(page, args)
         return page
 
     def new_context(**kw):
         context = orig_new_context(**_merge(kw))
-        _install_window_fixup(context, args, persona)
+        _install_window_fixup(context, args)
         return context
 
     browser.new_page, browser.new_context = new_page, new_context
@@ -727,12 +727,29 @@ def _acquire_lease_from_kwargs(kwargs):
     version_sel = kwargs.get("version") or os.environ.get("CLEARCOTE_BROWSER_VERSION")
     # license_through_proxy: checkout/heartbeat/checkin through the launch's own proxy.
     license_through_proxy = kwargs.pop("license_through_proxy", None)
-    return acquire_lease(
+    lease = acquire_lease(
         license_key=license_key, api_base=license_api_base,
         sdk_version=__version__, quiet=kwargs.get("quiet", False),
         engine_version=lambda: resolved_engine_version(version_sel, has_license=bool(key)),
         license_through_proxy=license_through_proxy, proxy=kwargs.get("proxy"),
     )
+    # Hand this slot to the nested host probe behind profile="auto" (see _apply_auto_profile).
+    # It launches the engine once more, and used to check out a SECOND slot while this one is
+    # already live -- which a per-browser plan (the free tier) refuses, so the launch deadlocked
+    # against itself. _prepare pops this key; it never reaches Playwright.
+    kwargs["_cc_lease"] = lease
+    return lease
+
+
+def _adopt_license_kwargs(kwargs, lease):
+    """Consume the licence kwargs exactly as :func:`_acquire_lease_from_kwargs` would, but reuse
+    ``lease`` instead of checking out a second concurrency slot. Used by the nested host probe."""
+    license_key = kwargs.pop("license_key", None)
+    license_api_base = kwargs.pop("license_api_base", None)
+    kwargs.pop("license_through_proxy", None)
+    key = resolve_license_key(license_key)
+    kwargs["_cc_pro"] = (key, license_api_base) if key else None
+    return lease
 
 
 def _prepare_or_release(kwargs, lease):
@@ -801,30 +818,38 @@ def launch(**kwargs):
         return _install_persistent_as_browser(context)
 
     shader_dialect = kwargs.pop("shader_dialect", None)  # popped before _prepare: not a PW option
-    lease = _acquire_lease_from_kwargs(kwargs)  # opt-in; None in free mode
+    # _cc_lease (internal): the host probe behind profile="auto" runs on its caller's slot rather
+    # than checking out its own. It does not own the lease, so it must not release it on close.
+    reused = kwargs.pop("_cc_lease", None)
+    owns_lease = reused is None
+    lease = _acquire_lease_from_kwargs(kwargs) if owns_lease else _adopt_license_kwargs(kwargs, reused)
     # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
-    exe, args, pw_kwargs, humanize, show_cursor, seed = _prepare_or_release(kwargs, lease)
+    exe, args, pw_kwargs, humanize, show_cursor, seed = _prepare_or_release(
+        kwargs, lease if owns_lease else None)
     apply_font_env(exe, pw_kwargs)  # Linux: point FONTCONFIG_FILE at the bundled font clones
     apply_shader_dialect(shader_dialect, pw_kwargs)  # after fonts: that helper rebuilds the env
     launch_token = lease.bind_launch() if lease else None  # (file, release) or None; r23+ opt-in
     if lease:  # inject CLEARCOTE_RUN_TOKEN (+ the r23+ opt-in token FILE) so the gate lets it launch
         inject_run_token(pw_kwargs, lease.token, launch_token[0])
     headed = _headed_no_viewport(pw_kwargs)  # launch() takes no viewport kwarg -> wrap new_page/context
-    # Headless: screen.* has to be overridden alongside the viewport or the window reports
-    # outer > screen (see _geometry). Also a context option, so it rides on new_page/new_context.
+    # Headless: screen.* has to be handled alongside the viewport or the window reports
+    # outer > screen (see _geometry). The display switches go on the command line; no_viewport is a
+    # context option, so it rides on new_page/new_context.
     geom = None if headed else _headless_geometry_kwargs(pw_kwargs, seed, args)
-    browser = _release_lease_on_failure(lease, lambda: _win_av_retry(
-        lambda e: _playwright().chromium.launch(executable_path=e, args=args, **pw_kwargs), exe
+    launch_args = _with_geometry_args(args, geom)
+    browser = _release_lease_on_failure(lease if owns_lease else None, lambda: _win_av_retry(
+        lambda e: _playwright().chromium.launch(executable_path=e, args=launch_args, **pw_kwargs), exe
     ))
     if lease:  # release the concurrency slot + remove the run-token file when the browser closes
-        def _on_disconnect(_b=None, _lease=lease, _lt=launch_token):
-            _lease.stop()
+        def _on_disconnect(_b=None, _lease=lease, _lt=launch_token, _own=owns_lease):
+            if _own:  # a borrowed slot belongs to the caller: only drop this launch's token file
+                _lease.stop()
             _lt[1]()
         browser.on("disconnected", _on_disconnect)
     if headed:
         _install_headed_viewport(browser)
     elif geom:
-        _install_headless_geometry(browser, geom, args)
+        _install_headless_geometry(browser, args)
     install_humanize(browser, humanize, show_cursor, seed=seed)
     return browser
 
@@ -843,9 +868,14 @@ def launch_persistent_context(user_data_dir, **kwargs):
     if kwargs.get("widevine"):
         apply_widevine_launch(user_data_dir, kwargs, quiet=kwargs.get("quiet", False))
     shader_dialect = kwargs.pop("shader_dialect", None)  # popped before _prepare: not a PW option
-    lease = _acquire_lease_from_kwargs(kwargs)  # opt-in; None in free mode
+    # _cc_lease (internal): a launch that borrows its caller's slot (the profile="auto" host probe
+    # reaches here when ephemeral_profile is left on). It must not release a slot it does not own.
+    reused = kwargs.pop("_cc_lease", None)
+    owns_lease = reused is None
+    lease = _acquire_lease_from_kwargs(kwargs) if owns_lease else _adopt_license_kwargs(kwargs, reused)
     # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
-    exe, args, pw_kwargs, humanize, show_cursor, seed = _prepare_or_release(kwargs, lease)
+    exe, args, pw_kwargs, humanize, show_cursor, seed = _prepare_or_release(
+        kwargs, lease if owns_lease else None)
     apply_font_env(exe, pw_kwargs)  # Linux: point FONTCONFIG_FILE at the bundled font clones
     apply_shader_dialect(shader_dialect, pw_kwargs)  # after fonts: that helper rebuilds the env
     launch_token = lease.bind_launch() if lease else None  # (file, release) or None; r23+ opt-in
@@ -854,21 +884,23 @@ def launch_persistent_context(user_data_dir, **kwargs):
     geom = None
     if _headed_no_viewport(pw_kwargs):  # no_viewport IS a valid persistent-context option
         pw_kwargs["no_viewport"] = True
-    else:  # headless: persona owns screen -> fit the window; no persona -> override screen
+    else:  # headless: persona owns screen -> fit the window; no persona -> set the display too
         geom = apply_headless_geometry(pw_kwargs, seed, args)
-    context = _release_lease_on_failure(lease, lambda: _win_av_retry(
+    launch_args = _with_geometry_args(args, geom)
+    context = _release_lease_on_failure(lease if owns_lease else None, lambda: _win_av_retry(
         lambda e: _playwright().chromium.launch_persistent_context(
-            user_data_dir, executable_path=e, args=args, **pw_kwargs
+            user_data_dir, executable_path=e, args=launch_args, **pw_kwargs
         ),
         exe,
     ))
     if lease:  # release the concurrency slot + remove the run-token file when the context closes
-        def _on_close(_c=None, _lease=lease, _lt=launch_token):
-            _lease.stop()
+        def _on_close(_c=None, _lease=lease, _lt=launch_token, _own=owns_lease):
+            if _own:  # a borrowed slot belongs to the caller: only drop this launch's token file
+                _lease.stop()
             _lt[1]()
         context.on("close", _on_close)
     if geom:
-        _install_window_fixup(context, args, geom.get("mode") == "persona")
+        _install_window_fixup(context, args)
     install_humanize_on_context(context, humanize, show_cursor, seed=seed)
     return context
 
