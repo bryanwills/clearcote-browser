@@ -60,7 +60,7 @@ One real Chromium keeps the JS identity, the **UA / UA-CH** headers, and the **T
 </tr>
 </table>
 
-> **What's new** — the open build moves to **Chromium 150**: [v0.1.0-pre.23](https://github.com/clearcotelabs/clearcote-browser/releases/tag/v0.1.0-pre.23), SDK `clearcote` **0.31.1**.
+> **What's new** — the open build moves to **Chromium 150**: [v0.1.0-pre.23](https://github.com/clearcotelabs/clearcote-browser/releases/tag/v0.1.0-pre.23), SDK `clearcote` **0.32.0**.
 > In 150: a font list modelled on real Windows installs instead of one short list shared by every copy,
 > separate WebGL1/WebGL2 extension lists with every advertised extension actually available,
 > `deviceMemory` in the same steps real Chrome reports, touch-capable laptops that still report a mouse

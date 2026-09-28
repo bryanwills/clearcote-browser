@@ -537,8 +537,8 @@ By default the SDK downloads the exact build pinned into this package. To pick a
 major/version instead, pass `version=` (or set `CLEARCOTE_BROWSER_VERSION`):
 
 ```python
-launch(fingerprint="seed-1", version="149")      # newest 149.x (free)
-launch(version="149.0.7827.114")                 # an exact build
+launch(fingerprint="seed-1", version="150")      # newest 150.x (free)
+launch(version="150.0.7871.114")                 # an exact build
 launch(version="latest")                         # newest you can access
 launch(version="150", license_key="cc_lic_...")  # a PRO-tier version (see below)
 ```

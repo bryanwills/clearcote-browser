@@ -459,8 +459,8 @@ By default the SDK downloads the exact build pinned into this package. To pick a
 major/version instead, pass `version` (or set `CLEARCOTE_BROWSER_VERSION`):
 
 ```ts
-await launch({ fingerprint: "seed-1", version: "149" });     // newest 149.x (free)
-await launch({ version: "149.0.7827.114" });                 // an exact build
+await launch({ fingerprint: "seed-1", version: "150" });     // newest 150.x (free)
+await launch({ version: "150.0.7871.114" });                 // an exact build
 await launch({ version: "latest" });                         // newest you can access
 await launch({ version: "150", licenseKey: "cc_lic_..." });  // a PRO-tier version (see below)
 ```
