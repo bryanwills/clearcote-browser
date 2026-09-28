@@ -59,7 +59,7 @@ $STAGE = "C:\clearcote\release"        # local staging dir for the artifacts (yo
 
 ## 3. Asset naming (must match VERIFY.md)
 
-For Chromium version `$V` (e.g. `149.0.7827.114`) and platform `$PLAT` (e.g. `windows-x64`):
+For Chromium version `$V` (e.g. `150.0.7871.114`) and platform `$PLAT` (e.g. `windows-x64`):
 
 ```
 clearcote-$V-$PLAT.zip            # the build
@@ -152,7 +152,7 @@ concrt140.dll  msvcp140.dll  ucrtbase.dll  vcruntime140.dll  vcruntime140_1.dll
 ssh "$BOX" 'bash -s' <<'EOF'
 set -e
 cd ~/clearcoat/dist
-V=149.0.7827.114            # <-- set to this release's Chromium version
+V=150.0.7871.114            # <-- set to this release's Chromium version
 PLAT=windows-x64
 ASSET=clearcote-${V}-${PLAT}.zip
 
@@ -168,7 +168,7 @@ unzip -l "$ASSET" | grep -iE "msvcp140|vcruntime140|vcruntime140_1|concrt140|ucr
 EOF
 ```
 
-> **Never publish a zip without confirming the five VC++ DLLs *and* the SxS `*.manifest` are present** — `unzip -l "$ASSET" | grep -iE "msvcp140|vcruntime140|vcruntime140_1|concrt140|ucrtbase|\.manifest"` should list all six. The `149.*.manifest` is as essential as the DLLs: without it `chrome.exe` fails with *"the side-by-side configuration is incorrect"* (`spawn UNKNOWN` via Playwright). Verify on a clean Windows VM that `chrome.exe` actually launches.
+> **Never publish a zip without confirming the five VC++ DLLs *and* the SxS `*.manifest` are present** — `unzip -l "$ASSET" | grep -iE "msvcp140|vcruntime140|vcruntime140_1|concrt140|ucrtbase|\.manifest"` should list all six. The `<version>.manifest` is as essential as the DLLs: without it `chrome.exe` fails with *"the side-by-side configuration is incorrect"* (`spawn UNKNOWN` via Playwright). Verify on a clean Windows VM that `chrome.exe` actually launches.
 
 ---
 
@@ -178,7 +178,7 @@ EOF
 ssh "$BOX" 'bash -s' <<'EOF'
 set -e
 cd ~/clearcoat/dist
-V=149.0.7827.114; PLAT=windows-x64
+V=150.0.7871.114; PLAT=windows-x64
 ASSET=clearcote-${V}-${PLAT}.zip
 FPR=CA96F185F96A693AEDB3AC1FCB00D851B7A86B0F
 
@@ -230,7 +230,7 @@ Run from the parent of `$STAGE` so the destination is a **relative** path — `s
 # ensure the local dest dir exists first (scp errors "not a directory" otherwise)
 mkdir -p release
 scp -o StrictHostKeyChecking=no \
-  "$BOX:~/clearcoat/dist/clearcote-149.0.7827.114-windows-x64.zip*" \
+  "$BOX:~/clearcoat/dist/clearcote-150.0.7871.114-windows-x64.zip*" \
   "$BOX:~/clearcoat/dist/SHA256SUMS.txt*" \
   "$BOX:~/clearcoat/dist/clearcote-signing-key.asc" \
   release/
@@ -241,7 +241,7 @@ scp -o StrictHostKeyChecking=no \
 Then confirm the transfer is byte-identical to the signed value (PowerShell):
 
 ```powershell
-$z = "$STAGE\clearcote-149.0.7827.114-windows-x64.zip"
+$z = "$STAGE\clearcote-150.0.7871.114-windows-x64.zip"
 (Get-FileHash $z -Algorithm SHA256).Hash.ToLower()   # must equal ZIPHASH / the zip line in SHA256SUMS.txt
 ```
 
@@ -283,7 +283,7 @@ $gh   = "gh"                              # GitHub CLI on PATH (or its full path
 $git  = "git"
 $repo = "$env:TEMP\clearcote-pub"         # the fresh clone (§11)
 $tag  = "v0.1.0-pre.1"
-$V    = "149.0.7827.114"
+$V    = "150.0.7871.114"
 
 # pre-publish: main must be at the intended release commit (tags are immutable, §2)
 & $git -C $repo fetch --quiet
@@ -329,7 +329,7 @@ Every release MUST refresh `patches/` so a third party can rebuild the published
 ssh "$BOX" 'cd ~/clearcoat && bash gen_patches.sh'   # diffs tree vs pristine baseline, groups, self-validates
 ```
 
-`gen_patches.sh` reconstructs a pristine `149 → prune → ungoogled → windows-overlay` baseline, diffs the build tree against it (fetched toolchain **and** `*.cfbak*`/`*.bak`/`*.orig`/`*.rej` excluded), groups each changed file into exactly one concern-patch, writes `series`, then **self-validates that every patch re-applies with ZERO rejects** and leak-scans. **Acceptance:** `VALIDATION fail=0`, nothing left in `950-misc-REVIEW` (add a `group_for` mapping for any new file and re-run), and `leak scan clean`. Then copy `out_patches_full/*.patch` + `series` over `patches/`, update `patches/README.md`'s series table (new rows + revised descriptions), and commit them **in the same push** as the README banner below. Because each source file lives in exactly one patch, zero-reject per-patch equals a clean sequential apply — so applying the series to a fresh baseline reproduces this build's source tree. After regenerating, **re-run the §4a patch-integrity gate**: Layer 1 must now be clean (the refreshed `patches/` reverse-apply to the build tree), which is the machine-checkable proof that the committed set reproduces this binary. `gen_patches.sh` validates re-apply against a *pristine* baseline; the §4a gate validates it against the *actual built tree* + the *actual binary* — keep both.
+`gen_patches.sh` reconstructs a pristine `150 → prune → ungoogled → windows-overlay` baseline, diffs the build tree against it (fetched toolchain **and** `*.cfbak*`/`*.bak`/`*.orig`/`*.rej` excluded), groups each changed file into exactly one concern-patch, writes `series`, then **self-validates that every patch re-applies with ZERO rejects** and leak-scans. **Acceptance:** `VALIDATION fail=0`, nothing left in `950-misc-REVIEW` (add a `group_for` mapping for any new file and re-run), and `leak scan clean`. Then copy `out_patches_full/*.patch` + `series` over `patches/`, update `patches/README.md`'s series table (new rows + revised descriptions), and commit them **in the same push** as the README banner below. Because each source file lives in exactly one patch, zero-reject per-patch equals a clean sequential apply — so applying the series to a fresh baseline reproduces this build's source tree. After regenerating, **re-run the §4a patch-integrity gate**: Layer 1 must now be clean (the refreshed `patches/` reverse-apply to the build tree), which is the machine-checkable proof that the committed set reproduces this binary. `gen_patches.sh` validates re-apply against a *pristine* baseline; the §4a gate validates it against the *actual built tree* + the *actual binary* — keep both.
 
 1. **Update the EXISTING README status banner in place** (README already carries a `> [!NOTE]` banner) — change the tag and release link to this release; do not add a second banner.
 2. Commit + push (one line, no backticks, `$tag` in the message, no `Co-Authored-By: Claude`):
@@ -368,8 +368,8 @@ Confirm all **6** assets present and `prerelease` is `true` (until validated). T
 gpg --with-fingerprint --show-keys clearcote-signing-key.asc   # fingerprint must equal CA96F185…6B0F
 gpg --import clearcote-signing-key.asc
 gpg --verify SHA256SUMS.txt.asc SHA256SUMS.txt                  # Good signature (a "not certified" WARNING is expected)
-sha256sum -c clearcote-149.0.7827.114-windows-x64.zip.sha256    # OK
-unzip -p clearcote-149.0.7827.114-windows-x64.zip chrome.exe | sha256sum   # matches chrome.exe in SHA256SUMS.txt
+sha256sum -c clearcote-150.0.7871.114-windows-x64.zip.sha256    # OK
+unzip -p clearcote-150.0.7871.114-windows-x64.zip chrome.exe | sha256sum   # matches chrome.exe in SHA256SUMS.txt
 ```
 
 Then run the **stealth-coherence gate** against the shipped binary on real Windows — it asserts the persona/farble layer doesn't betray itself (text metrics on the 1/512 grid, main thread == worker, BCR == Range, render bytes origin-invariant, WebGPU vendor coheres with WebGL). It must report **no contract violation** (no REQUIRED check failing = no regression; no `KNOWN_GAP` newly passing without being promoted). See [docs/STEALTH-COHERENCE.md](STEALTH-COHERENCE.md).

@@ -1,16 +1,17 @@
 --- a/third_party/blink/renderer/core/css/media_values.cc
 +++ b/third_party/blink/renderer/core/css/media_values.cc
-@@ -4,6 +4,9 @@
+@@ -4,6 +4,10 @@
  
  #include "third_party/blink/renderer/core/css/media_values.h"
  
 +#include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"
 +#include "components/ungoogled/persona_profile.h"
 +#include "components/ungoogled/ungoogled_switches.h"
  #include "third_party/blink/public/common/css/scripting.h"
  #include "third_party/blink/renderer/core/css/css_resolution_units.h"
  #include "third_party/blink/renderer/core/css/css_to_length_conversion_data.h"
-@@ -164,6 +167,8 @@
+@@ -164,6 +168,8 @@
  
  int MediaValues::CalculateDeviceWidth(LocalFrame* frame) {
    DCHECK(frame && frame->View() && frame->GetSettings() && frame->GetPage());
@@ -19,7 +20,7 @@
    const display::ScreenInfo& screen_info =
        frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
    int device_width = screen_info.rect.width();
-@@ -176,6 +181,8 @@
+@@ -176,6 +182,8 @@
  
  int MediaValues::CalculateDeviceHeight(LocalFrame* frame) {
    DCHECK(frame && frame->View() && frame->GetSettings() && frame->GetPage());
@@ -28,7 +29,7 @@
    const display::ScreenInfo& screen_info =
        frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
    int device_height = screen_info.rect.height();
-@@ -193,12 +200,19 @@
+@@ -193,12 +201,19 @@
  }
  
  float MediaValues::CalculateDevicePixelRatio(LocalFrame* frame) {
@@ -48,7 +49,7 @@
    return frame->GetPage()
        ->GetChromeClient()
        .GetScreenInfo(*frame)
-@@ -208,6 +222,8 @@
+@@ -208,6 +223,8 @@
  int MediaValues::CalculateColorBitsPerComponent(LocalFrame* frame) {
    DCHECK(frame);
    DCHECK(frame->GetPage());
@@ -57,7 +58,7 @@
    const display::ScreenInfo& screen_info =
        frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
    if (screen_info.is_monochrome) {
-@@ -219,6 +235,8 @@
+@@ -219,6 +236,8 @@
  int MediaValues::CalculateMonochromeBitsPerComponent(LocalFrame* frame) {
    DCHECK(frame);
    DCHECK(frame->GetPage());
@@ -66,11 +67,56 @@
    const display::ScreenInfo& screen_info =
        frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
    if (!screen_info.is_monochrome) {
-@@ -353,20 +371,31 @@
+@@ -349,24 +368,91 @@
+   return frame->GetPage()->GetSettings().GetAcceleratedCompositingEnabled();
+ }
+ 
++// clearcote-input-class-coherence: precedence for the CSS input class is
++//   --fingerprint-max-touch-points  >  --fingerprint persona  >  the REAL host  >  desktop default.
++// Why: navigator.maxTouchPoints (navigator_events.cc) falls through to the host's real value when
++// no persona/override is set, so hardcoding a desktop mouse here made any host with a touch
++// digitizer or drawing tablet report maxTouchPoints>0 together with (any-pointer:coarse)=false --
++// a self-contradiction real Chrome never shows. We only trust the host when it actually has
++// pointing devices: a HEADLESS host reports kPointerNone (the classic headless tell), and there we
++// keep the previous desktop default (fine pointer / hover) exactly as before.
++static bool ClearcoteTouchOverride(int* out) {
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  int v = 0;
++  if (cmd && cmd->HasSwitch(::switches::kFingerprintMaxTouchPoints) &&
++      base::StringToInt(
++          cmd->GetSwitchValueASCII(::switches::kFingerprintMaxTouchPoints), &v) &&
++      v >= 0) {
++    *out = v;
++    return true;
++  }
++  return false;
++}
++
++static bool ClearcotePersonaActive() {
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  return cmd && cmd->HasSwitch(::switches::kFingerprint);
++}
++
++// True only when the host exposes a real coarse/fine pointer (i.e. not a headless kPointerNone).
++static bool ClearcoteHostHasRealPointers(LocalFrame* frame) {
++  const int mask = frame->GetSettings()->GetAvailablePointerTypes();
++  return (mask & (static_cast<int>(mojom::blink::PointerType::kPointerCoarseType) |
++                  static_cast<int>(mojom::blink::PointerType::kPointerFineType))) != 0;
++}
++
+ mojom::blink::PointerType MediaValues::CalculatePrimaryPointerType(
      LocalFrame* frame) {
    DCHECK(frame);
    DCHECK(frame->GetSettings());
 -  return frame->GetSettings()->GetPrimaryPointerType();
++  // The pointer class must agree with whatever maxTouchPoints ends up reporting.
++  int ls_mt = 0;
++  if (ClearcoteTouchOverride(&ls_mt)) {
++    return ls_mt > 0 ? mojom::blink::PointerType::kPointerCoarseType
++                     : mojom::blink::PointerType::kPointerFineType;
++  }
++  if (!ClearcotePersonaActive() && ClearcoteHostHasRealPointers(frame))
++    return frame->GetSettings()->GetPrimaryPointerType();
 +  // clearcote persona: Win/Linux/mac desktop has a mouse -> fine pointer; the
 +  // Android persona has a touchscreen -> coarse (else it contradicts touch).
 +  if (ungoogled::CurrentPersona().pointer_coarse)
@@ -82,6 +128,17 @@
    DCHECK(frame);
    DCHECK(frame->GetSettings());
 -  return frame->GetSettings()->GetAvailablePointerTypes();
++  // Follow an explicit maxTouchPoints override: a touch-capable desktop exposes BOTH a coarse
++  // (touch) and a fine (mouse) pointer; a touch-less one exposes fine only.
++  int ls_mt = 0;
++  if (ClearcoteTouchOverride(&ls_mt)) {
++    return ls_mt > 0
++               ? (static_cast<int>(mojom::blink::PointerType::kPointerCoarseType) |
++                  static_cast<int>(mojom::blink::PointerType::kPointerFineType))
++               : static_cast<int>(mojom::blink::PointerType::kPointerFineType);
++  }
++  if (!ClearcotePersonaActive() && ClearcoteHostHasRealPointers(frame))
++    return frame->GetSettings()->GetAvailablePointerTypes();
 +  // clearcote persona: non-touch desktop -> fine-pointer bit; Android touch
 +  // device -> coarse-pointer bit only (so (any-pointer:fine) is false).
 +  if (ungoogled::CurrentPersona().pointer_coarse)
@@ -94,6 +151,10 @@
    DCHECK(frame);
    DCHECK(frame->GetSettings());
 -  return frame->GetSettings()->GetPrimaryHoverType();
++  // Hover is not implied by the touch count (a touch-capable desktop still hovers), so it is
++  // persona > REAL host > default only.
++  if (!ClearcotePersonaActive() && ClearcoteHostHasRealPointers(frame))
++    return frame->GetSettings()->GetPrimaryHoverType();
 +  // clearcote persona: desktop mouse hovers; Android touchscreen -> hover:none.
 +  if (ungoogled::CurrentPersona().hover_none)
 +    return mojom::blink::HoverType::kHoverNone;
@@ -101,11 +162,13 @@
  }
  
  mojom::blink::OutputDeviceUpdateAbilityType
-@@ -379,12 +408,22 @@
+@@ -379,12 +465,24 @@
  int MediaValues::CalculateAvailableHoverTypes(LocalFrame* frame) {
    DCHECK(frame);
    DCHECK(frame->GetSettings());
 -  return frame->GetSettings()->GetAvailableHoverTypes();
++  if (!ClearcotePersonaActive() && ClearcoteHostHasRealPointers(frame))
++    return frame->GetSettings()->GetAvailableHoverTypes();
 +  // clearcote persona: desktop mouse -> hover bit; Android touch -> none bit
 +  // only (so (any-hover:hover) is false).
 +  if (ungoogled::CurrentPersona().hover_none)

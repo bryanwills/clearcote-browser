@@ -25,7 +25,7 @@ export REPO="$HERE"
 run() { echo; echo "==== $1 ===="; bash "$HERE/scripts/$2"; }
 
 echo "### Clearcote build — TARGET=$TARGET  WORK=$WORK  (Chromium $(cat "$HERE/UPSTREAM_REVISION"))"
-run "00  fetch + prune Chromium 149 source"        00-fetch-source.sh
+run "00  fetch + prune Chromium 150 source"        00-fetch-source.sh
 run "01  apply patch series ($TARGET)"             01-apply-patches.sh
 run "02  host toolchain (clang/rust/gn/sysroot)"   02-host-toolchain.sh
 if [ "$TARGET" = "windows" ]; then

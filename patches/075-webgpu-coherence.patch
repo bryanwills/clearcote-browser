@@ -9,7 +9,7 @@
  
  #include "services/metrics/public/cpp/ukm_builders.h"
  #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
-@@ -103,6 +105,35 @@
+@@ -103,6 +105,41 @@
    }
    description_ = String::FromUtf8(info.device);
    driver_ = String::FromUtf8(info.description);
@@ -24,13 +24,19 @@
 +    if (cc_cmd->HasSwitch("fingerprint-webgpu-vendor")) {
 +      vendor_ = String::FromUtf8(
 +          cc_cmd->GetSwitchValueASCII("fingerprint-webgpu-vendor"));
-+    } else if (!cc_persona.webgpu_vendor.empty()) {
++    } else if (!cc_persona.webgl_real && !cc_persona.webgpu_vendor.empty()) {
++      // clearcote (r11): webgl_real (--disable-gpu-fingerprint) now suppresses the WebGPU
++      // rewrite too. It previously did not, on the reasoning that webgl_vendor was left intact
++      // to keep the WebGPU identity coherent -- but that produced the opposite: WebGL reported
++      // the real SwiftShader backend while navigator.gpu still claimed Intel gen-12-lp, a
++      // contradiction readable in a single page. Both surfaces now go real together.
 +      vendor_ = String::FromUtf8(cc_persona.webgpu_vendor);
 +    }
 +    if (cc_cmd->HasSwitch("fingerprint-webgpu-architecture")) {
 +      architecture_ = String::FromUtf8(
 +          cc_cmd->GetSwitchValueASCII("fingerprint-webgpu-architecture"));
-+    } else if (!cc_persona.webgpu_architecture.empty()) {
++    } else if (!cc_persona.webgl_real &&
++               !cc_persona.webgpu_architecture.empty()) {
 +      architecture_ = String::FromUtf8(cc_persona.webgpu_architecture);
 +    }
 +    if (cc_cmd->HasSwitch("fingerprint-webgpu-device")) {
@@ -45,7 +51,7 @@
    if (supportsPropertiesD3D) {
      d3d_shader_model_ = d3dProperties.shaderModel;
    }
-@@ -117,6 +148,58 @@
+@@ -117,6 +154,58 @@
  
    GPUSupportedLimits::ComboLimits limits;
    GetHandle().GetLimits(limits.GetLinked());

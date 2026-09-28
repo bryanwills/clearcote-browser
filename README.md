@@ -7,7 +7,7 @@
 ### Blend in. Stay clear.
 
 [![Release](https://img.shields.io/github/v/release/clearcotelabs/clearcote-browser?include_prereleases&label=release&style=flat-square&labelColor=07080a&color=38e0d6)](https://github.com/clearcotelabs/clearcote-browser/releases)
-[![Chromium](https://img.shields.io/badge/Chromium-149-6ee7ff?style=flat-square&labelColor=07080a)](https://www.chromium.org/)
+[![Chromium](https://img.shields.io/badge/Chromium-150-6ee7ff?style=flat-square&labelColor=07080a)](https://www.chromium.org/)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20Linux%20x64-a78bfa?style=flat-square&labelColor=07080a)](https://github.com/clearcotelabs/clearcote-browser/releases)
 [![npm](https://img.shields.io/npm/v/clearcote?style=flat-square&logo=npm&logoColor=white&label=npm&labelColor=07080a&color=CB3837)](https://www.npmjs.com/package/clearcote)
 [![PyPI](https://img.shields.io/pypi/v/clearcote?style=flat-square&logo=pypi&logoColor=white&label=pip&labelColor=07080a&color=3776AB)](https://pypi.org/project/clearcote/)
@@ -60,8 +60,12 @@ One real Chromium keeps the JS identity, the **UA / UA-CH** headers, and the **T
 </tr>
 </table>
 
-> **What's new** — free build [v0.1.0-pre.21](https://github.com/clearcotelabs/clearcote-browser/releases/tag/v0.1.0-pre.21), SDK `clearcote` **0.26.0**.
-> Recent: SOCKS5 proxy authentication (RFC 1929 — no local relay needed), portable profiles (copy a
+> **What's new** — the open build moves to **Chromium 150**: [v0.1.0-pre.23](https://github.com/clearcotelabs/clearcote-browser/releases/tag/v0.1.0-pre.23), SDK `clearcote` **0.31.1**.
+> In 150: a font list modelled on real Windows installs instead of one short list shared by every copy,
+> separate WebGL1/WebGL2 extension lists with every advertised extension actually available,
+> `deviceMemory` in the same steps real Chrome reports, touch-capable laptops that still report a mouse
+> as the primary pointer, and `--disable-canvas-noise` / `--disable-gpu-string-spoof` as separate switches.
+> Also recent: SOCKS5 proxy authentication (RFC 1929 — no local relay needed), portable profiles (copy a
 > profile between machines with its cookies), unpacked **Chrome extension** loading incl. Manifest V2,
 > client-hint headers that follow the persona, and locale/font coherence. Earlier surfaces remain:
 > `serve()` CDP endpoint + `clearcote-mcp` + Docker, mobile/Android and Edge personas, TLS network
@@ -325,7 +329,7 @@ git clone https://github.com/clearcotelabs/clearcote-browser.git
 cd clearcote-browser && WORK=~/clearcote-build ./build.sh
 ```
 
-- **[docs/BUILDING.md](docs/BUILDING.md)** — full build-from-source guide · **[patches/](patches/)** — the 32 diffs · **[docs/PATCHES.md](docs/PATCHES.md)** — what each one does.
+- **[docs/BUILDING.md](docs/BUILDING.md)** — full build-from-source guide · **[patches/](patches/)** — the 37 diffs · **[docs/PATCHES.md](docs/PATCHES.md)** — what each one does.
 
 ## Free with GitHub, and Pro
 
@@ -388,15 +392,16 @@ Which Chromium majors are shipped or in progress, and when each tier gets them:
 
 | Chromium | Status | Free with GitHub & Pro | Open source |
 |---|---|---|---|
-| **152** (`152.0.7977.82`) | ✅ Available | ✅ **Available now** | ~Nov 2026 |
+| **153** (`153.0.8010.53`) | ✅ Available | ✅ **Available now** | ~Nov 2026 |
+| **152** (`152.0.7977.82`) | ✅ Available | ✅ Available | ~Nov 2026 |
 | **151** (`151.0.7922.108`) | ✅ Available | ✅ Available | ~Oct 2026 |
-| **150** (`150.0.7871.114`) | ✅ Available | ✅ Available | ~Sep 2026 |
-| **149** (`149.0.7827.114`) | ✅ Available | ✅ Available | ✅ **Available now** |
+| **150** (`150.0.7871.114`) | ✅ Available | ✅ Available | ✅ **Available now** |
+| **149** (`149.0.7827.114`) | ✅ Available | ✅ Available | ✅ Available |
 
 *A new major reaches the licensed build (Free with GitHub and Pro) the day it's built; the open build gets
 that same fully open, reproducible major roughly two months later — the open-build dates above are estimates
-on that cadence, not promises. Pick one with the SDK — `launch(version="152", license_key=...)` with a key,
-`version="149"` without — or omit it for the latest your key allows. Earlier Pro majors stay
+on that cadence, not promises. Pick one with the SDK — `launch(version="153", license_key=...)` with a key,
+`version="150"` without — or omit it for the latest your key allows. Earlier Pro majors stay
 selectable. Requires SDK ≥ 0.16.0.*
 
 ## Reference

@@ -2,7 +2,8 @@
 #
 # This is the effective build configuration used to produce the published pre-release
 # (same flags and values as the build host's out/Default/args.gn; only ordering/comments
-# differ, which gn ignores). Copy it verbatim into the build:
+# differ, which gn ignores; the build host also sets cc_wrapper="ccache", a compile cache that does
+# not change the output). Copy it verbatim into the build:
 #   cp config/args.gn <chromium-src>/out/Default/args.gn
 # then `gn gen out/Default && ninja -C out/Default chrome`. (scripts/04-configure-build.sh
 # does this for you.) Everything here is plain and inspectable — no hidden flags.
@@ -11,7 +12,9 @@
 clang_use_chrome_plugins = false
 disable_fieldtrial_testing_config = true
 enable_hangout_services_extension = false
-enable_mdns = false
+# On since Chromium 150 (the tree the binaries ship from). Which WebRTC candidates exist is decided
+# by 100-webrtc-leak, so this build still shows no .local host candidates.
+enable_mdns = true
 enable_remoting = false
 enable_reporting = false
 enable_service_discovery = false

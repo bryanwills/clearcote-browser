@@ -24,7 +24,9 @@
         "fingerprint-screen-width",
         "fingerprint-storage-quota",
         "fingerprint-tls-profile",
-        "fingerprint-webgpu-architecture"
+        "fingerprint-webgpu-architecture",
+        "disable-canvas-noise",
+        "disable-gpu-string-spoof"
       ],
       "runtime": {
         "surface": "navigator.hardwareConcurrency (proves a fingerprint switch was forwarded browser-process -> renderer-process by this patch's kSwitchNames array)",
@@ -68,7 +70,7 @@
       "markers": [
         " Vivaldi/",
         " OPR/",
-        "149.0.3650.65",
+        "150.0.4078.65",
         "126.0.5748.0"
       ],
       "runtime": {
@@ -163,6 +165,16 @@
         "expect": "vendor === 'Google Inc. (NVIDIA)' and renderer matches /^ANGLE \\(NVIDIA, NVIDIA GeForce RTX .+ \\(0x0000[0-9A-F]+\\) Direct3D11 vs_5_0 ps_5_0, D3D11\\)$/ (a hardcoded RTX 30/40-series model from the patch's GPU DB, deterministic per origin). Unpatched/lost-patch reports the real host GPU or a SwiftShader/'Google Inc. (Google)' string and does NOT match this NVIDIA-GeForce-RTX + Direct3D11 pattern."
       }
     },
+    "071-webgl2-extension-split.patch": {
+      "surface": "An imported profile's WebGL1 and WebGL2 extension lists are applied to their own contexts (persona.webgl2_extensions is read from the profile's webgl2.extensions) instead of one shared list, so each context advertises what that context can provide.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "getSupportedExtensions() on 'webgl' vs 'webgl2' under an imported profile",
+        "probe": "Launch with a --fingerprint-profile whose webgl.extensions and webgl2.extensions differ; compare canvas.getContext('webgl').getSupportedExtensions() with canvas.getContext('webgl2').getSupportedExtensions().",
+        "expect": "Each context returns its own profile list (the two differ exactly as the profile's lists differ)."
+      }
+    },
     "075-webgpu-coherence.patch": {
       "surface": "WebGPU adapter-identity coherence: navigator.gpu.requestAdapter() reports vendor/architecture/device/description and adapter limits spoofed to match the persona/WebGL GPU instead of the real host adapter.",
       "windows_only": false,
@@ -173,16 +185,6 @@
         "expect": "Correctly patched: info.vendor is a lowercase persona family derived from the spoofed WebGL vendor (one of nvidia|amd|intel, e.g. nvidia/ampere, amd/rdna2, intel/gen-12-lp) that is CONTAINED in the WebGL UNMASKED_VENDOR string, so coheres===true (e.g. {\"gpuVendor\":\"nvidia\",\"arch\":\"ampere\",\"coheres\":true}). Unpatched (075 lost, 000/002 still applied): info.vendor is the real host adapter's vendor, unrelated to the spoofed WebGL vendor, so coheres===false."
       }
     },
-    "080-client-rects.patch": {
-      "surface": "Adds QuadF::Offset (with a zero-width/height epsilon guard) — the geometry primitive that applies a per-seed sub-pixel offset to Element.getClientRects()/getBoundingClientRect() to defeat the client-rects fingerprint while leaving degenerate (zero-size) rects unshifted for coherence.",
-      "windows_only": false,
-      "markers": [],
-      "runtime": {
-        "surface": "Element.getClientRects()/getBoundingClientRect() sub-pixel coordinates",
-        "probe": "(() => { const d = document.createElement('div'); d.style.cssText='position:absolute;left:50px;top:50px;width:80px;height:20px'; document.body.appendChild(d); const r = d.getClientRects()[0]; d.remove(); return [r.x - 50, r.y - 50]; })()",
-        "expect": "Correctly patched (launched with --fingerprint=seed): both values are a tiny NON-ZERO sub-pixel offset (e.g. ~1e-3..1e-1 magnitude), identical on repeated reads within one seed and different for a different --fingerprint seed. Vanilla/unpatched (or a build that lost this patch): both are exactly 0 (rect x/y == 50/50). Coherence sanity check: a zero-size element (width:0 or height:0) must still return exact integer coordinates — its rect is NOT offset."
-      }
-    },
     "090-timezone.patch": {
       "surface": "Timezone spoofing: makes Blink's TimeZoneController honor a chosen IANA timezone from the --timezone switch, driving ICU/V8 so Intl timeZone and Date offsets report the fabricated zone instead of the host's.",
       "windows_only": false,
@@ -191,6 +193,15 @@
         "surface": "Intl.DateTimeFormat().resolvedOptions().timeZone and new Date().getTimezoneOffset()",
         "probe": "Launch with --timezone=Asia/Tokyo added to --fingerprint=seed --fingerprint-platform=windows, then evaluate: JSON.stringify([Intl.DateTimeFormat().resolvedOptions().timeZone, new Date('2021-01-01T00:00:00Z').getTimezoneOffset()])",
         "expect": "[\"Asia/Tokyo\",-540] on a correctly-patched build (honors --timezone; UTC+9 => -540 min offset). An unpatched/lost-patch build ignores --timezone (it is not a vanilla Chromium switch) and instead returns the host machine's real timezone id and offset."
+      }
+    },
+    "092-language-locale-coherence.patch": {
+      "surface": "Renderer ICU/Intl default locale follows the persona Accept-Language (navigator.languages) so Intl.DateTimeFormat/Number.toLocaleString/date formatting are coherent with navigator.language; stock Chrome derives this from --lang but the renderer path did not.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "Intl locale coherence",
+        "probe": "Launch with --lang=de-DE; assert Intl.DateTimeFormat().resolvedOptions().locale starts with 'de' AND (12345.6).toLocaleString()=='12.345,6' AND navigator.language=='de-DE' (all agree). Regression: any drift where navigator.languages!=Intl.locale."
       }
     },
     "100-webrtc-leak.patch": {
@@ -257,6 +268,18 @@
         "surface": "CSS media queries via window.matchMedia (pointer/hover/any-pointer/any-hover and device-width media features)",
         "probe": "matchMedia('(any-pointer: fine)').matches && matchMedia('(any-hover: hover)').matches && !matchMedia('(any-pointer: coarse)').matches && matchMedia('(hover: none)').matches===false && matchMedia('(device-width: '+screen.width+'px)').matches",
         "expect": "true on a correctly-patched build: pointer/hover are forced to fine+hover (unconditional in this patch) and the CSS device-width media feature equals the persona/spoofed screen.width. If patch 141 is silently dropped, a headless/virtual gate host reports (any-pointer: fine)=false / (hover: none)=true, and/or the device-width media feature reflects the real host display and diverges from the spoofed screen.width, so the expression returns false."
+      }
+    },
+    "142-touch-pointer-coherence.patch": {
+      "surface": "Touch/pointer coherence: a desktop persona with maxTouchPoints>0 keeps a fine primary pointer with coarse availability (a touch laptop), a coarse primary pointer only for a genuinely mobile persona; an imported profile's max_touch_points is applied.",
+      "windows_only": false,
+      "markers": [
+        "max_touch_points"
+      ],
+      "runtime": {
+        "surface": "matchMedia pointer queries + navigator.maxTouchPoints",
+        "probe": "Windows persona with --fingerprint-max-touch-points=10: evaluate matchMedia('(pointer: fine)').matches, matchMedia('(any-pointer: coarse)').matches, navigator.maxTouchPoints.",
+        "expect": "pointer:fine true, any-pointer:coarse true, maxTouchPoints 10 (not a touch-first device)."
       }
     },
     "145-storage-quota.patch": {
@@ -374,6 +397,18 @@
         "expect": "With chrome-120 the offered supported_groups contains ONLY X25519 (0x001d/29), secp256r1 (0x0017/23) and secp384r1 (0x0018/24) with NO post-quantum hybrid group (no X25519MLKEM768 0x11EC/4588 and no X25519Kyber768 0x6399/25497), and the key_share offers only X25519. A build that silently lost the patch instead claims its own build major (>=131) and offers X25519MLKEM768 (0x11EC) as the first group AND includes it as a key_share."
       }
     },
+    "220-no-farble-switch.patch": {
+      "surface": "--cc-no-farble: a second condition on every farbling entry point (canvas, WebGL readback, offline audio, DOM rects) so a run keeps the full persona (UA/screen/GPU/TLS/metadata) while the per-site noise is off. Absent the switch, every guard evaluates exactly as before.",
+      "windows_only": false,
+      "markers": [
+        "cc-no-farble"
+      ],
+      "runtime": {
+        "surface": "canvas readback across two registrable domains",
+        "probe": "--fingerprint=seed --cc-no-farble: hash a canvas toDataURL on two different sites; repeat without --cc-no-farble.",
+        "expect": "Identical hashes with the switch; different hashes without it."
+      }
+    },
     "900-windows-build-fixes.patch": {
       "surface": "Windows-cross-build enabler only: makes the cross-compiled Windows chrome.exe/chrome.dll actually compile and link (routes .rc through rc/rc.py in tool_wrapper.py, sets clang_rt.builtins libname for is_win, defines the missing UIAutomationCore CLSID_CUIAutomationClientInfoSource so uuid.lib links, a",
       "windows_only": true,
@@ -382,15 +417,6 @@
         "surface": "Existence and launchability of the cross-compiled Windows chrome.exe/chrome.dll build artifact (this patch is a build-fix with no JS-observable stealth surface; its effect is that the Windows build compiles and links at all).",
         "probe": "CLI: run the produced binary on Windows, e.g. `chrome.exe --headless=new --disable-gpu --dump-dom \"data:text/html,ok\"` (or `chrome.exe --version`).",
         "expect": "The binary starts and prints nonempty DOM/version output and exits 0 — proving resources compiled through rc.py, clang_rt.builtins linked, and CLSID_CUIAutomationClientInfoSource resolved. Without this patch the Windows cross-build fails to link (undefined CLSID / rc.exe 'Must run on Windows' error), so no chrome.exe is produced and there is nothing to release — i.e. this patch cannot be silently lost while still yielding a runnable Windows build."
-      }
-    },
-    "092-language-locale-coherence.patch": {
-      "surface": "Renderer ICU/Intl default locale follows the persona Accept-Language (navigator.languages) so Intl.DateTimeFormat/Number.toLocaleString/date formatting are coherent with navigator.language; stock Chrome derives this from --lang but the renderer path did not.",
-      "windows_only": false,
-      "markers": [],
-      "runtime": {
-        "surface": "Intl locale coherence",
-        "probe": "Launch with --lang=de-DE; assert Intl.DateTimeFormat().resolvedOptions().locale starts with 'de' AND (12345.6).toLocaleString()=='12.345,6' AND navigator.language=='de-DE' (all agree). Regression: any drift where navigator.languages!=Intl.locale."
       }
     },
     "905-rc-invoked-guard.patch": {
@@ -402,6 +428,26 @@
       },
       "surface": "Windows-cross-build enabler: guards the Linux-only IDC_* command IDs in chrome/app/chrome_command_ids.h under #if !defined(RC_INVOKED) so the Windows resource compiler can preprocess the header.",
       "windows_only": false
+    },
+    "951-gfx-quadf-offset.patch": {
+      "surface": "Carries QuadF::Offset() in ui/gfx/geometry. Nothing calls it since 050 removed the client-rect perturbation, and the linker drops it (no gfx::QuadF::Offset symbol in the shipped binary). Kept only so this patch set reproduces the build tree byte for byte. No behaviour.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "none (dead code)",
+        "probe": "nm -C out/Linux/chrome | grep gfx::QuadF::Offset",
+        "expect": "No match: the function is not linked into the binary."
+      }
+    },
+    "955-webgl-persona-parity.patch": {
+      "surface": "WebGL persona parity: the advertised extension set equals the gettable set in both directions (WEBGL_debug_renderer_info always exempt), MAX_ELEMENT_INDEX is served from the persona instead of the local renderer, and the default uniform-block counts match real desktop GPUs (12).",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "WebGL getSupportedExtensions()/getExtension() parity and WebGL2 MAX_ELEMENT_INDEX",
+        "probe": "With --fingerprint=seed: every name in getSupportedExtensions() returns non-null from getExtension(); a name not advertised returns null (except WEBGL_debug_renderer_info); on webgl2, getParameter(gl.MAX_ELEMENT_INDEX).",
+        "expect": "Advertised == gettable; MAX_ELEMENT_INDEX == 4294967294 (persona default) even on a GPU-less host."
+      }
     }
   }
 }

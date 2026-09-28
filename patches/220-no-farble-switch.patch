@@ -1,0 +1,148 @@
+Capture the --cc-no-farble escape hatch that was live in the build tree but in no patch.
+
+Every farbling entry point is gated on --fingerprint being present. This adds a second
+condition so a run can keep the full persona (UA/screen/GPU/TLS/metadata) while turning
+the per-eTLD+1 canvas/WebGL/audio/DOM perturbation OFF, without dropping --fingerprint.
+
+That is a strictly different axis from --disable-fingerprint-noise, which the SDK already
+exposes; the two overlap and should probably be reconciled. Captured here as-is because
+this code is compiled into the shipped r10 binary and existed only in the working tree --
+a tree reset would have silently lost it. Behaviour is unchanged: with the switch absent
+(every shipped default and every SDK call path) each guard evaluates exactly as before.
+
+NOTE: the switch is a raw string literal rather than a declared constant in
+ungoogled_switches.h, unlike every other clearcote switch. Left as-found; promoting it is
+a follow-up, not a capture.
+
+--- a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
++++ b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
+@@ -1349,12 +1349,12 @@
+     // creating the ImageDataBuffer when the fingerprint switch is enabled.
+     const base::CommandLine* command_line =
+         base::CommandLine::ForCurrentProcess();
+-    if (!from_bridge && command_line->HasSwitch(switches::kFingerprint) &&
++    if (!from_bridge && (command_line->HasSwitch(switches::kFingerprint) && !command_line->HasSwitch("cc-no-farble")) &&
+         // clearcote: this snapshot path is rendering-context agnostic -- a WebGL canvas's
+         // toDataURL() lands here too. Only the 2D case follows the canvas-noise toggle;
+         // everything else stays on the process-wide gate.
+         ((RenderingContext() && RenderingContext()->IsRenderingContext2D())
+              ? ungoogled::CanvasNoiseEnabled()
+              : ungoogled::FingerprintNoiseEnabled())) {
+       // Per-site farbling: derive the seed from this canvas's eTLD+1.
+       const SecurityOrigin* origin =
+--- a/third_party/blink/renderer/core/dom/range.cc
++++ b/third_party/blink/renderer/core/dom/range.cc
+@@ -23,6 +23,8 @@
+  * Boston, MA 02110-1301, USA.
+  */
+ 
++#include "base/command_line.h"
++#include "components/ungoogled/ungoogled_switches.h"
+ #include "third_party/blink/renderer/core/dom/range.h"
+ 
+ #include "third_party/blink/renderer/core/display_lock/display_lock_document_state.h"
+--- a/third_party/blink/renderer/core/dom/element.cc
++++ b/third_party/blink/renderer/core/dom/element.cc
+@@ -32,9 +32,11 @@
+ #include <memory>
+ #include <utility>
+ 
++#include "base/command_line.h"
+ #include "base/containers/adapters.h"
+ #include "base/feature_list.h"
+ #include "cc/input/snap_selection_strategy.h"
++#include "components/ungoogled/ungoogled_switches.h"
+ #include "components/viz/common/surfaces/tracked_element_rects.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/mojom/scroll/scroll_enums.mojom-blink.h"
+--- a/third_party/blink/renderer/core/dom/document.cc
++++ b/third_party/blink/renderer/core/dom/document.cc
+@@ -35,6 +35,8 @@
+ #include <utility>
+ 
+ #include "base/auto_reset.h"
++#include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/containers/adapters.h"
+ #include "base/debug/dump_without_crashing.h"
+ #include "base/i18n/time_formatting.h"
+@@ -48,6 +50,8 @@
+ #include "cc/animation/animation_timeline.h"
+ #include "cc/input/overscroll_behavior.h"
+ #include "cc/input/scroll_snap_data.h"
++#include "components/ungoogled/ungoogled_switches.h"
++#include "components/ungoogled/farble_seed.h"
+ #include "mojo/public/cpp/bindings/lib/wtf_hash_util.h"
+ #include "mojo/public/cpp/bindings/pending_remote.h"
+ #include "mojo/public/cpp/bindings/remote.h"
+--- a/third_party/blink/renderer/platform/graphics/image_data_buffer.cc
++++ b/third_party/blink/renderer/platform/graphics/image_data_buffer.cc
+@@ -136,7 +136,7 @@
+                                   Vector<unsigned char>* encoded_image,
+                                   uint64_t effective_seed) const {
+   const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+-  if (command_line->HasSwitch(switches::kFingerprint)) {
++  if ((command_line->HasSwitch(switches::kFingerprint) && !command_line->HasSwitch("cc-no-farble"))) {
+     // shuffle subchannel color data within the pixmap, keyed by the per-site
+     // seed threaded in from the caller (0 = global fallback).
+     StaticBitmapImage::ShuffleSubchannelColorData(pixmap_.writable_addr(), pixmap_.info(), 0, 0, effective_seed);
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+@@ -619,7 +619,7 @@
+     }
+ 
+     const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+-    if (read_pixels_successful && command_line->HasSwitch(switches::kFingerprint) &&
++    if (read_pixels_successful && (command_line->HasSwitch(switches::kFingerprint) && !command_line->HasSwitch("cc-no-farble")) &&
+         ungoogled::CanvasNoiseEnabled()) {
+       // Per-site farbling: derive the seed from this context's eTLD+1.
+       const SecurityOrigin* origin =
+@@ -1303,7 +1303,7 @@
+ 
+   // Scale text metrics if enabled
+   const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+-  if (command_line->HasSwitch(switches::kFingerprint)) {
++  if ((command_line->HasSwitch(switches::kFingerprint) && !command_line->HasSwitch("cc-no-farble"))) {
+     // Per-site farbling: derive the seed from this context's eTLD+1 instead
+     // of the raw global switch value. Downstream hashing is unchanged.
+     const SecurityOrigin* origin =
+--- a/third_party/blink/renderer/modules/webgl/gpu_fingerprint.cc
++++ b/third_party/blink/renderer/modules/webgl/gpu_fingerprint.cc
+@@ -68,7 +68,7 @@
+   }
+ 
+   // 优先级2: 如果指定了 fingerprint，根据平台生成
+-  if (command_line->HasSwitch(switches::kFingerprint)) {
++  if ((command_line->HasSwitch(switches::kFingerprint) && !command_line->HasSwitch("cc-no-farble"))) {
+     std::string platform = "windows";  // Default platform
+     if (command_line->HasSwitch(switches::kFingerprintPlatform)) {
+       platform = base::ToLowerASCII(
+@@ -98,7 +98,7 @@
+   // 优先级2: 如果指定了 fingerprint，根据平台和 per-site 种子生成。
+   // 种子由调用方按 eTLD+1 计算（ungoogled::GetFarbleSeed64），使得 GPU 型号
+   // 选择按站点稳定但跨站点解相关。
+-  if (command_line->HasSwitch(switches::kFingerprint)) {
++  if ((command_line->HasSwitch(switches::kFingerprint) && !command_line->HasSwitch("cc-no-farble"))) {
+     std::string platform = "windows";  // Default platform
+ 
+     if (command_line->HasSwitch(switches::kFingerprintPlatform)) {
+--- a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
+@@ -179,7 +179,7 @@
+ uint32_t getNoiseData(uint32_t number_of_frames) {
+     // 获取命令行参数
+     const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+-    if (command_line->HasSwitch(switches::kFingerprint)) {
++    if ((command_line->HasSwitch(switches::kFingerprint) && !command_line->HasSwitch("cc-no-farble"))) {
+         std::string fingerprint_str = command_line->GetSwitchValueASCII(switches::kFingerprint);
+         if (!fingerprint_str.empty()) {
+             // 组合指纹字符串、帧数和常量"audio"
+@@ -201,7 +201,7 @@
+ // 生成基于指纹的采样率噪声（范围 ±0.01）
+ float getSampleRateNoise(float sample_rate, const std::string& fingerprint_str) {
+     const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+-    if (command_line->HasSwitch(switches::kFingerprint)) {
++    if ((command_line->HasSwitch(switches::kFingerprint) && !command_line->HasSwitch("cc-no-farble"))) {
+         if (!fingerprint_str.empty()) {
+             std::string combined = fingerprint_str + std::to_string(static_cast<int>(sample_rate)) + "samplerate";
+             uint32_t hash = std::hash<std::string>{}(combined);

@@ -1,0 +1,84 @@
+# 071-webgl2-extension-split.patch
+#
+# Profile import served the WebGL1 extension list to the WebGL2 context.
+# persona_profile.cc only parsed webgl.webgl1.extensions, into a SINGLE vector, and
+# webgl_rendering_context_base.cc (shared base for both context versions) returned it
+# unconditionally. Result: webgl2.getSupportedExtensions() advertised ANGLE_instanced_arrays,
+# EXT_frag_depth, EXT_sRGB, OES_texture_float, OES_standard_derivatives ... and getExtension()
+# returned null for all of them. Two calls to detect; the audit row
+# webgl-extensions-vs-driver catches it.
+#
+# MEASURED before/after on 150.0.7871.114 with an imported profile:
+#   before: webgl2 35 advertised / 16 broken   after: webgl2 32 advertised / 0 broken
+#   audit: 99/100 (webgl-extensions-vs-driver FAIL) -> 100/100 (167/167, row PASSES)
+#
+# An empty per-version list falls through to the real set rather than borrowing the other
+# version list, so a profile carrying only webgl1 extensions no longer corrupts WebGL2.
+--- a/components/ungoogled/persona_profile.cc
++++ b/components/ungoogled/persona_profile.cc
+@@ -251,6 +251,16 @@
+       gi("MAX_FRAGMENT_UNIFORM_COMPONENTS", &p->webgl_max_fragment_uniform_components);
+       if (auto v = num(*pr, "MAX_TEXTURE_LOD_BIAS")) p->webgl_max_texture_lod_bias = static_cast<float>(*v);
+     }
++    // clearcote: the WebGL2 context has its own extension set. Previously only
++    // webgl.webgl1.extensions was parsed, into a single vector served to BOTH
++    // contexts, so an imported profile made WebGL2 advertise WebGL1-only names.
++    if (const base::ListValue* ext = w2->FindList("extensions")) {
++      if (!ext->empty()) {
++        p->webgl2_extensions.clear();
++        for (const base::Value& item : *ext)
++          if (const std::string* s = item.GetIfString()) p->webgl2_extensions.push_back(*s);
++      }
++    }
+   }
+   if (const base::DictValue* a = d.FindDict("audio")) {
+     if (auto v = num(*a, "BaseAudioContextSampleRate")) p->audio_sample_rate = static_cast<float>(*v);
+--- a/components/ungoogled/persona_profile.h
++++ b/components/ungoogled/persona_profile.h
+@@ -174,8 +174,15 @@
+   int webgl_sample_buffers = 1;
+   int webgl_samples = 4;
+   float webgl_max_texture_max_anisotropy = 16.0f;
+-  // getSupportedExtensions list (varies by driver); empty => report the real set.
++  // getSupportedExtensions list for a WebGL1 context (varies by driver);
++  // empty => report the real set.
+   std::vector<std::string> webgl_extensions;
++  // WebGL2 exposes a DIFFERENT extension set than WebGL1: ANGLE_instanced_arrays,
++  // EXT_frag_depth, EXT_sRGB, OES_texture_float, OES_standard_derivatives and friends
++  // are core (or absent) in WebGL2, so they are NOT in its getSupportedExtensions().
++  // Serving the WebGL1 list to a WebGL2 context advertises extensions that
++  // getExtension() then returns null for - two calls to detect. Empty => real set.
++  std::vector<std::string> webgl2_extensions;
+ 
+   // CSS @media color-gamut: "srgb" (default), "p3", or "rec2020".
+   std::string css_color_gamut = "srgb";
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -4959,12 +4959,21 @@
+   }
+ 
+   // clearcote persona: present the imported GPU's extension list when available.
+-  if (!ungoogled::CurrentPersona().webgl_real &&
+-      !ungoogled::CurrentPersona().webgl_extensions.empty()) {
+-    Vector<String> persona;
+-    for (const std::string& e : ungoogled::CurrentPersona().webgl_extensions)
+-      persona.push_back(String::FromUtf8(e));
+-    return persona;
++  // This base class serves BOTH WebGL1 and WebGL2, so the list must match the
++  // context version - otherwise a WebGL2 context advertises WebGL1-only
++  // extensions that getExtension() then returns null for (trivially detectable).
++  // An empty list for this version falls through to the real set rather than
++  // borrowing the other version's.
++  if (!ungoogled::CurrentPersona().webgl_real) {
++    const std::vector<std::string>& persona_ext =
++        IsWebGL2() ? ungoogled::CurrentPersona().webgl2_extensions
++                   : ungoogled::CurrentPersona().webgl_extensions;
++    if (!persona_ext.empty()) {
++      Vector<String> persona;
++      for (const std::string& e : persona_ext)
++        persona.push_back(String::FromUtf8(e));
++      return persona;
++    }
+   }
+ 
+   return result;

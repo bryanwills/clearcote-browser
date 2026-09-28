@@ -9,10 +9,12 @@ smoke test, so it must be caught by an explicit, release-blocking gate. This is 
 
 WHY THREE LAYERS — "applied" means three different things, and each fails independently:
 
-  Layer 1  APPLIED TO SOURCE   Every patch in `patches/series` reverse-applies cleanly to the
-                               build tree that produced the binary (`patch --dry-run -R`). If a
-                               patch's exact hunks are present, it reverses; if not, it is
-                               missing or was mangled. Zero-maintenance: the patch files are the
+  Layer 1  APPLIED TO SOURCE   The whole `patches/series` peels off the build tree that produced
+                               the binary, last patch first, on a scratch copy of the files it
+                               touches (`patch -R`). If every patch's exact hunks are present, each
+                               reverses; if not, one is missing or was mangled. Sequential, so it
+                               also holds for layered patches that edit the same file.
+                               Zero-maintenance: the patch files are the
                                spec, so a newly added patch is covered automatically. Catches a
                                silently-rejected/dropped patch at build time, and a stale
                                committed `patches/` that no longer reproduces the built tree.
@@ -34,7 +36,7 @@ Usage:
   python scripts/verify_patches.py --tree ~/clearcote-build/build/src --target windows
   # Layer 2 — against a shipped binary, a directory of binaries, or the release zip:
   python scripts/verify_patches.py --binary out/Default/chrome.dll
-  python scripts/verify_patches.py --binary clearcote-149.0.7827.114-windows-x64.zip
+  python scripts/verify_patches.py --binary clearcote-150.0.7871.114-windows-x64.zip
   # Both (the full pre-release gate):
   python scripts/verify_patches.py --tree <src> --target windows --binary <chrome.dll>
 
@@ -47,6 +49,7 @@ import argparse
 import json
 import mmap
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -58,9 +61,11 @@ PATCHES_DIR = ROOT / "patches"
 SERIES = PATCHES_DIR / "series"
 MANIFEST = ROOT / "scripts" / "patch_markers.json"
 
-# Windows-only patches — mirror scripts/01-apply-patches.sh (the ungoogled-chromium-windows
-# overlay + this list are skipped for the Linux target). Kept here as the source of truth for
-# the gate; the manifest's per-patch `windows_only` is cross-checked against it.
+# Windows-only in EFFECT: scripts/01-apply-patches.sh applies every patch for both targets (one
+# tree builds both binaries since Chromium 150), but these only touch Windows resource/toolchain
+# files, so a Linux binary carries none of their markers (Layer 2 skips them for Linux). Kept here
+# as the source of truth for the gate; the manifest's per-patch `windows_only` is cross-checked
+# against it.
 WINDOWS_ONLY = {"900-windows-build-fixes.patch"}
 
 _GHA = bool(os.environ.get("GITHUB_ACTIONS"))
@@ -150,40 +155,70 @@ def _patch_bin() -> str:
     return exe
 
 
+def _touched_files(patch_path: Path) -> list[str]:
+    """Repo-relative (-p1) paths a unified diff touches, read from its '--- '/'+++ ' header PAIRS
+    only (a removed content line can itself start with '--- ')."""
+    lines = patch_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    out: list[str] = []
+    for a, b in zip(lines, lines[1:]):
+        if a.startswith("--- ") and b.startswith("+++ "):
+            for name in (a[4:], b[4:]):
+                name = name.split("\t")[0].strip()
+                if name != "/dev/null":
+                    out.append(name[2:] if name.startswith(("a/", "b/")) else name)
+    return out
+
+
 def layer1_source(tree: Path, target: str, series: list[str]) -> list[str]:
-    """Reverse-apply dry-run of every series patch against the build tree. A patch that was
-    correctly applied reverses cleanly (returncode 0); one that is missing or mangled fails."""
+    """Peel the whole series off the build tree, last patch first, on a scratch copy of every file
+    the series touches (`patch -R`). If the committed series is exactly what produced the tree,
+    every patch reverses cleanly; a missing, mangled or out-of-date patch fails.
+
+    Sequential, not per-patch: a layered stack (a later patch editing a file an earlier one also
+    changed, e.g. 955 on top of 002/070) cannot be reverse-applied one patch at a time against the
+    final tree, because the later edit sits on the earlier patch's context. Peeling in reverse
+    order handles that and stays exact. The tree itself is never modified. Both targets apply the
+    whole series since Chromium 150 (scripts/01-apply-patches.sh), so `target` no longer changes
+    which patches are peeled."""
     if not tree.is_dir():
         die(f"--tree {tree} is not a directory")
     patch = _patch_bin()
     fails: list[str] = []
-    checked = skipped = 0
-    for p in series:
-        if target == "linux" and p in WINDOWS_ONLY:
-            skipped += 1
-            continue
-        checked += 1
-        proc = subprocess.run(
-            [patch, "-p1", "-R", "--dry-run", "-f", "-i", str(PATCHES_DIR / p), "-d", str(tree)],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        if proc.returncode != 0:
-            reason = "missing or mangled in the tree"
-            out = proc.stdout or ""
-            if "can't find file" in out or "No file to patch" in out:
-                reason = "target file(s) absent"
-            elif "Unreversed patch detected" in out:
-                reason = "hunks do not match (tree diverged from the committed patch)"
-            elif "FAILED" in out:
-                bad = [ln for ln in out.splitlines() if "FAILED" in ln]
-                reason = "hunk mismatch: " + "; ".join(bad[:3])
-            fails.append(f"[source] {p} does NOT reverse-apply cleanly -> {reason}")
-    if not fails:
-        note(f"Layer 1 OK: all {checked} patches reverse-apply cleanly to {tree} "
-             f"(target={target}, {skipped} windows-only skipped)")
+    files = sorted({f for p in series for f in _touched_files(PATCHES_DIR / p)})
+    with tempfile.TemporaryDirectory(prefix="cc-layer1-") as td:
+        scratch = Path(td)
+        for f in files:
+            src = tree / f
+            if src.is_file():
+                dst = scratch / f
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+        for p in reversed(series):
+            proc = subprocess.run(
+                [patch, "-p1", "-R", "-f", "--no-backup-if-mismatch", "-i", str(PATCHES_DIR / p),
+                 "-d", str(scratch)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            if proc.returncode != 0:
+                reason = "missing or mangled in the tree"
+                out = proc.stdout or ""
+                if "can't find file" in out or "No file to patch" in out:
+                    reason = "target file(s) absent"
+                elif "Unreversed patch detected" in out:
+                    reason = "hunks do not match (tree diverged from the committed patch)"
+                elif "FAILED" in out:
+                    bad = [ln for ln in out.splitlines() if "FAILED" in ln]
+                    reason = "hunk mismatch: " + "; ".join(bad[:3])
+                fails.append(f"[source] {p} does NOT reverse-apply cleanly -> {reason}")
+    if fails:
+        fails.append("[source] (peeled last-to-first: the FIRST entry above is where peeling broke; "
+                     "entries after it may only be failing as a consequence)")
+    else:
+        note(f"Layer 1 OK: all {len(series)} patches peel off {tree} cleanly in reverse series "
+             f"order ({len(files)} files, target={target})")
     return fails
 
 

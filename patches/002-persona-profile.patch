@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/components/ungoogled/persona_profile.cc
-@@ -0,0 +1,748 @@
+@@ -0,0 +1,792 @@
 +// Copyright 2026 The ungoogled-chromium Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -17,6 +17,7 @@
 +#include "base/command_line.h"
 +#include "base/json/json_reader.h"
 +#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_util.h"
 +#include "base/values.h"
 +#include "components/ungoogled/ungoogled_switches.h"
 +#include "third_party/zlib/google/compression_utils.h"
@@ -57,12 +58,12 @@
 +  const char* renderer;
 +};
 +
-+// Chrome version pool — clearcote's 149 line (mirrors fingerprint_data.h).
++// Chrome version pool — clearcote 150 line (mirrors fingerprint_data.h).
 +constexpr std::array<WeightedEntry<ChromeVer>, 4> kChromeVersions = {{
-+    {{149, "149.0.7827.114"}, 0.55},
-+    {{149, "149.0.7827.89"}, 0.20},
-+    {{149, "149.0.7827.66"}, 0.15},
-+    {{149, "149.0.7827.58"}, 0.10},
++    {{150, "150.0.7871.114"}, 0.55},
++    {{150, "150.0.7871.115"}, 0.20},
++    {{150, "150.0.7871.100"}, 0.15},
++    {{150, "150.0.7871.46"}, 0.10},
 +}};
 +
 +// Windows desktop resolutions (StatCounter / Steam-survey weighted). avail_h is
@@ -438,6 +439,44 @@
 +
 +}  // namespace
 +
++// clearcote: single source of truth for --fingerprint-platform (see
++// persona_profile.h). Parsed once, lowercased once.
++PersonaPlatform GetPersonaPlatform() {
++  static const PersonaPlatform kPlatform = [] {
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    if (!cmd->HasSwitch(switches::kFingerprintPlatform))
++      return PersonaPlatform::kUnset;
++    const std::string value = base::ToLowerASCII(
++        cmd->GetSwitchValueASCII(switches::kFingerprintPlatform));
++    if (value == "windows")
++      return PersonaPlatform::kWindows;
++    if (value == "linux")
++      return PersonaPlatform::kLinux;
++    if (value == "macos")
++      return PersonaPlatform::kMacOS;
++    if (value == "android")
++      return PersonaPlatform::kAndroid;
++    return PersonaPlatform::kUnset;
++  }();
++  return kPlatform;
++}
++
++const char* PersonaPlatformName(PersonaPlatform p) {
++  switch (p) {
++    case PersonaPlatform::kWindows:
++      return "windows";
++    case PersonaPlatform::kLinux:
++      return "linux";
++    case PersonaPlatform::kMacOS:
++      return "macos";
++    case PersonaPlatform::kAndroid:
++      return "android";
++    case PersonaPlatform::kUnset:
++      return "";
++  }
++  return "";
++}
++
 +// clearcote: Linux (ANGLE-over-GL / Mesa) renderer equivalents of the Windows GPU pool, so a
 +// Linux persona reports an OpenGL/Mesa UNMASKED_RENDERER instead of a Windows-only Direct3D11
 +// string (which would contradict navigator.platform=Linux).
@@ -629,8 +668,7 @@
 +  // SAPI voices, Realtek/WASAPI audio devices). On a Linux persona, swap each to its coherent
 +  // Linux form so no field contradicts platform=Linux. Only rewrite a still-Windows default (an
 +  // imported Linux/mac profile is left intact); an explicit --fingerprint-gpu-renderer wins below.
-+  if (cmd->HasSwitch(switches::kFingerprintPlatform) &&
-+      cmd->GetSwitchValueASCII(switches::kFingerprintPlatform) == "linux") {
++  if (GetPersonaPlatform() == PersonaPlatform::kLinux) {
 +    if (p.webgl_renderer.find("Direct3D") != std::string::npos)
 +      p.webgl_renderer = LinuxWebGLRenderer(p.webgl_vendor);
 +    // A real Chrome-on-Linux with no speech-dispatcher reports getVoices()==[]; never Windows
@@ -646,8 +684,7 @@
 +  // devices and keeps the Windows screen/pointer/touch), android inverts the
 +  // desktop shape structurally, so it overwrites screen/DPR/mobile/touch/GPU +
 +  // the GLES limit table from one atomic device row.
-+  if (cmd->HasSwitch(switches::kFingerprintPlatform) &&
-+      cmd->GetSwitchValueASCII(switches::kFingerprintPlatform) == "android") {
++  if (GetPersonaPlatform() == PersonaPlatform::kAndroid) {
 +    const AndroidDevice& dev = WeightedPick(rng, kAndroidDevices);
 +    // Portrait screen; Android reports availWidth/Height == the full screen.
 +    p.screen_width = dev.screen_w;
@@ -700,8 +737,15 @@
 +  // readback noise is skipped -- so the reported GPU matches the rendered pixels (no spoof to
 +  // cross-check). Top precedence over seed/profile/gpu-switch; webgl_vendor stays intact so the
 +  // WebGPU identity below remains coherent.
-+  if (cmd->HasSwitch(switches::kDisableGpuFingerprint))
++  if (cmd->HasSwitch(switches::kDisableGpuFingerprint)) {
 +    p.webgl_real = true;
++    p.webgl_real_strings = true;  // full honest mode implies honest strings
++  }
++  // clearcote: --disable-gpu-string-spoof is the GPU-STRING half of --disable-gpu-fingerprint
++  // on its own -- UNMASKED_VENDOR/RENDERER go real while the persona keeps the getParameter
++  // limits, the extension list, the precision formats and the readPixels farble.
++  if (cmd->HasSwitch(switches::kDisableGpuStringSpoof))
++    p.webgl_real_strings = true;
 +  // clearcote: explicit --fingerprint-webgpu-vendor/-architecture overrides the
 +  // profile-/seed-derived WebGPU identity (precedence: switch > profile > seed).
 +  if (cmd->HasSwitch("fingerprint-webgpu-vendor"))
@@ -751,7 +795,7 @@
 +}  // namespace ungoogled
 --- /dev/null
 +++ b/components/ungoogled/persona_profile.h
-@@ -0,0 +1,207 @@
+@@ -0,0 +1,241 @@
 +// Copyright 2026 The ungoogled-chromium Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -767,6 +811,35 @@
 +#include "base/component_export.h"
 +
 +namespace ungoogled {
++// clearcote: the ONE parse of --fingerprint-platform. The switch value used to
++// be re-parsed open-coded at ~13 call sites; several compared the RAW value
++// while the rest lowercased it, so --fingerprint-platform=Linux produced a
++// self-contradicting browser (Linux navigator.platform alongside Windows SAPI
++// voices and a Direct3D WebGL renderer). New call sites MUST go through
++// GetPersonaPlatform() rather than re-parsing the switch.
++enum class PersonaPlatform {
++  kUnset,  // switch absent, empty, or value unrecognized
++  kWindows,
++  kLinux,
++  kMacOS,
++  kAndroid,
++};
++
++// Parses --fingerprint-platform ONCE per process (function-local static -- the
++// command line is fixed for the process lifetime). Case-insensitive. Returns
++// kUnset when the switch is absent or its value is not one of
++// windows/linux/macos/android, matching what the open-coded parses already did
++// for an unknown value (fall through to the default branch).
++//
++// CALLER NOTE: sites that previously fell back to the HOST BUILDFLAG when the
++// switch was absent or unrecognized (dom_url.cc IsWindowsPersona(), the
++// chrome_content_renderer_client.cc web-share block, font_cache.cc) MUST map
++// kUnset back to the host build explicitly, or an unflagged launch silently
++// changes behaviour.
++COMPONENT_EXPORT(UNGOOGLED) PersonaPlatform GetPersonaPlatform();
++
++// Canonical lowercase name: "windows"/"linux"/"macos"/"android"; "" for kUnset.
++COMPONENT_EXPORT(UNGOOGLED) const char* PersonaPlatformName(PersonaPlatform p);
 +
 +// A seed-derived, internally-COHERENT Windows browser persona.
 +//
@@ -788,8 +861,8 @@
 +  uint64_t persona_seed = 0;
 +
 +  // ---- Identity ----
-+  unsigned chrome_major_version = 149;
-+  std::string chrome_full_version;  // e.g. "149.0.7827.114"
++  unsigned chrome_major_version = 150;
++  std::string chrome_full_version;  // e.g. "150.0.7871.114"
 +
 +  // ---- Hardware (one tier: cores <-> RAM correlated) ----
 +  unsigned hardware_concurrency = 8;  // logical cores (navigator.hardwareConcurrency)
@@ -833,6 +906,11 @@
 +  // getParameter table, and the supported-extension list) instead of this persona GPU, and
 +  // skip the WebGL readback noise -- so the GPU identity matches the actually-rendered pixels.
 +  bool webgl_real = false;
++  // clearcote: the GPU-STRING-ONLY half of webgl_real, set by --disable-gpu-string-spoof and
++  // implied by webgl_real. Read ONLY by the UNMASKED_VENDOR/RENDERER getParameter cases; the
++  // limit table, extension list, precision formats and readPixels farble all keep checking
++  // webgl_real, so the string can go real without dragging the rest of the GPU surface with it.
++  bool webgl_real_strings = false;
 +  // Canonical Win11 + ANGLE parameter limits (for future getParameter wiring).
 +  int webgl_max_texture_size = 16384;
 +  int webgl_max_cube_map_texture_size = 16384;
@@ -959,7 +1037,6 @@
 +}  // namespace ungoogled
 +
 +#endif  // COMPONENTS_UNGOOGLED_PERSONA_PROFILE_H_
-
 --- a/chrome/browser/chrome_content_browser_client.cc
 +++ b/chrome/browser/chrome_content_browser_client.cc
 @@ -20,6 +20,7 @@
@@ -970,7 +1047,7 @@
  #include "base/containers/fixed_flat_map.h"
  #include "base/containers/fixed_flat_set.h"
  #include "base/containers/to_vector.h"
-@@ -4988,6 +4989,33 @@
+@@ -5035,6 +5036,33 @@
    web_prefs->is_indigo_onboarding =
        indigo::IndigoOnboardingDialog::IsOnboardingWebContents(web_contents);
  #endif

@@ -1,5 +1,12 @@
 # Upgrading clearcote: Chromium 149 → 150 — Canonical Plan
 
+> **Status:** done — the open build moved to Chromium 150 (`150.0.7871.114`, `v0.1.0-pre.23`) on
+> 2026-09-28. Kept as the template for the next bump (N → N+1). Lessons from this one: build the
+> Windows and the Linux binary from ONE patched tree (overlay included, see `scripts/01-apply-patches.sh`);
+> leave nothing in a catch-all `950-misc-REVIEW` patch; before publishing, byte-compare a fresh
+> upstream + `patches/series` apply against the built tree — edits made in the tree but never
+> captured in a patch are what that check finds.
+
 `$BOX` = build host (SSH). All build work happens on `$BOX` only; `gh`/`git push`/releases run from the local Windows PC. Repo clone referenced as `/tmp/ccrepo`; build tree as `~/clearcoat/build/src`. This plan generalizes to any major bump (N → N+1).
 
 ---

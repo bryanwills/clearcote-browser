@@ -1,6 +1,7 @@
---- a/third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h
-+++ b/third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h
-@@ -184,6 +184,12 @@
+diff -u --recursive a/third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h b/third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h
+--- a/third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h	2026-07-21 13:56:47.385014668 +0000
++++ b/third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h	2026-07-21 13:56:47.393014703 +0000
+@@ -182,6 +182,12 @@
    virtual void PageVisibilityChanged() = 0;
    virtual void SizeChanged() {}
    virtual bool isContextLost() const { return true; }
@@ -13,8 +14,9 @@
    bool IsContextBeingRestored() const { return is_context_being_restored_; }
    // TODO(fserb): remove AsV8RenderingContext and AsV8OffscreenRenderingContext.
    virtual V8RenderingContext* AsV8RenderingContext() { NOTREACHED(); }
---- a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
-+++ b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
+diff -u --recursive a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
+--- a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc	2026-07-21 13:56:47.385014668 +0000
++++ b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc	2026-07-21 13:56:47.393014703 +0000
 @@ -32,7 +32,9 @@
  #include <limits>
  #include <memory>
@@ -37,10 +39,10 @@
  #include "build/build_config.h"
  #include "cc/layers/texture_layer.h"
 +#include "cc/paint/paint_image_builder.h"
+ #include "cc/trees/layer_tree_host.h"
  #include "services/metrics/public/cpp/ukm_recorder.h"
  #include "services/metrics/public/cpp/ukm_source_id.h"
- #include "third_party/blink/public/common/features.h"
-@@ -68,6 +76,7 @@
+@@ -69,6 +77,7 @@
  #include "third_party/blink/renderer/core/dom/element_traversal.h"
  #include "third_party/blink/renderer/core/fileapi/file.h"
  #include "third_party/blink/renderer/core/frame/local_dom_window.h"
@@ -48,7 +50,7 @@
  #include "third_party/blink/renderer/core/frame/local_frame.h"
  #include "third_party/blink/renderer/core/frame/local_frame_client.h"
  #include "third_party/blink/renderer/core/frame/settings.h"
-@@ -1317,7 +1326,83 @@
+@@ -1310,7 +1319,88 @@
            mime_type, ImageEncoderUtils::kEncodeReasonToDataURL);
  
    scoped_refptr<StaticBitmapImage> image_bitmap = Snapshot(source_buffer);
@@ -83,7 +85,12 @@
 +    const base::CommandLine* command_line =
 +        base::CommandLine::ForCurrentProcess();
 +    if (!from_bridge && command_line->HasSwitch(switches::kFingerprint) &&
-+        ungoogled::FingerprintNoiseEnabled()) {
++        // clearcote: this snapshot path is rendering-context agnostic -- a WebGL canvas's
++        // toDataURL() lands here too. Only the 2D case follows the canvas-noise toggle;
++        // everything else stays on the process-wide gate.
++        ((RenderingContext() && RenderingContext()->IsRenderingContext2D())
++             ? ungoogled::CanvasNoiseEnabled()
++             : ungoogled::FingerprintNoiseEnabled())) {
 +      // Per-site farbling: derive the seed from this canvas's eTLD+1.
 +      const SecurityOrigin* origin =
 +          GetExecutionContext() ? GetExecutionContext()->GetSecurityOrigin()
@@ -132,8 +139,9 @@
      std::unique_ptr<ImageDataBuffer> data_buffer =
          ImageDataBuffer::Create(image_bitmap);
      if (!data_buffer)
---- a/third_party/blink/renderer/core/html/canvas/text_metrics.h
-+++ b/third_party/blink/renderer/core/html/canvas/text_metrics.h
+diff -u --recursive a/third_party/blink/renderer/core/html/canvas/text_metrics.h b/third_party/blink/renderer/core/html/canvas/text_metrics.h
+--- a/third_party/blink/renderer/core/html/canvas/text_metrics.h	2026-07-21 13:56:47.385014668 +0000
++++ b/third_party/blink/renderer/core/html/canvas/text_metrics.h	2026-07-21 13:56:47.393014703 +0000
 @@ -112,6 +112,21 @@
  
    void Shuffle(const double factor);
@@ -156,8 +164,9 @@
   private:
    void Update(const Font*,
                const TextDirection& direction,
---- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
-+++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+diff -u --recursive a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc	2026-07-21 13:56:47.385014668 +0000
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc	2026-07-21 13:56:47.393014703 +0000
 @@ -13,6 +13,7 @@
  
  #include "base/check.h"
@@ -178,7 +187,7 @@
  #include "components/viz/common/resources/shared_image_format_utils.h"
  #include "third_party/abseil-cpp/absl/cleanup/cleanup.h"
  #include "third_party/blink/public/common/metrics/document_update_reason.h"
-@@ -110,6 +116,7 @@
+@@ -108,6 +114,7 @@
  
  #include "third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.h"
  #include "third_party/blink/renderer/core/frame/local_dom_window.h"
@@ -186,7 +195,7 @@
  
  namespace blink {
  
-@@ -374,6 +381,85 @@
+@@ -353,6 +360,85 @@
  }
  perfetto::EventContext GetEventContext();
  
@@ -272,7 +281,7 @@
  ImageData* BaseRenderingContext2D::getImageDataInternal(
      int sx,
      int sy,
-@@ -515,6 +601,23 @@
+@@ -494,6 +580,23 @@
    if (!image_data)
      return nullptr;
  
@@ -296,7 +305,7 @@
    // Read pixels into |image_data|.
    if (snapshot) {
      gfx::Rect snapshot_rect{snapshot->Size()};
-@@ -535,8 +638,17 @@
+@@ -514,8 +617,17 @@
            snapshot->PaintImageForCurrentFrame().GetSkImageInfo().bounds();
        DCHECK(!bounds.intersect(SkIRect::MakeXYWH(sx, sy, sw, sh)));
      }
@@ -305,7 +314,7 @@
 +
 +    const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
 +    if (read_pixels_successful && command_line->HasSwitch(switches::kFingerprint) &&
-+        ungoogled::FingerprintNoiseEnabled()) {
++        ungoogled::CanvasNoiseEnabled()) {
 +      // Per-site farbling: derive the seed from this context's eTLD+1.
 +      const SecurityOrigin* origin =
 +          GetTopExecutionContext() ? GetTopExecutionContext()->GetSecurityOrigin()
@@ -316,7 +325,7 @@
      }
    }
  
-@@ -688,6 +800,9 @@
+@@ -667,6 +779,9 @@
  }
  
  void BaseRenderingContext2D::setTextAlign(const V8CanvasTextAlign align) {
@@ -326,7 +335,7 @@
    GetState().SetTextAlign(align.AsEnum());
  }
  
-@@ -697,6 +812,9 @@
+@@ -676,6 +791,9 @@
  
  void BaseRenderingContext2D::setTextBaseline(
      const V8CanvasTextBaseline baseline) {
@@ -336,7 +345,7 @@
    GetState().SetTextBaseline(baseline.AsEnum());
  }
  
-@@ -837,6 +955,10 @@
+@@ -815,6 +933,10 @@
      return;
    }
  
@@ -347,7 +356,7 @@
    CanvasRenderingContext2DState& state = GetState();
    if (new_font == state.UnparsedFont() && CurrentFontResolvedAndUpToDate()) {
      return;
-@@ -894,6 +1016,9 @@
+@@ -872,6 +994,9 @@
  }
  
  void BaseRenderingContext2D::fillText(const String& text, double x, double y) {
@@ -357,7 +366,7 @@
    CanvasRenderingContext2DState& state = GetState();
    DrawTextInternal(text, x, y, CanvasRenderingContext2DState::kFillPaintType,
                     state.GetTextAlign(), state.GetTextBaseline(), 0,
-@@ -950,6 +1075,7 @@
+@@ -928,6 +1053,7 @@
  void BaseRenderingContext2D::strokeText(const String& text,
                                          double x,
                                          double y) {
@@ -365,7 +374,7 @@
    CanvasRenderingContext2DState& state = GetState();
    DrawTextInternal(text, x, y, CanvasRenderingContext2DState::kStrokePaintType,
                     state.GetTextAlign(), state.GetTextBaseline(), 0,
-@@ -960,6 +1086,7 @@
+@@ -938,6 +1064,7 @@
                                          double x,
                                          double y,
                                          double max_width) {
@@ -373,7 +382,7 @@
    CanvasRenderingContext2DState& state = GetState();
    DrawTextInternal(text, x, y, CanvasRenderingContext2DState::kStrokePaintType,
                     state.GetTextAlign(), state.GetTextBaseline(), 0,
-@@ -1182,15 +1309,44 @@
+@@ -1160,15 +1287,44 @@
        font, direction, state.GetTextBaseline(), state.GetTextAlign(), text,
        host->GetPlainTextPainter());
  
@@ -423,9 +432,10 @@
      }
    }
    return text_metrics;
---- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h
-+++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h
-@@ -360,6 +360,16 @@
+diff -u --recursive a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h	2026-07-21 13:56:47.385014668 +0000
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h	2026-07-21 13:56:47.393014703 +0000
+@@ -338,6 +338,16 @@
    void WillUseCurrentFont() const;
  
    int num_readbacks_performed_ = 0;
@@ -440,11 +450,12 @@
 +  bool ReadBridgePixels(std::vector<uint8_t>* out, int width,
 +                        int height) override;
    unsigned read_count_ = 0;
-   Member<GPUTexture> webgpu_access_texture_ = nullptr;
-   std::unique_ptr<Canvas2DResourceProviderSharedImage>
---- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
-+++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
-@@ -396,6 +396,7 @@
+   Canvas2DColorParams color_params_;
+   base::RepeatingClosure on_restore_failed_callback_for_testing_;
+diff -u --recursive a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc	2026-07-21 13:56:47.385014668 +0000
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc	2026-07-21 13:56:47.397014720 +0000
+@@ -393,6 +393,7 @@
  }
  
  void Canvas2DRecorderContext::save() {
@@ -452,7 +463,7 @@
    if (isContextLost()) [[unlikely]] {
      return;
    }
-@@ -421,6 +422,7 @@
+@@ -418,6 +419,7 @@
  }
  
  void Canvas2DRecorderContext::restore(ExceptionState& exception_state) {
@@ -460,7 +471,7 @@
    if (isContextLost()) [[unlikely]] {
      return;
    }
-@@ -925,6 +927,8 @@
+@@ -922,6 +924,8 @@
    // from the string is expensive) so we keep a map of string to color.
    if (value->IsString()) {
      v8::Local<v8::String> v8_string = value.As<v8::String>();
@@ -469,7 +480,7 @@
      if (state.IsUnparsedStrokeColor(v8_string)) {
        return;
      }
-@@ -1048,6 +1052,8 @@
+@@ -1045,6 +1049,8 @@
    // details on this.
    if (value->IsString()) {
      v8::Local<v8::String> v8_string = value.As<v8::String>();
@@ -478,7 +489,7 @@
      if (state.IsUnparsedFillColor(v8_string)) {
        return;
      }
-@@ -1105,6 +1111,7 @@
+@@ -1102,6 +1108,7 @@
  }
  
  void Canvas2DRecorderContext::setLineWidth(double width) {
@@ -486,7 +497,7 @@
    if (!std::isfinite(width) || width <= 0) {
      return;
    }
-@@ -1120,6 +1127,7 @@
+@@ -1117,6 +1124,7 @@
  }
  
  void Canvas2DRecorderContext::setLineCap(const String& s) {
@@ -494,7 +505,7 @@
    LineCap cap;
    if (!ParseLineCap(s, cap)) {
      return;
-@@ -1136,6 +1144,7 @@
+@@ -1133,6 +1141,7 @@
  }
  
  void Canvas2DRecorderContext::setLineJoin(const String& s) {
@@ -502,7 +513,7 @@
    LineJoin join;
    if (!ParseLineJoin(s, join)) {
      return;
-@@ -1267,6 +1276,7 @@
+@@ -1264,6 +1273,7 @@
  }
  
  void Canvas2DRecorderContext::setGlobalAlpha(double alpha) {
@@ -510,7 +521,7 @@
    if (!(alpha >= 0 && alpha <= 1)) {
      return;
    }
-@@ -1296,6 +1306,7 @@
+@@ -1293,6 +1303,7 @@
  
  void Canvas2DRecorderContext::setGlobalCompositeOperation(
      const String& operation) {
@@ -518,7 +529,7 @@
    CompositeOperator op = kCompositeSourceOver;
    BlendMode blend_mode = BlendMode::kNormal;
    if (!ParseCanvasCompositeAndBlendMode(operation, op, blend_mode)) {
-@@ -1356,6 +1367,7 @@
+@@ -1353,6 +1364,7 @@
  }
  
  void Canvas2DRecorderContext::scale(double sx, double sy) {
@@ -526,7 +537,7 @@
    // TODO(crbug.com/40153853): Investigate the performance impact of simply
    // calling the 3d version of this function
    cc::PaintCanvas* c = GetOrCreatePaintCanvas();
-@@ -1386,6 +1398,7 @@
+@@ -1383,6 +1395,7 @@
  }
  
  void Canvas2DRecorderContext::rotate(double angle_in_radians) {
@@ -534,7 +545,7 @@
    cc::PaintCanvas* c = GetOrCreatePaintCanvas();
    if (!c) {
      return;
-@@ -1412,6 +1425,7 @@
+@@ -1409,6 +1422,7 @@
  }
  
  void Canvas2DRecorderContext::translate(double tx, double ty) {
@@ -542,7 +553,7 @@
    // TODO(crbug.com/40153853): Investigate the performance impact of simply
    // calling the 3d version of this function
    cc::PaintCanvas* c = GetOrCreatePaintCanvas();
-@@ -1451,6 +1465,7 @@
+@@ -1448,6 +1462,7 @@
                                          double m22,
                                          double dx,
                                          double dy) {
@@ -550,7 +561,7 @@
    cc::PaintCanvas* c = GetOrCreatePaintCanvas();
    if (!c) {
      return;
-@@ -1493,6 +1508,7 @@
+@@ -1490,6 +1505,7 @@
  // |effective_zoom_| in resetTransform instead of setTransform, to avoid
  // integrating it twice if we have resetTransform and setTransform API calls.
  void Canvas2DRecorderContext::resetTransform() {
@@ -558,7 +569,7 @@
    cc::PaintCanvas* c = GetOrCreatePaintCanvas();
    if (!c) {
      return;
-@@ -1535,6 +1551,7 @@
+@@ -1532,6 +1548,7 @@
                                             double m22,
                                             double dx,
                                             double dy) {
@@ -566,7 +577,7 @@
    if (!std::isfinite(m11) || !std::isfinite(m21) || !std::isfinite(dx) ||
        !std::isfinite(m12) || !std::isfinite(m22) || !std::isfinite(dy)) {
      return;
-@@ -1573,6 +1590,7 @@
+@@ -1570,6 +1587,7 @@
  }
  
  void Canvas2DRecorderContext::beginPath() {
@@ -574,7 +585,7 @@
    Clear();
  }
  
-@@ -1671,10 +1689,12 @@
+@@ -1668,10 +1686,12 @@
  }
  
  void Canvas2DRecorderContext::fill() {
@@ -587,7 +598,7 @@
    FillImpl(CanvasFillRuleToSkiaFillType(winding));
  }
  
-@@ -1699,6 +1719,7 @@
+@@ -1696,6 +1716,7 @@
  }
  
  void Canvas2DRecorderContext::stroke() {
@@ -595,7 +606,7 @@
    DrawPathInternal(*this, CanvasRenderingContext2DState::kStrokePaintType,
                     SkPathFillType::kWinding, UsePaintCache::kDisabled);
  }
-@@ -1712,6 +1733,8 @@
+@@ -1709,6 +1730,8 @@
                                         double y,
                                         double width,
                                         double height) {
@@ -604,7 +615,7 @@
    if (!ValidateRectForCanvas(x, y, width, height)) {
      return;
    }
-@@ -1775,6 +1798,7 @@
+@@ -1772,6 +1795,7 @@
                                           double y,
                                           double width,
                                           double height) {
@@ -612,7 +623,7 @@
    if (!ValidateRectForCanvas(x, y, width, height)) {
      return;
    }
-@@ -1933,6 +1957,7 @@
+@@ -1930,6 +1954,7 @@
                                          double y,
                                          double width,
                                          double height) {
@@ -620,8 +631,9 @@
    if (!ValidateRectForCanvas(x, y, width, height)) {
      return;
    }
---- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_path.cc
-+++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_path.cc
+diff -u --recursive a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_path.cc b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_path.cc
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_path.cc	2026-07-21 13:56:47.389014685 +0000
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_path.cc	2026-07-21 13:56:47.397014720 +0000
 @@ -75,6 +75,7 @@
  }  // namespace
  
@@ -694,8 +706,9 @@
    float x = base::saturated_cast<float>(double_x);
    float y = base::saturated_cast<float>(double_y);
    float width = base::saturated_cast<float>(double_width);
---- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_path.h
-+++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_path.h
+diff -u --recursive a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_path.h b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_path.h
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_path.h	2026-07-21 13:56:47.389014685 +0000
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_path.h	2026-07-21 13:56:47.397014720 +0000
 @@ -176,6 +176,10 @@
    gfx::RectF BoundingRect() const;
  
@@ -707,8 +720,9 @@
    CanvasPath() { path_builder_.SetIsVolatile(true); }
    explicit CanvasPath(const Path& path) : path_builder_(path) {
      path_builder_.SetIsVolatile(true);
---- a/third_party/blink/renderer/platform/graphics/image_data_buffer.cc
-+++ b/third_party/blink/renderer/platform/graphics/image_data_buffer.cc
+diff -u --recursive a/third_party/blink/renderer/platform/graphics/image_data_buffer.cc b/third_party/blink/renderer/platform/graphics/image_data_buffer.cc
+--- a/third_party/blink/renderer/platform/graphics/image_data_buffer.cc	2026-07-21 13:56:47.389014685 +0000
++++ b/third_party/blink/renderer/platform/graphics/image_data_buffer.cc	2026-07-21 13:56:47.397014720 +0000
 @@ -32,8 +32,11 @@
  
  #include "third_party/blink/renderer/platform/graphics/image_data_buffer.h"
@@ -739,8 +753,9 @@
  }
  
  String ImageDataBuffer::ToDataURL(const ImageEncodingMimeType mime_type,
---- a/third_party/blink/renderer/platform/graphics/image_data_buffer.h
-+++ b/third_party/blink/renderer/platform/graphics/image_data_buffer.h
+diff -u --recursive a/third_party/blink/renderer/platform/graphics/image_data_buffer.h b/third_party/blink/renderer/platform/graphics/image_data_buffer.h
+--- a/third_party/blink/renderer/platform/graphics/image_data_buffer.h	2026-07-21 13:56:47.389014685 +0000
++++ b/third_party/blink/renderer/platform/graphics/image_data_buffer.h	2026-07-21 13:56:47.397014720 +0000
 @@ -28,6 +28,7 @@
  #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_GRAPHICS_IMAGE_DATA_BUFFER_H_
  #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_GRAPHICS_IMAGE_DATA_BUFFER_H_
@@ -759,8 +774,9 @@
  
    base::span<const uint8_t> PixelData() const;
  
---- a/third_party/blink/renderer/platform/graphics/static_bitmap_image.cc
-+++ b/third_party/blink/renderer/platform/graphics/static_bitmap_image.cc
+diff -u --recursive a/third_party/blink/renderer/platform/graphics/static_bitmap_image.cc b/third_party/blink/renderer/platform/graphics/static_bitmap_image.cc
+--- a/third_party/blink/renderer/platform/graphics/static_bitmap_image.cc	2026-07-21 13:56:47.389014685 +0000
++++ b/third_party/blink/renderer/platform/graphics/static_bitmap_image.cc	2026-07-21 13:56:47.397014720 +0000
 @@ -4,9 +4,12 @@
  
  #include "third_party/blink/renderer/platform/graphics/static_bitmap_image.h"
@@ -774,16 +790,24 @@
  #include "gpu/command_buffer/client/gles2_interface.h"
  #include "third_party/blink/renderer/platform/graphics/accelerated_static_bitmap_image.h"
  #include "third_party/blink/renderer/platform/graphics/graphics_context.h"
-@@ -123,7 +126,7 @@
+@@ -124,144 +127,122 @@
  
  #define writable_addr(T, p, stride, x, y) (T*)((const char *)p + y * stride + x * sizeof(T))
  
 -void StaticBitmapImage::ShuffleSubchannelColorData(const void *addr, const SkImageInfo& info, int srcX, int srcY) {
-+void StaticBitmapImage::ShuffleSubchannelColorData(const void *addr, const SkImageInfo& info, int srcX, int srcY, uint64_t effective_seed) {
-   auto w = info.width() - srcX, h = info.height() - srcY;
+-  auto w = info.width() - srcX, h = info.height() - srcY;
++void StaticBitmapImage::ShuffleSubchannelColorData(const void *addr, const SkImageInfo& info, int srcX, int srcY, uint64_t effective_seed, bool bottom_up) {
++  // clearcote: the buffer IS the region. `info` describes the pixels handed to us; srcX/srcY
++  // say WHERE that region sits on the canvas. The previous `info.width() - srcX` conflated
++  // size with origin, so at the getImageData exit -- where info is the sw x sh region and
++  // srcX/srcY are absolute canvas coords -- any read at an offset >= its own width computed
++  // w <= 0 and fell out of the guard below with NO noise applied at all.
++  // Measured before this fix: getImageData(16,16,16,16) received 0 of 1024 noised channels
++  // while the full read received 43 of 16384.
++  auto w = info.width(), h = info.height();
  
    // skip tiny images; info.width()/height() can also be 0
-@@ -131,136 +134,74 @@
+   if ((w < 8) || (h < 8)) {
      return;
    }
  
@@ -908,83 +932,117 @@
 -
 -         *pixel = (a << SK_BGRA_A32_SHIFT) | (r << SK_BGRA_R32_SHIFT) |
 -                  (g << SK_BGRA_G32_SHIFT) | (b << SK_BGRA_B32_SHIFT);
--      }
++  // clearcote: leave a UNIFORM surface exactly as drawn.
++  //
++  // Complementary to the position-anchoring below, not replaced by it: anchoring makes the exits
++  // agree with EACH OTHER, but the per-pixel decision still varies with absolute x/y, so a flat
++  // buffer would come back speckled. Measured without this skip: rgb(255,102,0) read back as 7
++  // distinct colours, and a single glClear as 7 over 4096 pixels.
++  //
++  // One fillRect or one glClear writes a single colour to every pixel, so a readback returning
++  // more than one is not merely unusual -- it is impossible, and a page can prove it with no
++  // reference to real hardware. Skipping costs no unlinkability: a flat region is byte-identical
++  // on every machine, so there was never a per-machine signal there to farble. Real fingerprinting
++  // canvases (text, gradients, curves) are not uniform and are perturbed exactly as before.
++  //
++  // Early-exits on the first differing pixel, so non-uniform content pays only a few comparisons.
++  {
++    const char* const cc_base = reinterpret_cast<const char*>(addr);
++    const uint8_t* const cc_first = reinterpret_cast<const uint8_t*>(cc_base);
++    bool cc_uniform = true;
++    for (int y = 0; y < h && cc_uniform; ++y) {
++      const uint8_t* r0 = reinterpret_cast<const uint8_t*>(
++          cc_base + static_cast<size_t>(y) * fRowBytes);
++      for (int px = 0; px < w; ++px) {
++        const uint8_t* q = r0 + static_cast<size_t>(px) * bpp;
++        for (size_t c = 0; c < bpp; ++c) {
++          if (q[c] != cc_first[c]) { cc_uniform = false; break; }
++        }
++        if (!cc_uniform) break;
+       }
 -      break;
 -      default:
 -         // the remaining formats are not expected to be used in Chromium
 -         LOG(WARNING) << "BRM: ShuffleSubchannelColorData(): Ignoring pixel format";
 -         return;
-+  // Content-keyed sparse LSB perturbation. The previous implementation flipped the LSB of <=10
-+  // EDGE pixels (deduped one-per-row/col) -- a recognizable anti-detect signature that also missed
-+  // proof-of-work canvases. Instead: hash the FULL pixel buffer, mix it with the per-eTLD+1 farble
-+  // seed, and LSB-flip a sparse set of pixels at PRNG-chosen positions spread across the whole
-+  // image. Deterministic per (site, content) -> the readback stays STABLE across reads (a changing
-+  // canvas hash would itself be a tell), while the perturbation looks like distributed per-pixel
-+  // noise rather than an edge-only pattern.
-+  char* const pbase = const_cast<char*>(reinterpret_cast<const char*>(addr));
-+
-+  // 1) FNV-1a over the visible pixel rows -> 64-bit content hash.
-+  uint64_t content = 1469598103934665603ULL;
-+  for (int y = 0; y < h; ++y) {
-+    const uint8_t* row = reinterpret_cast<const uint8_t*>(pbase + static_cast<size_t>(y) * fRowBytes);
-+    const size_t row_len = static_cast<size_t>(w) * bpp;
-+    for (size_t k = 0; k < row_len; ++k) {
-+      content ^= row[k];
-+      content *= 1099511628211ULL;
      }
-+  }
- 
+-
 -    // keep bisecting or reset current width/height as needed
 -    if (x == 0) {
 -       currentW = w;
 -    } else {
 -       currentW = x;
--    }
++    if (cc_uniform) {
++      return;
+     }
 -    if (y == 0) {
 -       currentH = h;
-+  // 2) xorshift64 PRNG seeded from (per-site farble seed XOR content hash).
-+  uint64_t state = effective_seed ^ content;
-+  if (state == 0) {
-+    state = 0x9E3779B97F4A7C15ULL;
-+  }
-+  auto next = [&state]() -> uint64_t {
-+    state ^= state << 13;
-+    state ^= state >> 7;
-+    state ^= state << 17;
-+    return state;
-+  };
-+
-+  // 3) perturb ~0.17% of the pixels (clamped to [24, 512]) at PRNG positions.
-+  const long area = static_cast<long>(w) * static_cast<long>(h);
-+  int n_perturb = static_cast<int>(area / 600);
-+  if (n_perturb < 24) {
-+    n_perturb = 24;
-+  } else if (n_perturb > 512) {
-+    n_perturb = 512;
-+  }
-+
-+  for (int n = 0; n < n_perturb; ++n) {
-+    const uint64_t rnd = next();
-+    const int x = static_cast<int>(rnd % static_cast<uint64_t>(w));
-+    const int y = static_cast<int>((rnd >> 21) % static_cast<uint64_t>(h));
-+    const uint64_t bits = rnd >> 42;
-+    uint8_t* px = reinterpret_cast<uint8_t*>(
-+        pbase + static_cast<size_t>(y) * fRowBytes + static_cast<size_t>(x) * bpp);
-+    if (bpp == 4) {
-+      // bytes 0..2 are the colour channels (R,G,B or B,G,R); byte 3 is alpha in both -> leave it.
-+      px[0] ^= static_cast<uint8_t>(bits & 1u);
-+      px[1] ^= static_cast<uint8_t>((bits >> 1) & 1u);
-+      px[2] ^= static_cast<uint8_t>((bits >> 2) & 1u);
-+    } else if (bpp == 2) {
-+      px[0] ^= static_cast<uint8_t>(bits & 1u);  // LSB of the RGB_565 word
-     } else {
+-    } else {
 -       currentH = y;
-+      *px ^= static_cast<uint8_t>(bits & 1u);    // gray
++  }
++
++  // clearcote: PER-PIXEL, POSITION-ANCHORED perturbation.
++  //
++  // The old scheme hashed the whole handed-in buffer into one seed, then walked a PRNG stream
++  // picking positions RELATIVE TO THAT BUFFER. Both halves were region-dependent, so asking for a
++  // different rectangle over the same pixels produced a different mask -- measured at 42 of 1024
++  // channels between a windowed read and the same pixels of the full read. Two reads of one canvas
++  // cannot disagree; that is not entropy, it is a provable contradiction.
++  //
++  // Now each pixel decides for itself from (seed, absolute x, absolute y, its own value). Same
++  // pixel, same place, same value -> same decision, whatever shape the read was. getImageData,
++  // toDataURL, toBlob and readPixels therefore agree by construction rather than by coincidence.
++  //
++  // The density is a FIXED per-pixel probability, deliberately NOT derived from the area: the old
++  // clamp(area/600, 24, 512) is itself a function of the requested region, which would reintroduce
++  // exactly the bug being fixed. 1/171 reproduces the previous effective density at the canonical
++  // 64x64 fingerprinting canvas.
++  //
++  // Safety: this always runs on an OUTPUT COPY, never the canvas backing store (checked at all
++  // five call sites), so the incoming value is the TRUE value -- which is what makes keying on it
++  // idempotent instead of self-referential. Keying per pixel also means recovering the flip for
++  // value V at (x,y) reveals nothing about value W at the same position.
++  char* const pbase = const_cast<char*>(reinterpret_cast<const char*>(addr));
++  constexpr uint64_t kDensity = 171;
++
++  for (int y = 0; y < h; ++y) {
++    // The WebGL readPixels exit hands back a BOTTOM-UP buffer while every other exit is top-down.
++    // Without this the same physical pixel lands on two different absolute y values and the two
++    // exits of one drawing buffer disagree.
++    const int64_t cc_abs_y = srcY + (bottom_up ? (h - 1 - y) : y);
++    uint8_t* row = reinterpret_cast<uint8_t*>(pbase + static_cast<size_t>(y) * fRowBytes);
++    for (int px = 0; px < w; ++px) {
++      const int64_t cc_abs_x = srcX + px;
++      uint8_t* p = row + static_cast<size_t>(px) * bpp;
++
++      uint64_t k = effective_seed;
++      k ^= static_cast<uint64_t>(cc_abs_x) * 0x9E3779B97F4A7C15ULL;
++      k = (k ^ (k >> 29)) * 0xBF58476D1CE4E5B9ULL;
++      k ^= static_cast<uint64_t>(cc_abs_y) * 0xC2B2AE3D27D4EB4FULL;
++      k = (k ^ (k >> 32)) * 0x94D049BB133111EBULL;
++      for (size_t c = 0; c < bpp && c < 3; ++c) {
++        k ^= static_cast<uint64_t>(p[c]) << (8 * c);
++      }
++      k = (k ^ (k >> 31)) * 0xD6E8FEB86659FD93ULL;
++      k ^= k >> 32;
++
++      if ((k % kDensity) != 0) {
++        continue;
++      }
++      // Alpha is never touched -- a changed alpha is visible, not sub-perceptual.
++      if (bpp >= 3) {
++        p[0] ^= static_cast<uint8_t>((k >> 40) & 1u);
++        p[1] ^= static_cast<uint8_t>((k >> 41) & 1u);
++        p[2] ^= static_cast<uint8_t>((k >> 42) & 1u);
++      } else {
++        p[0] ^= static_cast<uint8_t>((k >> 40) & 1u);
++      }
      }
    }
  }
---- /dev/null
-+++ b/third_party/blink/renderer/platform/graphics/static_bitmap_image.cc.perturbbak
+diff -u --recursive a/third_party/blink/renderer/platform/graphics/static_bitmap_image.cc.perturbbak b/third_party/blink/renderer/platform/graphics/static_bitmap_image.cc.perturbbak
+--- a/third_party/blink/renderer/platform/graphics/static_bitmap_image.cc.perturbbak	2026-07-21 13:56:47.389014685 +0000
++++ b/third_party/blink/renderer/platform/graphics/static_bitmap_image.cc.perturbbak	2026-07-21 13:56:47.397014720 +0000
 @@ -0,0 +1,403 @@
 +// Copyright 2014 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
@@ -1389,19 +1447,23 @@
 +#undef shuffleComponent
 +
 +}  // namespace blink
---- a/third_party/blink/renderer/platform/graphics/static_bitmap_image.h
-+++ b/third_party/blink/renderer/platform/graphics/static_bitmap_image.h
-@@ -36,7 +36,7 @@
+diff -u --recursive a/third_party/blink/renderer/platform/graphics/static_bitmap_image.h b/third_party/blink/renderer/platform/graphics/static_bitmap_image.h
+--- a/third_party/blink/renderer/platform/graphics/static_bitmap_image.h	2026-07-21 13:56:47.389014685 +0000
++++ b/third_party/blink/renderer/platform/graphics/static_bitmap_image.h	2026-07-21 13:56:47.397014720 +0000
+@@ -38,7 +38,9 @@
  
    StaticBitmapImage(ImageOrientation orientation) : orientation_(orientation) {}
  
 -  static void ShuffleSubchannelColorData(const void *addr, const SkImageInfo& info, int srcX, int srcY);
-+  static void ShuffleSubchannelColorData(const void *addr, const SkImageInfo& info, int srcX, int srcY, uint64_t effective_seed);
++  // `bottom_up` marks a buffer whose row 0 is the BOTTOM of the surface (WebGL readPixels);
++  // every other exit is top-down. It only affects which absolute y the noise is keyed on.
++  static void ShuffleSubchannelColorData(const void *addr, const SkImageInfo& info, int srcX, int srcY, uint64_t effective_seed, bool bottom_up = false);
  
    bool IsStaticBitmapImage() const override { return true; }
  
---- a/third_party/blink/renderer/platform/image-encoders/image_encoder.cc
-+++ b/third_party/blink/renderer/platform/image-encoders/image_encoder.cc
+diff -u --recursive a/third_party/blink/renderer/platform/image-encoders/image_encoder.cc b/third_party/blink/renderer/platform/image-encoders/image_encoder.cc
+--- a/third_party/blink/renderer/platform/image-encoders/image_encoder.cc	2026-07-21 13:56:47.389014685 +0000
++++ b/third_party/blink/renderer/platform/image-encoders/image_encoder.cc	2026-07-21 13:56:47.397014720 +0000
 @@ -45,10 +45,12 @@
  bool ImageEncoder::Encode(Vector<unsigned char>* dst,
                            const SkPixmap& src,
@@ -1418,8 +1480,9 @@
    }
    switch (mime_type) {
      case kMimeTypeJpeg: {
---- a/third_party/blink/renderer/platform/image-encoders/image_encoder.h
-+++ b/third_party/blink/renderer/platform/image-encoders/image_encoder.h
+diff -u --recursive a/third_party/blink/renderer/platform/image-encoders/image_encoder.h b/third_party/blink/renderer/platform/image-encoders/image_encoder.h
+--- a/third_party/blink/renderer/platform/image-encoders/image_encoder.h	2026-07-21 13:56:47.389014685 +0000
++++ b/third_party/blink/renderer/platform/image-encoders/image_encoder.h	2026-07-21 13:56:47.397014720 +0000
 @@ -5,6 +5,8 @@
  #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_IMAGE_ENCODERS_IMAGE_ENCODER_H_
  #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_IMAGE_ENCODERS_IMAGE_ENCODER_H_

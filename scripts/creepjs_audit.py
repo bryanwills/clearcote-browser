@@ -309,8 +309,11 @@ def build_table(res, expected_webrtc_ip):
 
     date = res["stamp"][:8]
     date = f"{date[:4]}-{date[4:6]}-{date[6:8]}"
+    # The pinned Chromium revision, not a hardcoded version: this line went stale on every bump.
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "UPSTREAM_REVISION"), encoding="utf-8") as fh:
+        build = fh.read().strip()
     lines = [
-        f"**Build `149.0.7827.114` · audited {date} · seed `{res['seed']}` · platform `{res['platform']}`**",
+        f"**Build `{build}` · audited {date} · seed `{res['seed']}` · platform `{res['platform']}`**",
         "",
         "| Signal | Value | Verdict |",
         "|---|---|---|",

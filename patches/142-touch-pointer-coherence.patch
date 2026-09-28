@@ -1,0 +1,57 @@
+# 142-touch-pointer-coherence.patch
+#
+# (A) media_values.cc CalculatePrimaryPointerType returned COARSE whenever an explicit
+#     --fingerprint-max-touch-points > 0 was set. A real Windows touch laptop reports
+#     (pointer:fine) -- the mouse is the PRIMARY pointer -- with touch visible only as
+#     (any-pointer:coarse), which CalculateAvailablePointerTypes already handled correctly.
+#     So maxTouchPoints:2 on a desktop persona produced a desktop-claiming-a-coarse-primary
+#     contradiction real Chrome never shows. Primary now stays fine unless the persona is
+#     genuinely mobile (Android sets pointer_coarse).
+#
+# (B) persona_profile.cc never parsed max_touch_points from an imported profile, so that
+#     field was silently dropped while hardware_concurrency / device_memory / screen.* were
+#     honoured -- contradicting the documented "fields present override the seed" contract.
+#     A silent no-op also invalidates any restoration experiment that relies on it.
+#
+# MEASURED before/after on 150.0.7871.114, desktop persona + maxTouchPoints 2:
+#   native switch  before: pointer:fine=false pointer:coarse=true   (contradiction)
+#                  after : pointer:fine=true  any-pointer:coarse=true (real laptop shape)
+#   profile import before: maxTouchPoints=0 (dropped)   after: maxTouchPoints=2
+#
+# KNOWN GAP: via profile import the CSS any-pointer:coarse bit does NOT follow, because the
+# CSS layer reads the command line rather than the persona struct. navigator is correct; CSS
+# is not. The native switch is the fully coherent path. Wiring media_values.cc to fall back
+# to CurrentPersona().max_touch_points is the follow-up.
+--- a/components/ungoogled/persona_profile.cc
++++ b/components/ungoogled/persona_profile.cc
+@@ -211,6 +211,9 @@
+   };
+   if (auto v = d.FindInt("hardware_concurrency")) p->hardware_concurrency = *v;
+   if (auto v = num(d, "device_memory")) p->device_memory_gb = static_cast<float>(*v);
++  // clearcote: honour the profile's maxTouchPoints. Previously dropped silently,
++  // so a captured profile's touch count never applied while cores/memory/screen did.
++  if (auto v = d.FindInt("max_touch_points")) p->max_touch_points = *v;
+   if (const base::DictValue* s = d.FindDict("screen")) {
+     if (auto v = s->FindInt("width")) p->screen_width = *v;
+     if (auto v = s->FindInt("height")) p->screen_height = *v;
+--- a/third_party/blink/renderer/core/css/media_values.cc
++++ b/third_party/blink/renderer/core/css/media_values.cc
+@@ -408,8 +408,16 @@
+   // The pointer class must agree with whatever maxTouchPoints ends up reporting.
+   int ls_mt = 0;
+   if (ClearcoteTouchOverride(&ls_mt)) {
+-    return ls_mt > 0 ? mojom::blink::PointerType::kPointerCoarseType
+-                     : mojom::blink::PointerType::kPointerFineType;
++    // A touch-capable DESKTOP still has a mouse as its PRIMARY pointer: real Windows
++    // touch laptops report (pointer:fine) together with (any-pointer:coarse). Returning
++    // coarse here made every desktop persona with maxTouchPoints>0 claim a coarse primary
++    // pointer -- a mobile/desktop contradiction real Chrome never shows.
++    // CalculateAvailablePointerTypes already exposes the coarse BIT for touch, which is
++    // where a touchscreen legitimately becomes visible. Only a genuinely mobile persona
++    // (Android) has a coarse primary.
++    if (ls_mt > 0 && ungoogled::CurrentPersona().pointer_coarse)
++      return mojom::blink::PointerType::kPointerCoarseType;
++    return mojom::blink::PointerType::kPointerFineType;
+   }
+   if (!ClearcotePersonaActive() && ClearcoteHostHasRealPointers(frame))
+     return frame->GetSettings()->GetPrimaryPointerType();

@@ -1,6 +1,6 @@
 --- a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
 +++ b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
-@@ -4,12 +4,39 @@
+@@ -4,12 +4,55 @@
  
  #include "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h"
  
@@ -22,67 +22,205 @@
 +  //   2. the coherent session persona's core count as the fallback -- constant
 +  //      per session like real hardware, and correlated with deviceMemory via
 +  //      the persona HW tier.
-+  const base::CommandLine* command_line =
-+      base::CommandLine::ForCurrentProcess();
-+
++  // clearcote-timing-fix: resolve the switch ONCE into a function-local static.
++  // It used to run on EVERY navigator.hardwareConcurrency read (including from
++  // worker scopes); HasSwitch() is a map lookup plus, on Windows, a lowercasing
++  // allocation, and with the string parse on top V8 cannot inline any of it --
++  // measured 2.0x (+583ns) versus genuine Chrome and timeable from JS. The
++  // static is lazily initialised on first use, long after the command line is
++  // final, and magic-static initialisation is thread-safe for the worker case.
++  // An accepted override is always > 0, so 0 is an unambiguous "no override"
++  // sentinel: absent switch, empty value, unparseable value and 0 all yield 0
++  // and fall through to the persona exactly as before.
++  //
 +  // Non-throwing parse: Chromium is built with exceptions disabled, so a
 +  // std::stoul() on a non-numeric value would crash the renderer
 +  // (CPP_EH_EXCEPTION). Fall through to the persona on bad/zero input.
-+  if (command_line->HasSwitch(switches::kFingerprintHardwareConcurrency)) {
-+    std::string value = command_line->GetSwitchValueASCII(
-+        switches::kFingerprintHardwareConcurrency);
-+    unsigned custom_concurrency = 0;
-+    if (base::StringToUint(value, &custom_concurrency) &&
-+        custom_concurrency > 0) {
-+      return custom_concurrency;
++  static const unsigned kCustomConcurrency = [] {
++    const base::CommandLine* command_line =
++        base::CommandLine::ForCurrentProcess();
++    if (command_line->HasSwitch(switches::kFingerprintHardwareConcurrency)) {
++      std::string value = command_line->GetSwitchValueASCII(
++          switches::kFingerprintHardwareConcurrency);
++      unsigned custom_concurrency = 0;
++      if (base::StringToUint(value, &custom_concurrency) &&
++          custom_concurrency > 0) {
++        return custom_concurrency;
++      }
 +    }
++    return 0u;
++  }();
++  if (kCustomConcurrency > 0) {
++    return kCustomConcurrency;
 +  }
 +
 +  return ungoogled::CurrentPersona().hardware_concurrency;
  }
  
  }  // namespace blink
---- a/third_party/blink/renderer/core/frame/navigator_device_memory.cc	2026-07-15 11:42:11.992973682 +0000
-+++ b/third_party/blink/renderer/core/frame/navigator_device_memory.cc	2026-07-15 11:42:11.992973682 +0000
-@@ -4,6 +4,10 @@
- 
- #include "third_party/blink/renderer/core/frame/navigator_device_memory.h"
- 
-+#include "components/ungoogled/persona_profile.h"
-+#include "base/command_line.h"  // clearcote-light-stealth
-+#include "base/strings/string_number_conversions.h"
-+#include "components/ungoogled/ungoogled_switches.h"
- #include "third_party/blink/public/common/device_memory/approximated_device_memory.h"
- #include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-shared.h"
- #include "third_party/blink/renderer/core/dom/document.h"
-@@ -12,7 +16,29 @@
+--- a/third_party/blink/renderer/core/frame/navigator_device_memory.cc
++++ b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
+@@ -12,6 +12,23 @@
  namespace blink {
  
  float NavigatorDeviceMemory::deviceMemory() const {
--  return ApproximatedDeviceMemory::GetApproximatedDeviceMemory();
-+  // clearcote: report the coherent session persona's RAM bucket (correlated
-+  // with hardwareConcurrency via the persona HW tier) instead of a hardcoded
-+  // constant. navigator.deviceMemory is spec-clamped to a maximum of 8, so a
-+  // higher-RAM persona still reports 8 -- the value real Chrome reports for any
-+  // machine with >= 8 GB.
-+  // clearcote-light-stealth: direct override (flag > persona > real).
-+  const base::CommandLine* ls_cmd = base::CommandLine::ForCurrentProcess();
-+  double ls_mem = 0;
-+  if (ls_cmd->HasSwitch(::switches::kFingerprintDeviceMemory) &&
-+      base::StringToDouble(
-+          ls_cmd->GetSwitchValueASCII(::switches::kFingerprintDeviceMemory),
-+          &ls_mem) &&
-+      ls_mem > 0) {
-+    return ls_mem > 8.0 ? 8.0f : static_cast<float>(ls_mem);
-+  }
-+  if (ls_cmd->HasSwitch(::switches::kFingerprint)) {
-+    float gb = ungoogled::CurrentPersona().device_memory_gb;
-+    return gb > 8.0f ? 8.0f : gb;
-+  }
-+  // clearcote-ls-refine: spec-cap the real path at 8 (real Chrome never reports >8).
-+  float ls_real = ApproximatedDeviceMemory::GetApproximatedDeviceMemory();
-+  return ls_real > 8.0f ? 8.0f : ls_real;
-+  // return ApproximatedDeviceMemory::GetApproximatedDeviceMemory();
++  // clearcote: navigator.deviceMemory and the Device-Memory client-hint
++  // header must be the SAME number. ApproximatedDeviceMemory is the single
++  // source feeding all three emission sites -- this getter, the
++  // browser-process header (content/browser/client_hints/client_hints.cc
++  // AddDeviceMemoryHeader) and the renderer-side subresource header
++  // (core/loader/frame_fetch_context.cc) -- so BOTH the light_stealth
++  // --fingerprint-device-memory override and the --fingerprint persona value
++  // are applied THERE, in blink/common, and not here. See
++  // third_party/blink/common/device_memory/approximated_device_memory.cc.
++  //
++  // Deliberately no extra clamp here: stock Chrome returns this value
++  // verbatim. Clamping only the JS side is exactly what produced the
++  // impossible pairing of Device-Memory: 16 on the wire with
++  // navigator.deviceMemory === 8 -- kUpdatedDeviceMemoryLimitsFor2026 is
++  // enabled by default in M150 and raises kMaxMemory to 32, so the wire
++  // value on a >= 16 GB host is 16 or 32.
++  ApproximatedDeviceMemory::Initialize();
+   return ApproximatedDeviceMemory::GetApproximatedDeviceMemory();
  }
  
- }  // namespace blink
+--- a/third_party/blink/common/device_memory/approximated_device_memory.cc
++++ b/third_party/blink/common/device_memory/approximated_device_memory.cc
+@@ -6,12 +6,80 @@
+ 
+ #include "base/byte_size.h"
+ #include "base/check_op.h"
++#include "base/command_line.h"
+ #include "base/feature_list.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/system/sys_info.h"
++#include "components/ungoogled/persona_profile.h"
++#include "components/ungoogled/ungoogled_switches.h"
+ #include "third_party/blink/public/common/features.h"
+ 
+ namespace blink {
+ 
++namespace {
++
++// clearcote: put a requested RAM figure through exactly the bucketing that
++// real Chrome applies in CalculateAndSetApproximatedDeviceMemory() below --
++// round the megabyte count to the nearest power of two, then express it in
++// GB. This guarantees the number we publish is one a genuine measurement
++// could have produced, rather than an arbitrary float no real machine
++// reports.
++float ClearcoteQuantizeToChromeBucket(double gb) {
++  int64_t mb = static_cast<int64_t>(gb * 1024.0);
++  if (mb <= 0) {
++    return 0.0f;
++  }
++  int64_t lower_bound = mb;
++  int power = 0;
++  while (lower_bound > 1) {
++    lower_bound >>= 1;
++    power++;
++  }
++  int64_t upper_bound = (lower_bound + 1) << power;
++  lower_bound = lower_bound << power;
++  if (mb - lower_bound <= upper_bound - mb) {
++    return static_cast<float>(lower_bound) / 1024.0f;
++  }
++  return static_cast<float>(upper_bound) / 1024.0f;
++}
++// clearcote: the RAM figure the session should claim, in GB, or 0 when
++// nothing is active -- in which case the real host measurement is kept and
++// this file behaves byte-for-byte like upstream.
++//
++// Precedence is the light_stealth precedence, unchanged: the explicit
++// --fingerprint-device-memory=N override wins, then the coherent session
++// persona (only when --fingerprint selected one, so the value stays
++// correlated with hardwareConcurrency through the persona HW tier), then the
++// real host measurement.
++//
++// NOTE the leading :: -- Blink has its own blink::switches namespace, so an
++// unqualified switches:: inside namespace blink resolves to the wrong one.
++double ClearcoteRequestedDeviceMemoryGb() {
++  const base::CommandLine* command_line =
++      base::CommandLine::ForCurrentProcess();
++
++  if (command_line->HasSwitch(::switches::kFingerprintDeviceMemory)) {
++    // Non-throwing parse: Chromium is built without exceptions, so a bad
++    // value must fall through rather than abort. Zero/negative also falls
++    // through.
++    double gb = 0.0;
++    if (base::StringToDouble(command_line->GetSwitchValueASCII(
++                                 ::switches::kFingerprintDeviceMemory),
++                             &gb) &&
++        gb > 0.0) {
++      return gb;
++    }
++  }
++
++  if (command_line->HasSwitch(::switches::kFingerprint)) {
++    return static_cast<double>(ungoogled::CurrentPersona().device_memory_gb);
++  }
++
++  return 0.0;
++}
++
++}  // namespace
++
+ // static
+ float ApproximatedDeviceMemory::approximated_device_memory_gb_ = 0.0;
+ int64_t ApproximatedDeviceMemory::physical_memory_mb_ = 0;
+@@ -77,6 +145,31 @@
+ #endif
+   }
+ 
++  // clearcote: ONE number for navigator.deviceMemory and the Device-Memory
++  // client-hint header. This function is the single source read by
++  //   * blink::NavigatorDeviceMemory::deviceMemory()        (the JS value)
++  //   * content/browser/client_hints/client_hints.cc
++  //     AddDeviceMemoryHeader()                             (browser proc)
++  //   * blink::FrameFetchContext                            (subresources)
++  // so overriding here -- rather than at any one emission site -- makes the
++  // wire value and the DOM value equal by construction, in every process.
++  // Overriding only the Blink getter left a realm split: with
++  // kUpdatedDeviceMemoryLimitsFor2026 enabled by default (kMaxMemory == 32)
++  // a >= 16 GB host emitted Device-Memory: 16 or 32 while JS reported 8 -- a
++  // combination upstream Chrome cannot produce.
++  //
++  // The requested figure is bucketed by the Chrome power-of-two rule and
++  // then falls through to the same kMinMemory/kMaxMemory clamp below, so it
++  // is indistinguishable in shape from a genuinely measured value.
++  const double clearcote_gb = ClearcoteRequestedDeviceMemoryGb();
++  if (clearcote_gb > 0.0) {
++    const float clearcote_bucket =
++        ClearcoteQuantizeToChromeBucket(clearcote_gb);
++    if (clearcote_bucket > 0.0f) {
++      approximated_device_memory_gb_ = clearcote_bucket;
++    }
++  }
++
+   if (approximated_device_memory_gb_ < kMinMemory) {
+     approximated_device_memory_gb_ = kMinMemory;
+   } else if (approximated_device_memory_gb_ > kMaxMemory) {
+--- a/third_party/blink/common/BUILD.gn
++++ b/third_party/blink/common/BUILD.gn
+@@ -310,6 +310,7 @@
+     "//base",
+     "//build:android_buildflags",
+     "//build:chromecast_buildflags",
++    "//components/ungoogled:ungoogled_switches",
+     "//media/capture:capture_base",
+     "//media/capture/mojom:video_capture_mojom_support",
+     "//mojo/public/cpp/system",
+--- a/third_party/blink/common/DEPS
++++ b/third_party/blink/common/DEPS
+@@ -60,6 +60,12 @@
+ ]
+ 
+ specific_include_rules = {
++  # clearcote: navigator.deviceMemory and the Device-Memory client-hint
++  # header must derive from one number, and that header is emitted in the
++  # browser process, so the persona / --fingerprint-device-memory override
++  # has to live in this process-agnostic file rather than in a
++  # renderer-only getter.
++  'approximated_device_memory\.cc': [ "+components/ungoogled" ],
+   '.*unittest.?.cc': [
+     "+services/network/test",
+     "+ui/gfx/image/image_unittest_util.h",
