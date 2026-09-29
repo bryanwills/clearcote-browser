@@ -1,6 +1,6 @@
 --- a/content/browser/renderer_host/media/media_devices_manager.cc
 +++ b/content/browser/renderer_host/media/media_devices_manager.cc
-@@ -36,6 +36,7 @@
+@@ -37,6 +37,7 @@
  #include "content/public/browser/browser_task_traits.h"
  #include "content/public/browser/browser_thread.h"
  #include "content/public/common/content_features.h"
@@ -8,7 +8,7 @@
  #include "media/audio/audio_device_description.h"
  #include "media/audio/audio_system.h"
  #include "media/base/media_switches.h"
-@@ -1493,10 +1494,34 @@
+@@ -1509,10 +1510,34 @@
      const blink::WebMediaDeviceInfoArray& snapshot) {
    DCHECK_CURRENTLY_ON(BrowserThread::IO);
    DCHECK(blink::IsValidMediaDeviceType(type));

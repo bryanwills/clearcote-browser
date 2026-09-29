@@ -1,5 +1,89 @@
---- a/third_party/blink/renderer/modules/battery/battery_manager.cc
-+++ b/third_party/blink/renderer/modules/battery/battery_manager.cc
+diff -u --recursive a/third_party/blink/renderer/core/events/navigator_events.cc b/third_party/blink/renderer/core/events/navigator_events.cc
+--- a/third_party/blink/renderer/core/events/navigator_events.cc	2026-07-20 14:58:26.862031504 +0000
++++ b/third_party/blink/renderer/core/events/navigator_events.cc	2026-07-20 14:58:26.914031728 +0000
+@@ -30,6 +30,11 @@
+ 
+ #include "third_party/blink/renderer/core/events/navigator_events.h"
+ 
++#include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"  // clearcote-light-stealth
++#include "components/ungoogled/persona_profile.h"
++#include "third_party/blink/public/mojom/webpreferences/web_preferences.mojom-blink-forward.h"
++#include "components/ungoogled/ungoogled_switches.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+ #include "third_party/blink/renderer/core/frame/navigator.h"
+@@ -38,8 +43,66 @@
+ namespace blink {
+ 
+ int32_t NavigatorEvents::maxTouchPoints(Navigator& navigator) {
++  // clearcote: the Windows desktop persona is mouse-only (coherent with CSS
++  // pointer:fine / hover:hover); report 0 touch points instead of the host's real
++  // value (e.g. 2 from a pen/precision-touchpad), which would contradict it.
++  // clearcote: return the persona's touch-point count -- 0 for the mouse-only
++  // desktop personas (unchanged), 5 for the Android persona. This keeps
++  // maxTouchPoints coherent with CSS pointer:coarse and userAgentData.mobile.
++  // clearcote-light-stealth: direct override (flag > persona > real).
++  // clearcote-timing-fix: resolve ONCE into function-local statics. Both
++  // lookups ran on EVERY maxTouchPoints read; HasSwitch() is a map lookup plus,
++  // on Windows, a lowercasing allocation, which V8 cannot inline -- measured
++  // 2.3x (+746ns) versus genuine Chrome and timeable from JS. Lazily
++  // initialised on first use, long after the command line is final.
++  // NOTE: this override accepts ls_mt >= 0, so 0 is a VALID override value and
++  // cannot be the sentinel; -1 marks "no override" instead. Absent / empty /
++  // unparseable / negative values all yield -1 and fall through exactly as
++  // they did before.
++  static const int kLsMaxTouch = [] {
++    const base::CommandLine* ls_cmd = base::CommandLine::ForCurrentProcess();
++    int ls_mt = 0;
++    if (ls_cmd->HasSwitch(::switches::kFingerprintMaxTouchPoints) &&
++        base::StringToInt(
++            ls_cmd->GetSwitchValueASCII(::switches::kFingerprintMaxTouchPoints),
++            &ls_mt) &&
++        ls_mt >= 0) {
++      return ls_mt;
++    }
++    return -1;
++  }();
++  if (kLsMaxTouch >= 0) {
++    return kLsMaxTouch;
++  }
++  static const bool kPersonaActive = [] {
++    return base::CommandLine::ForCurrentProcess()->HasSwitch(
++        ::switches::kFingerprint);
++  }();
++  if (kPersonaActive)
++    return ungoogled::CurrentPersona().max_touch_points;
+   LocalDOMWindow* window = navigator.DomWindow();
+-  return window ? window->GetFrame()->GetSettings()->GetMaxTouchPoints() : 0;
++  // clearcote-input-class-coherence: media_values.cc serves the desktop default (fine pointer /
++  // hover) whenever the host exposes no real pointing devices -- a HEADLESS host reports
++  // kPointerNone, the classic headless tell, which we must not surface. Report 0 touch points in
++  // exactly that case so the two sides cannot disagree (headless still reads the OS digitizer, so
++  // the host's real value would otherwise contradict the fine-only pointer we report). When the
++  // host does have real pointers (headful) both sides report the host's real values and cohere.
++  if (!window || !window->GetFrame() || !window->GetFrame()->GetSettings())
++    return 0;
++  Settings* ls_settings = window->GetFrame()->GetSettings();
++  const int ls_mask = ls_settings->GetAvailablePointerTypes();
++  // clearcote-coarse-gated-touch: report touch points ONLY when the pointer class we actually
++  // report includes a COARSE pointer. Real headless Chrome fails this test itself -- it still
++  // reads the OS digitizer (e.g. maxTouchPoints=2 from a pen tablet) while exposing a fine-only
++  // pointer, so it claims touch hardware the CSS input class denies. Gating on the coarse bit
++  // keeps the two in agreement everywhere: headful with a digitizer reports the host's real
++  // count alongside the real coarse pointer, and headless (or any touch-less host) presents a
++  // coherent mouse-only desktop instead of that contradiction.
++  const bool ls_coarse =
++      (ls_mask & static_cast<int>(mojom::blink::PointerType::kPointerCoarseType)) != 0;
++  if (!ls_coarse)
++    return 0;
++  return ls_settings->GetMaxTouchPoints();
+ }
+ 
+ }  // namespace blink
+diff -u --recursive a/third_party/blink/renderer/modules/battery/battery_manager.cc b/third_party/blink/renderer/modules/battery/battery_manager.cc
+--- a/third_party/blink/renderer/modules/battery/battery_manager.cc	2026-07-20 14:58:26.878031573 +0000
++++ b/third_party/blink/renderer/modules/battery/battery_manager.cc	2026-07-20 14:58:26.914031728 +0000
 @@ -4,6 +4,10 @@
  
  #include "third_party/blink/renderer/modules/battery/battery_manager.h"
@@ -57,8 +141,9 @@
  }
  
  void BatteryManager::DidUpdateData() {
---- a/third_party/blink/renderer/modules/keyboard/keyboard_layout.cc
-+++ b/third_party/blink/renderer/modules/keyboard/keyboard_layout.cc
+diff -u --recursive a/third_party/blink/renderer/modules/keyboard/keyboard_layout.cc b/third_party/blink/renderer/modules/keyboard/keyboard_layout.cc
+--- a/third_party/blink/renderer/modules/keyboard/keyboard_layout.cc	2026-07-20 14:58:26.890031625 +0000
++++ b/third_party/blink/renderer/modules/keyboard/keyboard_layout.cc	2026-07-20 14:58:26.942031849 +0000
 @@ -24,17 +24,10 @@
  constexpr char kKeyboardMapFrameDetachedErrorMsg[] =
      "Current frame is detached.";
@@ -78,7 +163,7 @@
  
  ScriptPromise<KeyboardLayoutMap> KeyboardLayout::GetKeyboardLayoutMap(
      ScriptState* script_state,
-@@ -47,71 +40,47 @@
+@@ -47,71 +40,52 @@
      return EmptyPromise();
    }
  
@@ -124,6 +209,11 @@
 +      // Common US punctuation
 +      {"Backquote", "`"}, {"Minus", "-"}, {"Equal", "="},
 +      {"BracketLeft", "["}, {"BracketRight", "]"}, {"Backslash", "\\"},
++      // clearcote: IntlBackslash (VK_OEM_102) is present on every Latin Windows layout,
++      // including US-ANSI where the physical key is absent -- verified against stock Chrome
++      // on a US-ANSI Windows host, which returns 48 entries with IntlBackslash -> "\\".
++      // Omitting it is the tell, not including it.
++      {"IntlBackslash", "\\"},
 +      {"Semicolon", ";"}, {"Quote", "'"},
 +      {"Comma", ","}, {"Period", "."}, {"Slash", "/"},
 +      // (clearcote: NO Intl*/Numpad*/Space. getLayoutMap() enumerates only
@@ -184,8 +274,9 @@
    ExecutionContextClient::Trace(visitor);
  }
  
---- a/third_party/blink/renderer/modules/keyboard/keyboard_layout.h
-+++ b/third_party/blink/renderer/modules/keyboard/keyboard_layout.h
+diff -u --recursive a/third_party/blink/renderer/modules/keyboard/keyboard_layout.h b/third_party/blink/renderer/modules/keyboard/keyboard_layout.h
+--- a/third_party/blink/renderer/modules/keyboard/keyboard_layout.h	2026-07-20 14:58:26.894031642 +0000
++++ b/third_party/blink/renderer/modules/keyboard/keyboard_layout.h	2026-07-20 14:58:26.918031746 +0000
 @@ -37,18 +37,8 @@
    // Returns true if the local frame is attached to the renderer.
    bool IsLocalFrameAttached();
@@ -205,8 +296,9 @@
  };
  
  }  // namespace blink
---- a/third_party/blink/renderer/modules/netinfo/network_information.cc
-+++ b/third_party/blink/renderer/modules/netinfo/network_information.cc
+diff -u --recursive a/third_party/blink/renderer/modules/netinfo/network_information.cc b/third_party/blink/renderer/modules/netinfo/network_information.cc
+--- a/third_party/blink/renderer/modules/netinfo/network_information.cc	2026-07-20 14:58:26.910031711 +0000
++++ b/third_party/blink/renderer/modules/netinfo/network_information.cc	2026-07-20 14:58:26.918031746 +0000
 @@ -6,6 +6,8 @@
  
  #include <algorithm>
@@ -338,41 +430,3 @@
    probe::ApplyDataSaverOverride(probe::ToCoreProbeSink(GetExecutionContext()),
                                  save_data);
    return save_data;
---- a/third_party/blink/renderer/core/events/navigator_events.cc	2026-07-15 11:42:12.380975338 +0000
-+++ b/third_party/blink/renderer/core/events/navigator_events.cc	2026-07-15 11:42:12.380975338 +0000
-@@ -30,6 +30,10 @@
- 
- #include "third_party/blink/renderer/core/events/navigator_events.h"
- 
-+#include "base/command_line.h"
-+#include "base/strings/string_number_conversions.h"  // clearcote-light-stealth
-+#include "components/ungoogled/persona_profile.h"
-+#include "components/ungoogled/ungoogled_switches.h"
- #include "third_party/blink/renderer/core/frame/local_dom_window.h"
- #include "third_party/blink/renderer/core/frame/local_frame.h"
- #include "third_party/blink/renderer/core/frame/navigator.h"
-@@ -38,6 +42,24 @@
- namespace blink {
- 
- int32_t NavigatorEvents::maxTouchPoints(Navigator& navigator) {
-+  // clearcote: the Windows desktop persona is mouse-only (coherent with CSS
-+  // pointer:fine / hover:hover); report 0 touch points instead of the host's real
-+  // value (e.g. 2 from a pen/precision-touchpad), which would contradict it.
-+  // clearcote: return the persona's touch-point count -- 0 for the mouse-only
-+  // desktop personas (unchanged), 5 for the Android persona. This keeps
-+  // maxTouchPoints coherent with CSS pointer:coarse and userAgentData.mobile.
-+  // clearcote-light-stealth: direct override (flag > persona > real).
-+  const base::CommandLine* ls_cmd = base::CommandLine::ForCurrentProcess();
-+  int ls_mt = 0;
-+  if (ls_cmd->HasSwitch(::switches::kFingerprintMaxTouchPoints) &&
-+      base::StringToInt(
-+          ls_cmd->GetSwitchValueASCII(::switches::kFingerprintMaxTouchPoints),
-+          &ls_mt) &&
-+      ls_mt >= 0) {
-+    return ls_mt;
-+  }
-+  if (base::CommandLine::ForCurrentProcess()->HasSwitch(::switches::kFingerprint))
-+    return ungoogled::CurrentPersona().max_touch_points;
-   LocalDOMWindow* window = navigator.DomWindow();
-   return window ? window->GetFrame()->GetSettings()->GetMaxTouchPoints() : 0;
- }

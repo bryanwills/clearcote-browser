@@ -8,9 +8,9 @@ Clearcote is meant to be rebuilt by anyone with a capable Linux box. This guide 
 
 | Component | Pin |
 |---|---|
-| Chromium | `149.0.7827.114` (see [`UPSTREAM_REVISION`](../UPSTREAM_REVISION)) |
-| ungoogled-chromium | tag `149.0.7827.114-1` (commit `cf82700725f439e130f7b6290e7d5c6425585081`) |
-| ungoogled-chromium-windows | tag `149.0.7827.114-1.1` |
+| Chromium | `150.0.7871.114` (see [`UPSTREAM_REVISION`](../UPSTREAM_REVISION)) |
+| ungoogled-chromium | tag `150.0.7871.114-1` (commit `2d89b04e1b68385c9086efab0df1e3679b35246e`) |
+| ungoogled-chromium-windows | tag `150.0.7871.114-1.1` (commit `42f46dba031f8f9e39277465fa28fec837f2f5bd`) |
 | Toolchain | Chromium in-tree clang/lld (clang-cl + lld-link for the Windows target) |
 | Windows SDK / CRT | Microsoft SDK `10.0.26100` + CRT, fetched on Linux via [xwin](https://github.com/Jake-Shadle/xwin) `0.9.0` |
 
@@ -33,7 +33,7 @@ docker run --rm -v "$PWD/out:/clearcote-build/dist" clearcote-build linux     # 
 docker run --rm -v "$PWD/out:/clearcote-build/dist" clearcote-build windows   # -> chrome.exe zip
 
 # verify against the release (see docs/VERIFY.md):
-sha256sum -c out/clearcote-149.0.7827.114-linux-x64.tar.xz.sha256
+sha256sum -c out/clearcote-150.0.7871.114-linux-x64.tar.xz.sha256
 gpg --verify out/SHA256SUMS.txt.asc out/SHA256SUMS.txt   # against the release's SHA256SUMS.txt.asc
 ```
 
@@ -49,8 +49,8 @@ WORK=~/clearcote-build ./build.sh linux       # or: ./build.sh windows   (defaul
 
 | Stage | Script | What it does |
 |---|---|---|
-| 00 | `scripts/00-fetch-source.sh` | clone the pinned ungoogled tooling, retrieve + unpack Chromium 149, prune binaries |
-| 01 | `scripts/01-apply-patches.sh` | apply the patch series (ungoogled base + **windows overlay only on Windows** + Clearcote set; `900-windows-build-fixes` is skipped on Linux) |
+| 00 | `scripts/00-fetch-source.sh` | clone the pinned ungoogled tooling, retrieve + unpack Chromium 150, prune binaries |
+| 01 | `scripts/01-apply-patches.sh` | apply the patch series (ungoogled base + windows overlay + Clearcote set) — the **same tree for both targets**: since 150 one patched tree builds the Windows and the Linux binary |
 | 02 | `scripts/02-host-toolchain.sh` | fetch clang/rust/sysroot/node; build `gn` from in-tree source (both targets) |
 | 03 | `scripts/03-windows-sdk.sh` | **Windows only** — xwin → assemble the `package_from_installed`-style Windows SDK/CRT sysroot |
 | 04 | `scripts/04-configure-build.sh` | copy `config/args.gn` (Win) or `config/args.linux.gn` (Linux), `gn gen`, `ninja` (Linux also builds `chrome_sandbox` + `chrome_crashpad_handler`) |
@@ -58,14 +58,14 @@ WORK=~/clearcote-build ./build.sh linux       # or: ./build.sh windows   (defaul
 
 ## 1. Source
 
-`scripts/00-fetch-source.sh` checks out the pinned `ungoogled-chromium` and `ungoogled-chromium-windows` tags, then uses ungoogled's `downloads.py` to retrieve and unpack the exact Chromium 149 tarball (~1.5 GB download → ~10 GB unpacked) and prunes non-source binaries.
+`scripts/00-fetch-source.sh` checks out the pinned `ungoogled-chromium` and `ungoogled-chromium-windows` tags, then uses ungoogled's `downloads.py` to retrieve and unpack the exact Chromium 150 tarball (~1.5 GB download → ~10 GB unpacked) and prunes non-source binaries.
 
 ## 2. Patches
 
 The identity/privacy behavior is defined **entirely by the patch set** — read it; that *is* the product. The series is, in order:
 
 1. **ungoogled-chromium base patches** — removes Google integration/telemetry (`utils/patches.py apply`).
-2. **ungoogled-chromium-windows overlay** — the Windows-specific patches.
+2. **ungoogled-chromium-windows overlay** — the Windows-specific patches. Applied for the Linux target too: the released Linux binary is built from the same tree, and `905-rc-invoked-guard` expects the overlay's `chrome_command_ids.h`.
 3. **Clearcote fingerprint patches** — engine-level canvas/WebGL/audio/UA/fonts/etc. spoofing, in [`patches/`](../patches), listed in `patches/series`. See [PATCHES.md](PATCHES.md).
 
 `scripts/01-apply-patches.sh` applies them with the ungoogled patch tooling. Every patch is a plain unified diff against the pinned revision.

@@ -1,6 +1,6 @@
 --- a/content/browser/BUILD.gn
 +++ b/content/browser/BUILD.gn
-@@ -926,6 +926,7 @@
+@@ -933,6 +933,7 @@
      "devtools/protocol/background_service_handler.h",
      "devtools/protocol/browser_handler.cc",
      "devtools/protocol/browser_handler.h",
@@ -8,7 +8,7 @@
      "devtools/protocol/device_access_handler.cc",
      "devtools/protocol/device_access_handler.h",
      "devtools/protocol/device_orientation_handler.cc",
-@@ -1197,6 +1198,7 @@
+@@ -1208,6 +1209,7 @@
      "host_zoom_level_context.h",
      "host_zoom_map_impl.cc",
      "host_zoom_map_impl.h",
@@ -16,7 +16,7 @@
      "idle/idle_manager_impl.cc",
      "idle/idle_manager_impl.h",
      "image_capture/image_capture_impl.cc",
-@@ -2866,6 +2868,8 @@
+@@ -2886,6 +2888,8 @@
          [ "file_system_access/file_path_watcher/file_path_watcher_stub.cc" ]
  
      sources += [

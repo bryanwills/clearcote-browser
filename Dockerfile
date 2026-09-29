@@ -13,7 +13,7 @@
 #   docker run --rm -v "$PWD/out:/clearcote-build/dist" clearcote-build windows
 #
 #   # verify (see docs/VERIFY.md):
-#   sha256sum -c out/clearcote-149.0.7827.114-linux-x64.tar.xz.sha256
+#   sha256sum -c out/clearcote-150.0.7871.114-linux-x64.tar.xz.sha256
 #
 # For byte-for-byte reproducibility pin the base image to a digest (see docs/BUILDING.md).
 FROM ubuntu:22.04

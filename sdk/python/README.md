@@ -15,6 +15,9 @@ no zips or paths to manage.
 > libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libxfixes3 libxext6 libpango-1.0-0
 > libcairo2 libx11-6 libxcb1 libexpat1 libdbus-1-3`) and pass `args=["--no-sandbox"]` (or
 > `chown root:root chrome-sandbox && chmod 4755 chrome-sandbox`) in containers.
+> Running as **root** in a container? Run as a normal user (the official Docker image does) or add
+> `--cap-add=SYS_NICE`: the open build is compiled with debug assertions, and a root container that
+> refuses Chromium's process-priority call stops it at start.
 
 ## Install
 
@@ -547,8 +550,8 @@ By default the SDK downloads the exact build pinned into this package. To pick a
 major/version instead, pass `version=` (or set `CLEARCOTE_BROWSER_VERSION`):
 
 ```python
-launch(fingerprint="seed-1", version="149")      # newest 149.x (free)
-launch(version="149.0.7827.114")                 # an exact build
+launch(fingerprint="seed-1", version="150")      # newest 150.x (free)
+launch(version="150.0.7871.114")                 # an exact build
 launch(version="latest")                         # newest you can access
 launch(version="150", license_key="cc_lic_...")  # a PRO-tier version (see below)
 ```

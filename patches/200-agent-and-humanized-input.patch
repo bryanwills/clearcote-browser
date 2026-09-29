@@ -8,7 +8,7 @@
  #include "content/public/common/main_function_params.h"
  #include "content/public/common/profiling.h"
  #include "content/public/common/url_constants.h"
-@@ -1087,6 +1088,28 @@
+@@ -1088,6 +1089,28 @@
    // The DevTools remote debugging pipe file descriptors need to be checked
    // before any other files are opened, see https://crbug.com/40259890.
    const bool is_browser = !command_line.HasSwitch(switches::kProcessType);
@@ -99,7 +99,7 @@
 +}
 --- /dev/null
 +++ b/chrome/browser/ai_agent/agent_controller.cc
-@@ -0,0 +1,1244 @@
+@@ -0,0 +1,1245 @@
 +// Copyright 2026 The ChromiumFish Authors
 +// Use of this source code is governed by an MIT-style license.
 +
@@ -1244,7 +1244,8 @@
 +}
 +
 +void AgentController::OnActorActed(
-+    std::vector<actor::ActionResultWithLatencyInfo> results) {
++    std::vector<actor::ActionResultWithLatencyInfo> results,
++    actor::TabObservationStrategy /*strategy*/) {
 +  StepDone(SummarizeResults(results));
 +}
 +
@@ -1346,7 +1347,7 @@
 +}  // namespace ai_agent
 --- /dev/null
 +++ b/chrome/browser/ai_agent/agent_controller.h
-@@ -0,0 +1,180 @@
+@@ -0,0 +1,182 @@
 +// Copyright 2026 The ChromiumFish Authors
 +// Use of this source code is governed by an MIT-style license.
 +//
@@ -1375,7 +1376,8 @@
 +#include "base/values.h"
 +#include "chrome/browser/ai_agent/llm_client.h"
 +#include "chrome/common/actor/action_result.h"
-+#include "chrome/common/actor/task_id.h"
++#include "components/actor/core/task_id.h"
++#include "chrome/browser/actor/tab_observation_strategy.h"
 +#include "ui/gfx/geometry/point_f.h"
 +
 +namespace content {
@@ -1474,7 +1476,8 @@
 +  // actionable-only). Async: runs JS, then OnReadPageText advances the loop.
 +  void DoReadPageText();
 +  void OnReadPageText(base::Value result);
-+  void OnActorActed(std::vector<actor::ActionResultWithLatencyInfo> results);
++  void OnActorActed(std::vector<actor::ActionResultWithLatencyInfo> results,
++                    actor::TabObservationStrategy strategy);
 +
 +  // Advances to the next step (or finishes when steps are exhausted) after
 +  // recording `observation_note` as the prior action's outcome for the model.
@@ -2416,7 +2419,7 @@
    // clang-format on
 --- a/chrome/browser/ui/BUILD.gn
 +++ b/chrome/browser/ui/BUILD.gn
-@@ -263,6 +263,7 @@
+@@ -167,6 +167,7 @@
      ":url_identity",
      "//base",
      "//base:i18n",
@@ -2434,7 +2437,7 @@
  #include "chrome/browser/ai/ai_data_keyed_service.h"          // nogncheck
  #include "chrome/browser/ai/ai_data_keyed_service_factory.h"  // nogncheck
  #include "chrome/browser/app_mode/app_mode_utils.h"
-@@ -2844,6 +2845,20 @@
+@@ -2623,6 +2624,20 @@
        }).Then(std::move(callback)));
  }
  
@@ -2457,7 +2460,7 @@
      content::WebContents* web_contents,
 --- a/chrome/browser/ui/browser.h
 +++ b/chrome/browser/ui/browser.h
-@@ -1001,6 +1001,16 @@
+@@ -952,6 +952,16 @@
        content::WebContents* web_contents,
        bool include_actionable_elements,
        base::OnceCallback<void(const std::string&)> callback) override;
@@ -2716,7 +2719,7 @@
 +}  // namespace content
 --- a/content/public/browser/BUILD.gn
 +++ b/content/public/browser/BUILD.gn
-@@ -215,6 +215,7 @@
+@@ -218,6 +218,7 @@
      "hid_delegate.h",
      "histogram_fetcher.h",
      "host_zoom_map.h",
@@ -2799,7 +2802,7 @@
    return false;
 --- a/content/public/browser/web_contents_delegate.h
 +++ b/content/public/browser/web_contents_delegate.h
-@@ -897,6 +897,22 @@
+@@ -900,6 +900,22 @@
        bool include_actionable_elements,
        base::OnceCallback<void(const std::string&)> callback);
  

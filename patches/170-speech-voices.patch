@@ -1,15 +1,15 @@
 --- a/components/ungoogled/persona_profile.h
 +++ b/components/ungoogled/persona_profile.h
-@@ -202,6 +202,26 @@
+@@ -231,6 +231,26 @@
  // persona; later calls return the same one. Thread-safe (std::call_once).
  COMPONENT_EXPORT(UNGOOGLED) const PersonaProfile& CurrentPersona();
  
 +// clearcote: the persona's speechSynthesis voice list, retargeted to the
 +// persona's locale. |accept_languages| is the RendererPreferences
-+// Accept-Language string -- the SAME field NavigatorLanguage::
-+// GetAcceptLanguages() parses into navigator.languages (see
-+// 092-language-locale-coherence), so there is exactly ONE source of locale
-+// truth and a de-DE persona cannot ship an en-US-only voice roster.
++// Accept-Language string -- the SAME field blink::Settings::GetAcceptLanguages()
++// exposes and that NavigatorLanguage::EnsureUpdatedLanguage() parses into
++// navigator.languages, so there is exactly ONE source of locale truth and a
++// de-DE locale cannot ship an en-US-only voice roster.
 +//
 +// Both speechSynthesis emission paths call this -- the browser one
 +// (content::SpeechSynthesisImpl::SendVoiceListToObserver) and the renderer
@@ -29,10 +29,11 @@
  #endif  // COMPONENTS_UNGOOGLED_PERSONA_PROFILE_H_
 --- a/components/ungoogled/persona_profile.cc
 +++ b/components/ungoogled/persona_profile.cc
-@@ -745,4 +745,203 @@
+@@ -782,4 +782,204 @@
    return *profile;
  }
  
++
 +namespace {
 +
 +// clearcote: Windows SAPI5 voice packs keyed by BCP-47 tag. These are the real
@@ -147,8 +148,8 @@
 +
 +// First token of an Accept-Language list, normalized the way
 +// NavigatorLanguage::ParseAndSanitize() normalizes navigator.languages[0]
-+// (trimmed, '_' -> '-'), then lowercased for table lookup and stripped of any
-+// ";q=" weight.
++// (trimmed, underscore -> hyphen), then lowercased for table lookup and
++// stripped of any ";q=" weight.
 +std::string PrimaryLanguageTag(const std::string& accept_languages) {
 +  std::string tag = accept_languages.substr(0, accept_languages.find(','));
 +  const size_t q = tag.find(';');
@@ -250,8 +251,8 @@
  
  namespace content {
  namespace {
-@@ -88,9 +91,56 @@
-       audible_client_;
+@@ -96,9 +99,56 @@
+   bool is_audible_;
  };
  
 +// clearcote: the persona's Accept-Language, read from the WebContents'
@@ -308,7 +309,7 @@
    std::vector<blink::mojom::SpeechSynthesisVoicePtr> out_voices;
    out_voices.resize(voices.size());
    for (size_t i = 0; i < voices.size(); ++i) {
-@@ -138,7 +188,8 @@
+@@ -146,7 +196,8 @@
  
    std::vector<VoiceData> voices;
    TtsController::GetInstance()->GetVoices(browser_context_, GURL(), &voices);
@@ -318,7 +319,7 @@
  
    observer_set_.Add(std::move(observer));
  }
-@@ -186,7 +237,8 @@
+@@ -199,7 +250,8 @@
    std::vector<VoiceData> voices;
    TtsController::GetInstance()->GetVoices(browser_context_, GURL(), &voices);
    for (auto& observer : observer_set_)
@@ -385,21 +386,23 @@
  
  namespace blink {
  
-@@ -95,9 +106,62 @@
+@@ -95,9 +106,64 @@
  const HeapVector<Member<SpeechSynthesisVoice>>& SpeechSynthesis::getVoices() {
    // Kick off initialization here to ensure voice list gets populated.
    std::ignore = TryEnsureMojomSynthesis();
 +  // clearcote: stock Chrome fills voice_list_ ONLY from the browser process
-+  // over mojo (OnSetVoiceList), so on a fresh document the FIRST synchronous
-+  // getVoices() returns [] and the real list arrives later, together with a
-+  // `voiceschanged` event. Synthesizing the persona list right here would hand
-+  // back a complete list on that first call -- an ordering tell that is
-+  // independent of whether the voice VALUES are right, and one anti-bot
-+  // vendors check for directly. So we never fill synchronously: we only ARM a
-+  // deferred backfill, for the case where the browser reply never comes (no
-+  // TTS interface bound). On the normal path the browser answers, the backfill
-+  // sees a populated list and no-ops -- and because both sides build the list
-+  // with ungoogled::PersonaVoicesForAcceptLanguages(), they agree.
++  // over mojo (OnSetVoiceList -> VoicesDidChange), so on a fresh document the
++  // FIRST synchronous getVoices() returns [] and the real list arrives later,
++  // together with a `voiceschanged` event. Synthesizing the persona list right
++  // here would hand back a complete list on that first call -- an ordering tell
++  // that is independent of whether the voice VALUES are right, and one that
++  // anti-bot vendors check for directly. So we never fill synchronously: we
++  // only ARM a deferred backfill, for the case where the browser reply never
++  // comes (no TTS interface bound -- e.g. the Android lazy-binding path where
++  // TryEnsureMojomSynthesis() runs for the first time here). On the normal path
++  // the browser answers, the backfill sees a populated list and no-ops -- and
++  // because both sides build the list with
++  // ungoogled::PersonaVoicesForAcceptLanguages(), they agree.
 +  MaybeArmPersonaVoiceBackfill();
    return voice_list_;
  }
@@ -415,9 +418,8 @@
 +    return;
 +  persona_voice_backfill_armed_ = true;
 +  context->GetTaskRunner(TaskType::kMiscPlatformAPI)
-+      ->PostTask(FROM_HERE,
-+                 BindOnce(&SpeechSynthesis::BackfillPersonaVoices,
-+                          WrapPersistent(this)));
++      ->PostTask(FROM_HERE, BindOnce(&SpeechSynthesis::BackfillPersonaVoices,
++                                     WrapPersistent(this)));
 +}
 +
 +void SpeechSynthesis::BackfillPersonaVoices() {
@@ -429,7 +431,8 @@
 +  if (!window || !window->GetFrame() || !window->GetFrame()->GetPage())
 +    return;
 +  // Same locale source as the browser path and as navigator.languages: the
-+  // Accept-Language pushed down in RendererPreferences.
++  // Accept-Language pushed down in RendererPreferences and surfaced here as
++  // Settings::GetAcceptLanguages().
 +  const std::string accept_languages =
 +      window->GetFrame()->GetPage()->GetSettings().GetAcceptLanguages().Utf8();
 +  for (const auto& pv :

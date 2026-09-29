@@ -28,7 +28,7 @@ the next. The gate checks all three; **any failure exits non-zero and blocks the
 
 | Layer | Question | Mechanism | Failure it catches |
 |---|---|---|---|
-| **1 — Source** | Are the patch's exact hunks in the tree that built the binary? | `patch --dry-run -R` of every `series` patch against the build tree. A correctly-applied patch reverses cleanly; a missing/mangled one fails. | A patch that silently rejected, fuzzed into the wrong place, or partially applied; a committed `patches/` set that no longer reproduces the built tree. |
+| **1 — Source** | Are the patch's exact hunks in the tree that built the binary? | The whole `series` is peeled off the build tree, last patch first, on a scratch copy of the files it touches (`patch -R`). If every patch is in the tree exactly, each reverses cleanly; a missing/mangled one fails. Sequential, so layered patches that edit the same file (e.g. `955` on top of `002`/`070`) are checked correctly too; the tree itself is never modified. | A patch that silently rejected, fuzzed into the wrong place, or partially applied; a committed `patches/` set that no longer reproduces the built tree. |
 | **2 — Binary** | Did that source actually make it into the shipped binary? | Required **marker strings** (command-line switch values + distinctive literals the patch adds) must be present in `chrome` / `chrome.dll`. | A stale binary: the incremental build didn't recompile the touched TU, the wrong `out/` dir was packaged, or dead-code elimination dropped it. Source is right; the artifact is wrong. |
 | **3 — Runtime** | Does the patched code actually *do* its job? | A behavioral **witness** per surface (`navigator.webdriver===false`, `getVoices()` non-empty with the persona set, `measureText` grid quantization, WebGL persona renderer, …), run via [`stealth_coherence.py`](../scripts/stealth_coherence.py) against the launched binary. | "Compiled in but broken" — the code is present but a logic error or a bad interaction makes the effect wrong. |
 
@@ -115,6 +115,8 @@ algorithmic/geometry change with no surviving distinctive string (e.g. sub-pixel
   then re-run the gate — it must now be clean. If a single patch fails right after
   `01-apply-patches.sh`, that patch genuinely didn't apply: fix the reject, don't skip it (see
   the [no-skip-stealth-patches](../CONTRIBUTING.md) rule).
+  With a layered stack the report lists every patch that failed while peeling; the **first**
+  one listed is where it broke — the ones after it may only fail as a consequence.
 - **Layer 2 fails ("did not compile into the binary")** — the source has the patch but the
   artifact doesn't. Rebuild the affected target (`ninja -C out/Default chrome`), confirm you are
   packaging that `out/` dir, and re-run. If the marker itself was wrong (optimized away),

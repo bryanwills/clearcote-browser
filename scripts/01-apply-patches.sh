@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # 01 — apply the patch series to the pruned Chromium source tree, in order:
 #       1. ungoogled-chromium base            (de-Google)                     — both targets
-#       2. ungoogled-chromium-windows overlay (Windows build patches)         — WINDOWS only
-#       3. Clearcote patch set (this repo's patches/, listed in patches/series) — both targets,
-#          except 900-windows-build-fixes.patch which is Windows-only.
+#       2. ungoogled-chromium-windows overlay (Windows build patches)         — both targets
+#       3. Clearcote patch set (this repo's patches/, listed in patches/series) — both targets
 #
-# For the Linux target the Windows overlay is skipped: its command-id/build patches assume a
-# Windows target, and on Linux the vanilla upstream guards are already correct. Every patch is a
+# Since Chromium 150 ONE patched tree builds both binaries: the released Windows and Linux builds
+# come from the same source tree, so the overlay and the whole series apply for either TARGET.
+# That is also a hard requirement: 905-rc-invoked-guard is written against the overlay's
+# chrome_command_ids.h and rejects on a tree without it. 900-windows-build-fixes only touches
+# Windows resource/toolchain files, so it changes nothing in a Linux build. Every patch is a
 # plain unified diff (-p1) against the pinned revision in UPSTREAM_REVISION.
 #
 #   TARGET  windows | linux   (default: windows)
@@ -28,20 +30,14 @@ PATCHES_PY="$UG/utils/patches.py"
 echo "  applying: ungoogled-chromium base (de-Google)"
 python3 "$PATCHES_PY" apply "$SRC" "$UG/patches"
 
-# 2. ungoogled-chromium-windows overlay (Windows only)
-if [ "$TARGET" = "windows" ]; then
-  echo "  applying: ungoogled-chromium-windows overlay"
-  python3 "$PATCHES_PY" apply "$SRC" "$UGW/patches"
-fi
+# 2. ungoogled-chromium-windows overlay (both targets — see the header)
+echo "  applying: ungoogled-chromium-windows overlay"
+python3 "$PATCHES_PY" apply "$SRC" "$UGW/patches"
 
-# 3. Clearcote patch set, in patches/series order (-p1). 900-windows-build-fixes.patch is
-#    Windows-only (touches .rc + build/config/clang/BUILD.gn against the overlay state).
+# 3. Clearcote patch set, in patches/series order (-p1), both targets.
 echo "  applying: Clearcote patch set (patches/series, target=$TARGET)"
 while IFS= read -r line; do
   p="${line%%#*}"; p="$(printf '%s' "$p" | tr -d '[:space:]')"; [ -z "$p" ] && continue
-  if [ "$TARGET" = "linux" ] && [ "$p" = "900-windows-build-fixes.patch" ]; then
-    echo "    skip (linux): $p"; continue
-  fi
   echo "    $p"
   patch -p1 -s -d "$SRC" < "$REPO/patches/$p"
 done < "$REPO/patches/series"

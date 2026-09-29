@@ -1,5 +1,6 @@
---- a/components/embedder_support/user_agent_utils.cc
-+++ b/components/embedder_support/user_agent_utils.cc
+diff -u --recursive a/components/embedder_support/user_agent_utils.cc b/components/embedder_support/user_agent_utils.cc
+--- a/components/embedder_support/user_agent_utils.cc	2026-07-20 15:12:24.873716537 +0000
++++ b/components/embedder_support/user_agent_utils.cc	2026-07-20 15:12:24.981717018 +0000
 @@ -30,6 +30,7 @@
  #include "components/embedder_support/switches.h"
  #include "components/policy/core/common/policy_pref_names.h"
@@ -101,8 +102,9 @@
  #if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS)
    // This constant is only used on Android (desktop) and Linux.
    constexpr char kUnifiedPlatformChromeOSX64[] = "X11; CrOS x86_64 14541.0.0";
---- a/content/browser/client_hints/client_hints.cc
-+++ b/content/browser/client_hints/client_hints.cc
+diff -u --recursive a/content/browser/client_hints/client_hints.cc b/content/browser/client_hints/client_hints.cc
+--- a/content/browser/client_hints/client_hints.cc	2026-07-20 15:12:24.889716608 +0000
++++ b/content/browser/client_hints/client_hints.cc	2026-07-20 15:12:24.985717035 +0000
 @@ -710,6 +710,8 @@
      if (!ua_metadata.has_value())
        ua_metadata = delegate->GetUserAgentMetadata();
@@ -112,8 +114,9 @@
      // The `Sec-CH-UA` client hint is attached to all outgoing requests. This is
      // (intentionally) different than other client hints.
      // It's barred behind ShouldAddClientHints to make sure it's controlled by
---- a/third_party/blink/common/user_agent/user_agent_metadata.cc
-+++ b/third_party/blink/common/user_agent/user_agent_metadata.cc
+diff -u --recursive a/third_party/blink/common/user_agent/user_agent_metadata.cc b/third_party/blink/common/user_agent/user_agent_metadata.cc
+--- a/third_party/blink/common/user_agent/user_agent_metadata.cc	2026-07-20 15:12:24.905716679 +0000
++++ b/third_party/blink/common/user_agent/user_agent_metadata.cc	2026-07-20 15:12:24.985717035 +0000
 @@ -6,8 +6,14 @@
  
  #include <algorithm>
@@ -204,7 +207,7 @@
  }  // namespace
  
  UserAgentBrandVersion::UserAgentBrandVersion(const std::string& ua_brand,
-@@ -232,4 +306,248 @@
+@@ -232,4 +306,251 @@
           a.ua_metadata_override == b.ua_metadata_override;
  }
  
@@ -363,31 +366,34 @@
 +    metadata->full_version = chromium_version;
 +  }
 +
-+  // Handle platform information
-+  if (command_line->HasSwitch(switches::kFingerprintPlatform)) {
-+    std::string platform_value = command_line->GetSwitchValueASCII(switches::kFingerprintPlatform);
-+    if (platform_value == "windows") {
++  // Handle platform information. ONE case-insensitive parse of
++  // --fingerprint-platform (ungoogled::GetPersonaPlatform); kUnset means the
++  // switch is absent or unrecognized -- same fallthrough as before.
++  const ungoogled::PersonaPlatform platform_value =
++      ungoogled::GetPersonaPlatform();
++  if (platform_value != ungoogled::PersonaPlatform::kUnset) {
++    if (platform_value == ungoogled::PersonaPlatform::kWindows) {
 +      metadata->platform = kWindowsPlatform;
 +      metadata->platform_version = GetPlatformVersion("windows");
 +      metadata->architecture = kX86Architecture;
 +      metadata->bitness = "64";
 +      metadata->wow64 = false;
 +      metadata->model = "";
-+    } else if (platform_value == "linux") {
++    } else if (platform_value == ungoogled::PersonaPlatform::kLinux) {
 +      metadata->platform = kLinuxPlatform;
 +      metadata->platform_version = GetPlatformVersion("linux");
 +      metadata->architecture = kX86Architecture;
 +      metadata->bitness = "64";
 +      metadata->wow64 = false;
 +      metadata->model = "";
-+    } else if (platform_value == "macos") {
++    } else if (platform_value == ungoogled::PersonaPlatform::kMacOS) {
 +      metadata->platform = kMacOSPlatform;
 +      metadata->platform_version = GetPlatformVersion("macos");
 +      metadata->architecture = kArmArchitecture;
 +      metadata->bitness = "64";
 +      metadata->wow64 = false;
 +      metadata->model = "";
-+    } else if (platform_value == "android") {
++    } else if (platform_value == ungoogled::PersonaPlatform::kAndroid) {
 +      // clearcote: the SINGLE source for the mobile bit. Setting metadata->mobile
 +      // here also flips Sec-CH-UA-Mobile (client_hints.cc) and
 +      // navigator.userAgentData.mobile (navigator_ua.cc), which both run through
@@ -453,8 +459,9 @@
 +}
 +
  }  // namespace blink
---- /dev/null
-+++ b/third_party/blink/common/user_agent/user_agent_metadata.cc.edgebak
+diff -u --recursive a/third_party/blink/common/user_agent/user_agent_metadata.cc.edgebak b/third_party/blink/common/user_agent/user_agent_metadata.cc.edgebak
+--- a/third_party/blink/common/user_agent/user_agent_metadata.cc.edgebak	2026-07-20 15:12:24.925716768 +0000
++++ b/third_party/blink/common/user_agent/user_agent_metadata.cc.edgebak	2026-07-20 15:12:24.985717035 +0000
 @@ -0,0 +1,523 @@
 +// Copyright 2020 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
@@ -979,8 +986,9 @@
 +}
 +
 +}  // namespace blink
---- a/third_party/blink/public/common/user_agent/user_agent_metadata.h
-+++ b/third_party/blink/public/common/user_agent/user_agent_metadata.h
+diff -u --recursive a/third_party/blink/public/common/user_agent/user_agent_metadata.h b/third_party/blink/public/common/user_agent/user_agent_metadata.h
+--- a/third_party/blink/public/common/user_agent/user_agent_metadata.h	2026-07-20 15:12:24.941716839 +0000
++++ b/third_party/blink/public/common/user_agent/user_agent_metadata.h	2026-07-20 15:12:24.985717035 +0000
 @@ -106,6 +106,11 @@
  bool BLINK_COMMON_EXPORT operator==(const UserAgentOverride& a,
                                      const UserAgentOverride& b);
@@ -993,8 +1001,9 @@
  }  // namespace blink
  
  #endif  // THIRD_PARTY_BLINK_PUBLIC_COMMON_USER_AGENT_USER_AGENT_METADATA_H_
---- a/third_party/blink/renderer/core/execution_context/navigator_base.cc
-+++ b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+diff -u --recursive a/third_party/blink/renderer/core/execution_context/navigator_base.cc b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+--- a/third_party/blink/renderer/core/execution_context/navigator_base.cc	2026-07-20 15:12:24.945716857 +0000
++++ b/third_party/blink/renderer/core/execution_context/navigator_base.cc	2026-07-20 15:12:24.993717071 +0000
 @@ -4,10 +4,16 @@
  
  #include "third_party/blink/renderer/core/execution_context/navigator_base.h"
@@ -1034,47 +1043,66 @@
  #if BUILDFLAG(IS_ANDROID)
    return "Linux armv81";
  #elif BUILDFLAG(IS_MAC)
-@@ -72,9 +93,38 @@
+@@ -72,8 +93,35 @@
  unsigned int NavigatorBase::hardwareConcurrency() const {
    if (base::FeatureList::IsEnabled(blink::features::kReducedSystemInfo))
      return 2;
+-  unsigned int hardware_concurrency =
+-      NavigatorConcurrentHardware::hardwareConcurrency();
 +
-+  const base::CommandLine* command_line =
-+      base::CommandLine::ForCurrentProcess();
++  // clark-timing-fix: resolve the persona/override ONCE (per-context-static)
++  // and cache it, so subsequent reads are a single member load at native-
++  // getter speed. The previous code ran a CommandLine switch lookup + string
++  // parse on EVERY access, which V8 cannot inline and produces a measurable
++  // per-getter timing signature versus genuine Chrome.
++  unsigned int hardware_concurrency = cached_hardware_concurrency_;
++  if (hardware_concurrency == 0) {
++    const base::CommandLine* command_line =
++        base::CommandLine::ForCurrentProcess();
 +
-+  // Default to the mixin, which yields the explicit override (if pinned) or
-+  // the real machine value as the unfarbled fallback.
-   unsigned int hardware_concurrency =
-       NavigatorConcurrentHardware::hardwareConcurrency();
- 
-+  // Explicit user override always wins and is identical across all sites.
-+  // Non-throwing parse (Chromium builds with exceptions disabled): on bad or
-+  // zero input, fall through to the per-site seed / default path instead of
-+  // crashing the renderer.
-+  unsigned override_concurrency = 0;
-+  bool has_override =
-+      command_line->HasSwitch(switches::kFingerprintHardwareConcurrency) &&
-+      base::StringToUint(
-+          command_line->GetSwitchValueASCII(
-+              switches::kFingerprintHardwareConcurrency),
-+          &override_concurrency) &&
-+      override_concurrency > 0;
++    hardware_concurrency = NavigatorConcurrentHardware::hardwareConcurrency();
 +
-+  if (has_override) {
-+    hardware_concurrency = override_concurrency;
-+  } else if (command_line->HasSwitch(switches::kFingerprint)) {
-+    // clearcote: hardwareConcurrency comes from the coherent session persona
-+    // (correlated with deviceMemory via the HW tier) and is constant per
-+    // session -- like real hardware, which never varies its core count per
-+    // site. Replaces the earlier per-site ((seed % 13) + 4) * 2 formula.
-+    hardware_concurrency = ungoogled::CurrentPersona().hardware_concurrency;
++    unsigned override_concurrency = 0;
++    bool has_override =
++        command_line->HasSwitch(switches::kFingerprintHardwareConcurrency) &&
++        base::StringToUint(
++            command_line->GetSwitchValueASCII(
++                switches::kFingerprintHardwareConcurrency),
++            &override_concurrency) &&
++        override_concurrency > 0;
++
++    if (has_override) {
++      hardware_concurrency = override_concurrency;
++    } else if (command_line->HasSwitch(switches::kFingerprint)) {
++      hardware_concurrency = ungoogled::CurrentPersona().hardware_concurrency;
++    }
++    cached_hardware_concurrency_ = hardware_concurrency;
 +  }
-+
+ 
    probe::ApplyHardwareConcurrencyOverride(
        probe::ToCoreProbeSink(GetExecutionContext()), hardware_concurrency);
-   return hardware_concurrency;
---- a/third_party/blink/renderer/core/frame/navigator.cc
-+++ b/third_party/blink/renderer/core/frame/navigator.cc
+diff -u --recursive a/third_party/blink/renderer/core/execution_context/navigator_base.h b/third_party/blink/renderer/core/execution_context/navigator_base.h
+--- a/third_party/blink/renderer/core/execution_context/navigator_base.h	2026-07-20 15:12:24.977716999 +0000
++++ b/third_party/blink/renderer/core/execution_context/navigator_base.h	2026-07-20 15:12:25.001717106 +0000
+@@ -59,6 +59,15 @@
+  protected:
+   ExecutionContext* GetUAExecutionContext() const override;
+   UserAgentMetadata GetUserAgentMetadata() const override;
++
++ private:
++  // clark-timing-fix: hardwareConcurrency() is per-context-static (the
++  // persona/override never change for a document). Resolve once, cache here,
++  // then serve subsequent reads as a single member load -- native-getter
++  // speed -- instead of a CommandLine switch lookup + string parse on every
++  // access (which V8 cannot inline; it creates a measurable per-getter
++  // timing signature vs genuine Chrome). 0 = not yet resolved.
++  mutable unsigned int cached_hardware_concurrency_ = 0;
+ };
+ 
+ }  // namespace blink
+diff -u --recursive a/third_party/blink/renderer/core/frame/navigator.cc b/third_party/blink/renderer/core/frame/navigator.cc
+--- a/third_party/blink/renderer/core/frame/navigator.cc	2026-07-20 15:12:24.949716875 +0000
++++ b/third_party/blink/renderer/core/frame/navigator.cc	2026-07-20 15:12:24.985717035 +0000
 @@ -21,6 +21,9 @@
   *  MA 02110-1301, USA
   */
@@ -1118,8 +1146,9 @@
    bool automation_enabled = false;
    probe::ApplyAutomationOverride(GetExecutionContext(), automation_enabled);
    return automation_enabled;
---- a/third_party/blink/renderer/core/frame/navigator_ua.cc
-+++ b/third_party/blink/renderer/core/frame/navigator_ua.cc
+diff -u --recursive a/third_party/blink/renderer/core/frame/navigator_ua.cc b/third_party/blink/renderer/core/frame/navigator_ua.cc
+--- a/third_party/blink/renderer/core/frame/navigator_ua.cc	2026-07-20 15:12:24.965716946 +0000
++++ b/third_party/blink/renderer/core/frame/navigator_ua.cc	2026-07-20 15:12:24.985717035 +0000
 @@ -19,6 +19,9 @@
      return ua_data;
  
@@ -1130,9 +1159,10 @@
    ua_data->SetBrandVersionList(metadata.brand_version_list);
    ua_data->SetMobile(metadata.mobile);
    ua_data->SetPlatform(String::FromUtf8(metadata.platform),
---- a/third_party/blink/renderer/core/loader/frame_fetch_context.cc
-+++ b/third_party/blink/renderer/core/loader/frame_fetch_context.cc
-@@ -39,6 +39,7 @@
+diff -u --recursive a/third_party/blink/renderer/core/loader/frame_fetch_context.cc b/third_party/blink/renderer/core/loader/frame_fetch_context.cc
+--- a/third_party/blink/renderer/core/loader/frame_fetch_context.cc	2026-07-20 15:12:24.969716964 +0000
++++ b/third_party/blink/renderer/core/loader/frame_fetch_context.cc	2026-07-20 15:12:24.985717035 +0000
+@@ -43,6 +43,7 @@
  #include "base/memory/scoped_refptr.h"
  #include "base/metrics/histogram_functions.h"
  #include "base/metrics/histogram_macros.h"
@@ -1140,12 +1170,12 @@
  #include "build/build_config.h"
  #include "mojo/public/cpp/bindings/associated_remote.h"
  #include "net/http/structured_headers.h"
-@@ -728,6 +729,8 @@
+@@ -733,6 +734,8 @@
  
    // Only send User Agent hints if the info is available
    if (ua) {
 +    UpdateUserAgentMetadataFingerprint(&ua.value());
 +
-     // ShouldSendClientHint is called to make sure UA is controlled by
-     // Permissions Policy.
-     if (ShouldSendClientHint(*policy, resource_origin, is_1p_origin,
+     bool ua_changed = !last_ua_ || *last_ua_ != *ua;
+     if (ua_changed) {
+       last_ua_ = *ua;

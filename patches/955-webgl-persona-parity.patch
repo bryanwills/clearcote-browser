@@ -1,0 +1,165 @@
+clearcote r11 -- WebGL/persona parity.
+
+Advertised extension set == gettable set in both directions (WEBGL_debug_renderer_info
+always exempt), MAX_ELEMENT_INDEX served from the persona unclamped, persona uniform-block
+default 14 -> 12, and the WebGPU adapter follows --disable-gpu-fingerprint.
+
+Tail patch: every file below is already touched by 002/070/071/142/170, so these hunks are
+expressed against the fully-applied stack rather than folded into those patches.
+
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -4077,6 +4077,42 @@
+   return true;
+ }
+ 
++// clearcote (r11): the persona extension list for THIS context version, or nullptr when
++// the real set should be used. A profile that lists extensions this build does not implement
++// used to be replayed verbatim, so getSupportedExtensions() advertised names that
++// getExtension() then returned null for -- enumerate-then-get is a one-line detector and no
++// real browser produces a null there. The list is now intersected with what is actually
++// served, and getExtension() refuses anything the list does not advertise, so the advertised
++// set and the gettable set are the same set in both directions.
++static const std::vector<std::string>* CcPersonaExtList(bool is_webgl2) {
++  const auto& p = ungoogled::CurrentPersona();
++  if (p.webgl_real)
++    return nullptr;
++  const std::vector<std::string>& v =
++      is_webgl2 ? p.webgl2_extensions : p.webgl_extensions;
++  return v.empty() ? nullptr : &v;
++}
++
++// Whether the persona advertises `name`. True when no persona list is active, so the stock
++// behaviour is untouched.
++static bool CcPersonaAdvertises(bool is_webgl2, const String& name) {
++  const std::vector<std::string>* v = CcPersonaExtList(is_webgl2);
++  if (!v)
++    return true;
++  // WEBGL_debug_renderer_info is exempt, always. It carries no GPU capability -- it only
++  // exposes the UNMASKED vendor/renderer STRINGS, which is the very channel the persona GPU is
++  // read through. A profile that happens to omit it (hand-written, or captured by a collector
++  // that did not enumerate it) would otherwise make the spoofed GPU unreadable AND leave the
++  // context without an extension every real Chrome exposes -- strictly worse than serving it.
++  if (name == WebGLDebugRendererInfo::ExtensionName())
++    return true;
++  for (const std::string& e : *v) {
++    if (name == String::FromUtf8(e))
++      return true;
++  }
++  return false;
++}
++
+ WebGLExtension* WebGLRenderingContextBase::EnableExtensionIfSupported(
+     const String& name,
+     ExecutionContext* execution_context) {
+@@ -4116,6 +4152,15 @@
+     UseCounter::Count(context, WebFeature::kWebGLDebugRendererInfo);
+   }
+ 
++  // clearcote (r11): never serve an extension the persona does not advertise. Gated here, on
++  // the web-facing entry point, rather than in EnableExtensionIfSupported -- internal callers
++  // must keep working regardless of what the persona claims.
++  if (!CcPersonaAdvertises(IsWebGL2(), name)) {
++    return ScriptObject(
++        script_state->GetIsolate(),
++        ToV8Traits<IDLNullable<WebGLExtension>>::ToV8(script_state, nullptr));
++  }
++
+   WebGLExtension* extension = EnableExtensionIfSupported(name, context);
+   return ScriptObject(
+       script_state->GetIsolate(),
+@@ -4964,16 +5009,19 @@
+   // extensions that getExtension() then returns null for (trivially detectable).
+   // An empty list for this version falls through to the real set rather than
+   // borrowing the other version's.
+-  if (!ungoogled::CurrentPersona().webgl_real) {
+-    const std::vector<std::string>& persona_ext =
+-        IsWebGL2() ? ungoogled::CurrentPersona().webgl2_extensions
+-                   : ungoogled::CurrentPersona().webgl_extensions;
+-    if (!persona_ext.empty()) {
+-      Vector<String> persona;
+-      for (const std::string& e : persona_ext)
+-        persona.push_back(String::FromUtf8(e));
+-      return persona;
++  const std::vector<std::string>* persona_ext = CcPersonaExtList(IsWebGL2());
++  if (persona_ext) {
++    // Intersect with `result`: advertise only what getExtension() will actually serve.
++    // This UNDER-claims on a weak host (a software rasterizer lacks entries a real GPU has),
++    // which is a coherent smaller list rather than an incoherent larger one.
++    Vector<String> persona;
++    for (const std::string& e : *persona_ext) {
++      String name = String::FromUtf8(e);
++      if (result.Contains(name))
++        persona.push_back(name);
+     }
++    if (!persona.empty())
++      return persona;
+   }
+ 
+   return result;
+--- a/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc
+@@ -4980,7 +4980,16 @@
+                       ClampPersonaLimit(ContextGL(), GL_MAX_DRAW_BUFFERS,
+                                         ungoogled::CurrentPersona().webgl_max_draw_buffers));
+     case GL_MAX_ELEMENT_INDEX:
+-      return GetInt64Parameter(script_state, pname);
++      // clearcote (r11): served from the persona, NOT clamped to the real driver. Every other
++      // limit here goes through ClampPersonaLimit because over-reporting a capability is
++      // checkable -- a page can attempt the operation and catch the lie. This one is a
++      // declarative maximum index value, not a capability a page can cheaply falsify, and the
++      // real value is a software-rasterizer giveaway: SwiftShader reports 0x3FFFFFFF where
++      // every clean Windows/D3D11 machine measured reports 0xFFFFFFFE. Clamping it would be a
++      // no-op (min(0xFFFFFFFE, 0x3FFFFFFF) == the tell).
++      return WebGLAny(
++          script_state,
++          static_cast<GLint64>(ungoogled::CurrentPersona().webgl_max_element_index));
+     case GL_MAX_ELEMENTS_INDICES:
+       return GetIntParameter(script_state, pname);
+     case GL_MAX_ELEMENTS_VERTICES:
+--- a/components/ungoogled/persona_profile.h
++++ b/components/ungoogled/persona_profile.h
+@@ -134,11 +134,17 @@
+   int webgl_max_draw_buffers = 8;
+   int webgl_max_color_attachments = 8;
+   int webgl_max_samples = 8;
+-  int webgl_max_vertex_uniform_blocks = 14;
+-  int webgl_max_fragment_uniform_blocks = 14;
++  // clearcote (r11): 12, not 14. The 14 default had looked field-attested, but every corpus
++  // capture reporting 14 turned out to be this engine's own persona measured against our audit
++  // site; after removing our own traffic the clean set is 100% 12.
++  int webgl_max_vertex_uniform_blocks = 12;
++  int webgl_max_fragment_uniform_blocks = 12;
+   int webgl_max_combined_uniform_blocks = 24;
+   int webgl_max_uniform_buffer_bindings = 24;
+   float webgl_max_texture_lod_bias = 2.0f;
++  // clearcote (r11): 0xFFFFFFFE, what real D3D11 reports. Served unclamped -- see the
++  // GL_MAX_ELEMENT_INDEX case in webgl2_rendering_context_base.cc for why.
++  int64_t webgl_max_element_index = 4294967294;
+   int webgl_max_vertex_uniform_components = 16384;
+   int webgl_max_fragment_uniform_components = 4096;
+ 
+--- a/components/ungoogled/persona_profile.cc
++++ b/components/ungoogled/persona_profile.cc
+@@ -253,6 +253,9 @@
+       gi("MAX_VERTEX_UNIFORM_COMPONENTS", &p->webgl_max_vertex_uniform_components);
+       gi("MAX_FRAGMENT_UNIFORM_COMPONENTS", &p->webgl_max_fragment_uniform_components);
+       if (auto v = num(*pr, "MAX_TEXTURE_LOD_BIAS")) p->webgl_max_texture_lod_bias = static_cast<float>(*v);
++      // r11: a captured profile can carry its own MAX_ELEMENT_INDEX. Read as a double because
++      // the value (0xFFFFFFFE) exceeds int32; doubles hold integers exactly to 2^53.
++      if (auto v = num(*pr, "MAX_ELEMENT_INDEX")) p->webgl_max_element_index = static_cast<int64_t>(*v);
+     }
+     // clearcote: the WebGL2 context has its own extension set. Previously only
+     // webgl.webgl1.extensions was parsed, into a single vector served to BOTH
+@@ -745,8 +748,9 @@
+   // clearcote: --disable-gpu-fingerprint presents the REAL backend. WebGL getParameter checks
+   // webgl_real and routes the GPU strings/params/extensions to the stock getters, and the
+   // readback noise is skipped -- so the reported GPU matches the rendered pixels (no spoof to
+-  // cross-check). Top precedence over seed/profile/gpu-switch; webgl_vendor stays intact so the
+-  // WebGPU identity below remains coherent.
++  // cross-check). Top precedence over seed/profile/gpu-switch. webgl_vendor stays intact for
++  // the derivation below, but as of r11 gpu_adapter.cc checks webgl_real and skips the WebGPU
++  // rewrite, so navigator.gpu goes real alongside WebGL instead of contradicting it.
+   if (cmd->HasSwitch(switches::kDisableGpuFingerprint)) {
+     p.webgl_real = true;
+     p.webgl_real_strings = true;  // full honest mode implies honest strings

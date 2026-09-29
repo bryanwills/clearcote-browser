@@ -1,6 +1,6 @@
 --- a/third_party/blink/renderer/core/dom/document.cc
 +++ b/third_party/blink/renderer/core/dom/document.cc
-@@ -1045,11 +1045,6 @@
+@@ -1040,11 +1040,6 @@
        data_(MakeGarbageCollected<DocumentData>(GetExecutionContext())) {
    TRACE_EVENT("blink", "Document::Document", perfetto::Flow::FromPointer(this));
    DCHECK(agent_);
@@ -12,7 +12,7 @@
    if (base::FeatureList::IsEnabled(features::kDelayAsyncScriptExecution) &&
        features::kDelayAsyncScriptExecutionDelayByDefaultParam.Get()) {
      script_runner_delayer_->Activate();
-@@ -1183,14 +1178,6 @@
+@@ -1178,14 +1173,6 @@
    return Position::BeforeNode(*shadow_host);
  }
  
@@ -29,7 +29,7 @@
      selector_query_cache_ = MakeGarbageCollected<SelectorQueryCache>();
 --- a/third_party/blink/renderer/core/dom/document.h
 +++ b/third_party/blink/renderer/core/dom/document.h
-@@ -574,10 +574,6 @@
+@@ -575,10 +575,6 @@
      has_xml_declaration_ = has_xml_declaration ? 1 : 0;
    }
  
@@ -40,7 +40,7 @@
    V8VisibilityState visibilityState() const;
    String visibilityStateAsString() const;
    bool IsPageVisible() const;
-@@ -2895,9 +2891,6 @@
+@@ -2905,9 +2901,6 @@
  
    base::ElapsedTimer start_time_;
  
@@ -52,7 +52,7 @@
    // - ScriptSchedulingType::kInOrder
 --- a/third_party/blink/renderer/core/dom/element.cc
 +++ b/third_party/blink/renderer/core/dom/element.cc
-@@ -3456,9 +3456,6 @@
+@@ -3461,9 +3461,6 @@
    }
    Vector<gfx::RectF> result;
    for (auto& quad : quads) {
@@ -62,7 +62,7 @@
      result.emplace_back(quad.BoundingBox());
    }
    return result;
-@@ -3488,9 +3485,6 @@
+@@ -3493,9 +3490,6 @@
    DCHECK(element_layout_object);
    GetDocument().AdjustRectForScrollAndAbsoluteZoom(result,
                                                     *element_layout_object);
@@ -72,7 +72,7 @@
    return result;
  }
  
-@@ -7744,6 +7738,11 @@
+@@ -7770,6 +7764,11 @@
    return root && root->GetMode() == ShadowRootMode::kOpen ? root : nullptr;
  }
  
@@ -86,7 +86,7 @@
    if (!root) {
 --- a/third_party/blink/renderer/core/dom/element.h
 +++ b/third_party/blink/renderer/core/dom/element.h
-@@ -1074,6 +1074,7 @@
+@@ -1098,6 +1098,7 @@
      return HasShadowRoot() ? GetShadowRootInternal() : nullptr;
    }
    ShadowRoot* OpenShadowRoot() const;
@@ -96,7 +96,7 @@
    ShadowRoot* UserAgentShadowRoot() const;
 --- a/third_party/blink/renderer/core/dom/element.idl
 +++ b/third_party/blink/renderer/core/dom/element.idl
-@@ -78,6 +78,7 @@
+@@ -81,6 +81,7 @@
  
      [RaisesException, MeasureAs=ElementAttachShadow] ShadowRoot attachShadow(ShadowRootInit shadowRootInitDict);
      [PerWorldBindings, ImplementedAs=OpenShadowRoot] readonly attribute ShadowRoot? shadowRoot;

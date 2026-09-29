@@ -23,7 +23,7 @@
  }
 --- /dev/null
 +++ b/components/ungoogled/farble_seed.cc
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,60 @@
 +#include "components/ungoogled/farble_seed.h"
 +
 +#include "base/command_line.h"
@@ -73,10 +73,20 @@
 +  return enabled;
 +}
 +
++bool CanvasNoiseEnabled() {
++  static const bool canvas_noise_allowed = [] {
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    return !(cmd && cmd->HasSwitch(switches::kDisableCanvasNoise));
++  }();
++  // Strictly narrower than the process-wide gate: --disable-fingerprint-noise still kills
++  // canvas 2D noise on its own, so no existing configuration changes.
++  return FingerprintNoiseEnabled() && canvas_noise_allowed;
++}
++
 +}  // namespace ungoogled
 --- /dev/null
 +++ b/components/ungoogled/farble_seed.h
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,46 @@
 +#ifndef COMPONENTS_UNGOOGLED_FARBLE_SEED_H_
 +#define COMPONENTS_UNGOOGLED_FARBLE_SEED_H_
 +
@@ -101,11 +111,24 @@
 +COMPONENT_EXPORT(UNGOOGLED)
 +std::string GetFarbleSeedString(std::string_view registrable_domain);
 +
-+// Whether per-eTLD+1 fingerprint NOISE (canvas/WebGL/audio/client-rect farbling) is active.
-+// True by default; --disable-fingerprint-noise turns it OFF so those surfaces return their
-+// natural unperturbed values. Identity spoofs (UA/screen/GPU strings) are unaffected.
++// Whether per-eTLD+1 fingerprint NOISE is active. True by default; --disable-fingerprint-noise
++// turns it OFF so those surfaces return their natural unperturbed values. Identity spoofs
++// (UA/screen/GPU strings) are unaffected.
++//
++// Scope note: the only surfaces that consult this gate are canvas 2D readback
++// (getImageData / toDataURL) and WebGL readPixels. Audio and getClientRects are NOT
++// noise-gated in this tree -- audio reads flat persona values and there is no client-rect
++// farbling at all -- so do not infer coverage from the switch name.
 +COMPONENT_EXPORT(UNGOOGLED)
 +bool FingerprintNoiseEnabled();
++
++// Whether CANVAS 2D readback noise is active (getImageData, and toDataURL of a 2D context).
++// Equal to FingerprintNoiseEnabled() unless --disable-canvas-noise is passed, which turns
++// canvas 2D noise off ON ITS OWN and leaves WebGL readPixels -- and every other farbled
++// surface -- exactly as it was. With --disable-canvas-noise absent this is, by construction,
++// indistinguishable from FingerprintNoiseEnabled().
++COMPONENT_EXPORT(UNGOOGLED)
++bool CanvasNoiseEnabled();
 +
 +}  // namespace ungoogled
 +
@@ -140,20 +163,20 @@
 +
 +// Chromium version list (for seed-based selection)
 +constexpr const char* kChromiumVersions[] = {
-+    "149.0.7827.114",
-+    "149.0.7827.89",
-+    "149.0.7827.66",
-+    "149.0.7827.58"
++    "150.0.7871.114",
++    "150.0.7871.115",
++    "150.0.7871.100",
++    "150.0.7871.46"
 +};
 +
 +// Default versions for Client Hints (Sec-CH-UA)
-+constexpr const char* kChromeDefaultVersion = "149.0.7827.114";
-+constexpr const char* kEdgeDefaultVersion = "149.0.3650.65";
++constexpr const char* kChromeDefaultVersion = "150.0.7871.114";
++constexpr const char* kEdgeDefaultVersion = "150.0.4078.65";
 +constexpr const char* kOperaDefaultVersion = "126.0.5748.0";
 +constexpr const char* kVivaldiDefaultVersion = "7.7.3851.66";
 +
 +// Default versions for User-Agent string suffix
-+constexpr const char* kEdgeUAVersion = "149.0.0.0";
++constexpr const char* kEdgeUAVersion = "150.0.0.0";
 +constexpr const char* kOperaUAVersion = "126.0.0.0";
 +constexpr const char* kVivaldiUAVersion = "7.7.3851.66";
 +

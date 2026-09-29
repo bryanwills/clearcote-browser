@@ -1,6 +1,7 @@
---- a/components/ungoogled/ungoogled_switches.cc	2026-07-15 11:42:11.596971992 +0000
-+++ b/components/ungoogled/ungoogled_switches.cc	2026-07-15 11:42:11.596971992 +0000
-@@ -15,4 +15,66 @@
+diff -u --recursive a/components/ungoogled/ungoogled_switches.cc b/components/ungoogled/ungoogled_switches.cc
+--- a/components/ungoogled/ungoogled_switches.cc	2026-07-21 09:13:09.549740692 +0000
++++ b/components/ungoogled/ungoogled_switches.cc	2026-07-21 09:13:09.553740702 +0000
+@@ -15,4 +15,90 @@
  // Enable fingerprinting deception for Canvas image data
  const char kFingerprintingCanvasImageDataNoise[] = "fingerprinting-canvas-image-data-noise";
  
@@ -22,6 +23,15 @@
 +// Specify the number of CPU cores
 +const char kFingerprintHardwareConcurrency[] = "fingerprint-hardware-concurrency";
 +// clearcote-light-stealth: read FIRST in each Blink getter (flag > persona > real).
++//
++// kFingerprintDeviceMemory is the one exception to "in each Blink getter":
++// it is applied ONCE, in the blink/common ApproximatedDeviceMemory helper,
++// because the Device-Memory client-hint header is emitted in the BROWSER
++// process and a renderer-only override cannot reach it. navigator.deviceMemory
++// and that header therefore derive from the same number, with the Chrome
++// power-of-two bucketing and kMinMemory/kMaxMemory clamp preserved. Same
++// switch name and same flag > persona > real precedence, so the light_stealth
++// preset shipped in SDK 0.18.0 is unaffected.
 +const char kFingerprintDeviceMemory[] = "fingerprint-device-memory";
 +const char kFingerprintScreenWidth[] = "fingerprint-screen-width";
 +const char kFingerprintScreenHeight[] = "fingerprint-screen-height";
@@ -46,6 +56,21 @@
 +// Disable GPU fingerprint spoofing
 +const char kDisableGpuFingerprint[] = "disable-gpu-fingerprint";
 +const char kDisableFingerprintNoise[] = "disable-fingerprint-noise";
++
++// clearcote: the two independent halves of the bundles above. Each is a strict SUBSET of an
++// existing switch, so with neither passed every gate below evaluates exactly as before.
++//
++// --disable-gpu-string-spoof reports the REAL WebGL UNMASKED_VENDOR/RENDERER and nothing
++// else: the getParameter limit table, the supported-extension list,
++// getShaderPrecisionFormat and the readPixels farble all stay on the persona, unlike
++// --disable-gpu-fingerprint which reverts every one of them to the real backend.
++const char kDisableGpuStringSpoof[] = "disable-gpu-string-spoof";
++
++// --disable-canvas-noise turns off the per-eTLD+1 farble on CANVAS 2D readback only
++// (getImageData, and toDataURL of a 2D context). WebGL readPixels, the snapshot of a
++// WebGL canvas, and every other farbled surface keep their current behaviour, unlike
++// --disable-fingerprint-noise which is the process-wide off switch for all of them.
++const char kDisableCanvasNoise[] = "disable-canvas-noise";
 +const char kFingerprintProfile[] = "fingerprint-profile";
 +
 +// Specify the TLS network persona (e.g. "chrome-149", "chrome-120"); absent /
@@ -67,9 +92,51 @@
 +const char kCanvasBridgeFallback[] = "canvas-bridge-fallback";
 +
  }  // namespace switches
---- a/content/browser/renderer_host/render_process_host_impl.cc	2026-07-15 11:42:11.712972487 +0000
-+++ b/content/browser/renderer_host/render_process_host_impl.cc	2026-07-15 11:42:11.712972487 +0000
-@@ -3868,6 +3868,40 @@
+diff -u --recursive a/components/ungoogled/ungoogled_switches.h b/components/ungoogled/ungoogled_switches.h
+--- a/components/ungoogled/ungoogled_switches.h	2026-07-21 09:13:09.549740692 +0000
++++ b/components/ungoogled/ungoogled_switches.h	2026-07-21 09:13:09.553740702 +0000
+@@ -15,6 +15,37 @@
+ COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintingCanvasMeasureTextNoise[];
+ COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintingCanvasImageDataNoise[];
+ 
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprint[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintBrand[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintBrandVersion[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintGpuVendor[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintGpuRenderer[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintHardwareConcurrency[];
++// clearcote-light-stealth: direct native-override metadata switches.
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintDeviceMemory[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintScreenWidth[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintScreenHeight[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintAvailWidth[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintAvailHeight[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintColorDepth[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintDevicePixelRatio[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintMaxTouchPoints[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintPlatform[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintPlatformVersion[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintLocation[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintTimezone[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kDisableGpuFingerprint[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kDisableFingerprintNoise[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kDisableGpuStringSpoof[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kDisableCanvasNoise[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintProfile[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintTlsProfile[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kCanvasBridgeUrl[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kCanvasBridgeAuth[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kCanvasBridgeMode[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kCanvasBridgeAllow[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kCanvasBridgeDeny[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kCanvasBridgeFallback[];
+ }
+ 
+ #endif  // THIRD_PARTY_UNGOOGLED_FINGERPRINTING_SWITCHES_H_
+diff -u --recursive a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
+--- a/content/browser/renderer_host/render_process_host_impl.cc	2026-07-21 09:13:09.549740692 +0000
++++ b/content/browser/renderer_host/render_process_host_impl.cc	2026-07-21 09:13:09.561740719 +0000
+@@ -3870,6 +3870,42 @@
        switches::kFingerprintingClientRectsNoise,
        switches::kFingerprintingCanvasMeasureTextNoise,
        switches::kFingerprintingCanvasImageDataNoise,
@@ -100,6 +167,8 @@
 +      "fingerprint-storage-quota",  // clearcoat: forward storage-quota spoof
 +      switches::kDisableGpuFingerprint,
 +      switches::kDisableFingerprintNoise,
++      switches::kDisableGpuStringSpoof,
++      switches::kDisableCanvasNoise,
 +      switches::kFingerprintProfile,
 +      switches::kCanvasBridgeUrl,
 +      switches::kCanvasBridgeAuth,
@@ -110,41 +179,3 @@
        switches::kForceDeviceScaleFactor,
        switches::kForceDisplayColorProfile,
        switches::kForceHighContrast,
---- a/components/ungoogled/ungoogled_switches.h	2026-07-15 11:42:11.860973119 +0000
-+++ b/components/ungoogled/ungoogled_switches.h	2026-07-15 11:42:11.860973119 +0000
-@@ -15,6 +15,35 @@
- COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintingCanvasMeasureTextNoise[];
- COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintingCanvasImageDataNoise[];
- 
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprint[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintBrand[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintBrandVersion[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintGpuVendor[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintGpuRenderer[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintHardwareConcurrency[];
-+// clearcote-light-stealth: direct native-override metadata switches.
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintDeviceMemory[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintScreenWidth[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintScreenHeight[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintAvailWidth[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintAvailHeight[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintColorDepth[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintDevicePixelRatio[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintMaxTouchPoints[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintPlatform[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintPlatformVersion[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintLocation[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintTimezone[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kDisableGpuFingerprint[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kDisableFingerprintNoise[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintProfile[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintTlsProfile[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kCanvasBridgeUrl[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kCanvasBridgeAuth[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kCanvasBridgeMode[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kCanvasBridgeAllow[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kCanvasBridgeDeny[];
-+COMPONENT_EXPORT(UNGOOGLED) extern const char kCanvasBridgeFallback[];
- }
- 
- #endif  // THIRD_PARTY_UNGOOGLED_FINGERPRINTING_SWITCHES_H_

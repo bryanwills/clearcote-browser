@@ -1,13 +1,14 @@
 --- a/third_party/blink/renderer/platform/fonts/font_cache.cc
 +++ b/third_party/blink/renderer/platform/fonts/font_cache.cc
-@@ -32,14 +32,19 @@
- #include <limits>
+@@ -33,15 +33,20 @@
  #include <memory>
  
+ #include "base/byte_size.h"
 +#include "base/command_line.h"
  #include "base/debug/alias.h"
  #include "base/feature_list.h"
  #include "base/notreached.h"
+ #include "base/numerics/safe_conversions.h"
  #include "base/strings/escape.h"
 +#include "base/strings/string_number_conversions.h"
 +#include "base/strings/string_util.h"
@@ -20,32 +21,107 @@
  #include "build/build_config.h"
  #include "skia/ext/font_utils.h"
  #include "third_party/blink/public/common/features.h"
-@@ -123,6 +128,174 @@
+@@ -125,6 +130,456 @@
  }
  #endif
  
 +// 获取平台特定的字体列表
 +static std::vector<std::string> GetPlatformFonts(const std::string& platform) {
 +  if (platform == "windows") {
++    // clearcote canonical WINDOWS font list: the CSS families a real Windows machine can be
++    // asked for. Derived from 3,000 real Windows machines in the capture corpus (the
++    // per-machine font enumerations carried in the profile blobs, scored against the corpus's
++    // own 2,757-name dictionary): font-count p10=201, median=303, p90=445.
++    //
++    // The corpus enumerates FACES ("Arial Bold", "Georgia Italic"), not CSS families, so its
++    // prevalence tiers over-count. Measured both ways:
++    //     >=90% of machines -> 199 faces / 100 addressable families
++    //     >=75%             -> 201 / 102
++    //     >=50%             -> 233 / 120
++    //     >=25%             -> 382 / 230     <- this list
++    // The >=25% cut is where the Office font bundle sits (the 40-49% plateau: Garamond,
++    // Bookman Old Style, the Lucida/Gill Sans/Tw Cen/Bodoni MT families, ...), which about
++    // half of real Windows machines have; excluding it would keep applying a fixed haircut to
++    // every Office host, the exact failure the 63-name list had.
++    //
++    // Face names were then dropped EMPIRICALLY, not by guesswork: every candidate was measured
++    // with a three-baseline canvas width probe under stock Chrome on a real Windows host, and
++    // everything stock Chrome cannot resolve as a family was removed -- "Arial Bold",
++    // "Georgia Italic", "Segoe UI Semilight", "Sitka" and ~155 other faces. Keeping them would
++    // make the cross-OS path below claim fonts a real Windows machine reports absent.
++    // Excluded as corpus collection bias rather than Windows/Office content: FontAwesome
++    // (39.9%) and Poppins (51%) -- per-user webfont installs, not shipped by Microsoft.
++    //
++    // Added back: seven families Windows itself ships that the corpus's dictionary never
++    // probed (prevalence 0% purely because they were not in the probe list) -- Segoe Fluent
++    // Icons, the four Segoe UI Variable optical sizes, and Cascadia Code/Mono.
++    //
++    // SAFETY -- this list can only ever FILTER, never invent. On the same-OS path a listed
++    // font that is not installed still fails to load in GetOrCreateFontPlatformData and is
++    // reported absent, so a longer list cannot over-claim; it only stops clearcote hiding
++    // fonts the host genuinely has. The previous 63-name list discarded ~46% of a real host's
++    // families (Windows RDP box: stock Chrome 115, clearcote 62) and was byte-identical on
++    // every install, so the font count itself was a clearcote tell -- as was the glyph
++    // fallback it broke: "Nirmala UI" (97.9% of the corpus) supplies U+20B9 and was missing,
++    // which is why clearcote returned glyph fingerprint 28013057 where stock returns 20ea66a7.
 +    return {
-+      "Arial", "Arial Black",
-+      "Bahnschrift",
-+      "Calibri", "Cambria", "Cambria Math", "Candara", "Cascadia Code", "Cascadia Mono", "Comic Sans MS", "Consolas", "Constantia", "Corbel", "Courier New",
-+      "Ebrima",
-+      "Franklin Gothic Medium",
-+      "Gabriola", "Gadugi", "Georgia",
++      "Agency FB", "Algerian", "Arial", "Arial Black", "Arial Narrow", "Arial Rounded MT Bold",
++      "Bahnschrift", "Bahnschrift Light", "Bahnschrift SemiBold", "Bahnschrift SemiLight",
++      "Baskerville Old Face", "Bauhaus 93", "Bell MT", "Berlin Sans FB", "Bernard MT Condensed",
++      "Blackadder ITC", "Bodoni MT", "Bodoni MT Black", "Bodoni MT Condensed",
++      "Bodoni MT Poster Compressed", "Book Antiqua", "Bookman Old Style", "Bookshelf Symbol 7",
++      "Bradley Hand ITC", "Britannic Bold", "Broadway", "Brush Script MT",
++      "Calibri", "Calibri Light", "Californian FB", "Calisto MT", "Cambria", "Cambria Math",
++      "Candara", "Candara Light", "Cascadia Code", "Cascadia Mono", "Castellar", "Centaur",
++      "Century", "Century Gothic", "Century Schoolbook", "Chiller", "Colonna MT", "Comic Sans MS",
++      "Consolas", "Constantia", "Cooper Black", "Copperplate Gothic", "Copperplate Gothic Light",
++      "Corbel", "Corbel Light", "Courier", "Courier New", "Curlz MT",
++      "Ebrima", "Edwardian Script ITC", "Elephant", "Engravers MT", "Eras Bold ITC",
++      "Eras Demi ITC", "Eras Light ITC", "Eras Medium ITC",
++      "Felix Titling", "Footlight MT Light", "Forte", "Franklin Gothic", "Franklin Gothic Book",
++      "Franklin Gothic Demi", "Franklin Gothic Demi Cond", "Franklin Gothic Heavy",
++      "Franklin Gothic Medium", "Franklin Gothic Medium Cond", "Freestyle Script",
++      "French Script MT",
++      "Gabriola", "Gadugi", "Garamond", "Georgia", "Gigi", "Gill Sans MT",
++      "Gill Sans MT Condensed", "Gill Sans MT Ext Condensed Bold", "Gill Sans Ultra Bold",
++      "Gill Sans Ultra Bold Condensed", "Gloucester MT Extra Condensed", "Goudy Old Style",
++      "Goudy Stout",
++      "Haettenschweiler", "Harlow Solid Italic", "Harrington", "High Tower Text",
 +      "HoloLens MDL2 Assets",
-+      "Impact", "Ink Free",
-+      "Javanese Text",
-+      "Leelawadee UI", "Lucida Console", "Lucida Sans Unicode",
-+      "Malgun Gothic", "Marlett", "Microsoft Himalaya", "Microsoft JhengHei", "Microsoft New Tai Lue", "Microsoft PhagsPa", "Microsoft Sans Serif", "Microsoft Tai Le", "Microsoft YaHei", "Microsoft Yi Baiti", "MingLiU-ExtB", "Mongolian Baiti", "MS Gothic", "MV Boli", "Myanmar Text",
-+      "Nirmala UI",
-+      "Palatino Linotype",
-+      "Segoe Fluent Icons", "Segoe MDL2 Assets", "Segoe Print", "Segoe Script", "Segoe UI", "Segoe UI Emoji", "Segoe UI Historic", "Segoe UI Symbol", "Segoe UI Variable", "SimSun", "Sitka", "Sylfaen", "Symbol",
-+      "Tahoma", "Times New Roman", "Trebuchet MS",
-+      "Verdana",
-+      "Webdings", "Wingdings",
-+      "Yu Gothic"
++      "Impact", "Imprint MT Shadow", "Informal Roman", "Ink Free",
++      "Javanese Text", "Jokerman", "Juice ITC",
++      "Kristen ITC", "Kunstler Script",
++      "Leelawadee", "Leelawadee UI", "Lucida Bright", "Lucida Calligraphy", "Lucida Console",
++      "Lucida Fax", "Lucida Handwriting", "Lucida Sans", "Lucida Sans Typewriter",
++      "Lucida Sans Unicode",
++      "Magneto", "Maiandra GD", "Malgun Gothic", "Marlett", "Matura MT Script Capitals",
++      "Microsoft Himalaya", "Microsoft JhengHei", "Microsoft JhengHei Light",
++      "Microsoft JhengHei UI", "Microsoft JhengHei UI Light", "Microsoft New Tai Lue",
++      "Microsoft PhagsPa", "Microsoft Sans Serif", "Microsoft Tai Le", "Microsoft Uighur",
++      "Microsoft YaHei", "Microsoft YaHei Light", "Microsoft YaHei UI", "Microsoft YaHei UI Light",
++      "Microsoft Yi Baiti", "MingLiU-ExtB", "MingLiU_HKSCS-ExtB", "Mistral", "Modern No. 20",
++      "Mongolian Baiti", "Monotype Corsiva", "MS Gothic", "MS Outlook", "MS PGothic",
++      "MS Reference Sans Serif", "MS Reference Specialty", "MS Sans Serif", "MS Serif",
++      "MS UI Gothic", "MT Extra", "MV Boli", "Myanmar Text",
++      "Niagara Engraved", "Niagara Solid", "Nirmala UI", "NSimSun",
++      "OCR A Extended", "Old English Text MT", "Onyx",
++      "Palace Script MT", "Palatino Linotype", "Papyrus", "Papyrus Condensed", "Parchment",
++      "Perpetua", "Perpetua Titling MT", "Perpetua Titling MT Light", "Playbill", "PMingLiU-ExtB",
++      "Poor Richard", "Pristina",
++      "Rage Italic", "Ravie", "Rockwell", "Rockwell Condensed", "Rockwell Extra Bold",
++      "Script MT Bold", "Segoe Fluent Icons", "Segoe MDL2 Assets", "Segoe Print", "Segoe Script",
++      "Segoe UI", "Segoe UI Black", "Segoe UI Emoji", "Segoe UI Historic", "Segoe UI Light",
++      "Segoe UI Semibold", "Segoe UI Symbol", "Segoe UI Variable", "Segoe UI Variable Display",
++      "Segoe UI Variable Small", "Segoe UI Variable Text", "Showcard Gothic", "SimSun",
++      "SimSun-ExtB", "Sitka Banner", "Sitka Display", "Sitka Heading", "Sitka Small",
++      "Sitka Subheading", "Sitka Text", "Snap ITC", "Stencil", "Sylfaen", "Symbol",
++      "Tahoma", "Tempus Sans ITC", "Times", "Times New Roman", "Trebuchet MS", "Tw Cen MT",
++      "Tw Cen MT Condensed", "Tw Cen MT Condensed Extra Bold",
++      "Verdana", "Viner Hand ITC", "Vivaldi", "Vladimir Script",
++      "Webdings", "Wide Latin", "Wingdings", "Wingdings 2", "Wingdings 3",
++      "Yu Gothic", "Yu Gothic Light", "Yu Gothic Medium", "Yu Gothic UI", "Yu Gothic UI Light",
++      "Yu Gothic UI Semibold",
++      "宋体", "微软雅黑", "ＭＳ ゴシック", "ＭＳ Ｐゴシック"
 +    };
 +  } else if (platform == "macos") {
 +    return {
@@ -76,22 +152,90 @@
 +      "Zapf Dingbats", "Zapfino", "Zawra"
 +    };
 +  } else if (platform == "linux") {
++    // clearcote canonical LINUX font list: a default Ubuntu 22.04/24.04 LTS ubuntu-desktop
++    // plus Debian GNOME, NOT this build box. Every name was read off a real package --
++    // `fc-scan` over the Ubuntu font .debs -- never from memory.
++    //     tier 1 (151) = the font Depends/Recommends closure of ubuntu-desktop
++    //     tier 2 ( 64) = fonts-noto-core (6 base + 4 symbol/math + 54 major scripts)
++    // 215 is mid-distribution for real Linux desktops (a bare ubuntu-desktop is ~151; a Debian
++    // GNOME / Fedora desktop carrying fonts-noto-core is ~350). The previous 35-name list was
++    // below anything real.
++    //
++    // Deliberately NOT listed although they are installed on clearcote hosts: Selawik, Gelasio,
++    // Anton, Oswald, Lato, Comic Neue, Inconsolata, IPAGothic, WenQuanYi Zen Hei, Unifont.
++    // None of those are dpkg-owned Ubuntu packages -- they are clearcote's own substitution
++    // font install, so listing them would turn our own install into a positive fingerprint.
++    // They are still USED as substitution targets below, which never enumerates them.
 +    return {
-+      // Ubuntu Font Family
-+      "Ubuntu", "Ubuntu Condensed", "Ubuntu Light", "Ubuntu Mono", "Ubuntu Sans", "Ubuntu Sans Mono",
-+      // DejaVu Family
++      // dejavu -- fonts-dejavu-core, fonts-dejavu-extra
 +      "DejaVu Sans", "DejaVu Sans Condensed", "DejaVu Sans Light", "DejaVu Sans Mono",
 +      "DejaVu Serif", "DejaVu Serif Condensed", "DejaVu Math TeX Gyre",
-+      // Liberation Family
++      // freefont -- fonts-freefont-ttf
++      "FreeSans", "FreeSerif", "FreeMono",
++      // liberation -- fonts-liberation, fonts-liberation2
 +      "Liberation Sans", "Liberation Sans Narrow", "Liberation Serif", "Liberation Mono",
-+      // Noto Family
-+      "Noto Sans", "Noto Sans Display", "Noto Sans Mono",
-+      "Noto Serif", "Noto Serif Display", "Noto Mono", "Noto Color Emoji",
-+      // Nimbus Family
-+      "Nimbus Sans", "Nimbus Sans L", "Nimbus Sans Narrow", "Nimbus Roman", "Nimbus Roman No9 L",
-+      "Nimbus Mono", "Nimbus Mono L", "Nimbus Mono PS",
-+      // FreeFont Family
-+      "FreeSans", "FreeSerif", "FreeMono"
++      // ubuntu -- fonts-ubuntu
++      "Ubuntu", "Ubuntu Condensed", "Ubuntu Light", "Ubuntu Mono", "Ubuntu Thin", "Ubuntu Sans",
++      "Ubuntu Sans Mono",
++      // croscore -- fonts-croscore
++      "Arimo", "Cousine", "Tinos",
++      // crosextra -- fonts-crosextra-carlito, fonts-crosextra-caladea
++      "Carlito", "Caladea",
++      // urw_base35 -- fonts-urw-base35
++      "Nimbus Sans", "Nimbus Sans Narrow", "Nimbus Roman", "Nimbus Mono PS", "C059", "P052",
++      "URW Bookman", "URW Gothic", "Z003", "D050000L", "Standard Symbols PS",
++      // urw_legacy -- fonts-urw-base35 (30-urw-aliases.conf)
++      "Nimbus Sans L", "Nimbus Roman No9 L", "Nimbus Mono L",
++      // cantarell -- fonts-cantarell
++      "Cantarell", "Cantarell Extra Bold", "Cantarell Light", "Cantarell Thin",
++      // droid -- fonts-droid-fallback
++      "Droid Sans Fallback",
++      // noto_cjk -- fonts-noto-cjk
++      "Noto Sans CJK JP", "Noto Sans CJK KR", "Noto Sans CJK SC", "Noto Sans CJK TC",
++      "Noto Sans CJK HK", "Noto Sans Mono CJK JP", "Noto Sans Mono CJK KR",
++      "Noto Sans Mono CJK SC", "Noto Sans Mono CJK TC", "Noto Sans Mono CJK HK",
++      "Noto Serif CJK JP", "Noto Serif CJK KR", "Noto Serif CJK SC", "Noto Serif CJK TC",
++      "Noto Serif CJK HK",
++      // emoji_symbol -- fonts-noto-color-emoji, fonts-opensymbol
++      "Noto Color Emoji", "OpenSymbol",
++      // langsupport -- fonts-kacst-one, fonts-khmeros-core, fonts-lao, fonts-lklug-sinhala, fonts-sil-abyssinica, fonts-sil-padauk, fonts-tibetan-machine
++      "KacstOne", "Khmer OS", "Khmer OS System", "Phetsarath OT", "LKLUG", "Abyssinica SIL",
++      "Padauk", "Padauk Book", "Tibetan Machine Uni",
++      // thai_tlwg -- fonts-thai-tlwg (13 fonts-tlwg-* packages)
++      "Garuda", "Kinnari", "Laksaman", "Loma", "Norasi", "Purisa", "Sawasdee", "Tlwg Mono",
++      "Tlwg Typewriter", "Tlwg Typist", "Tlwg Typo", "Umpush", "Waree",
++      // indic -- fonts-indic (fonts-{beng,deva,gujr,guru,knda,mlym,orya,pagul,taml,telu})
++      "Ani", "Chandas", "Dhurjati", "Gargi", "Gidugu", "Gubbi", "Gurajada", "Jamrul", "Kalapi",
++      "Kalimati", "LakkiReddy", "Likhan", "Lohit Assamese", "Lohit Bengali", "Lohit Devanagari",
++      "Lohit Gujarati", "Lohit Gurmukhi", "Lohit Kannada", "Lohit Malayalam", "Lohit Odia",
++      "Lohit Tamil", "Lohit Tamil Classical", "Lohit Telugu", "Mallanna", "Mandali", "Mitra",
++      "Mukti", "NATS", "NTR", "Nakula", "Navilu", "Peddana", "Ponnala", "Pothana2000",
++      "Potti Sreeramulu", "Ramabhadra", "Ramaraja", "Rasa", "Rasa Light", "Rasa Medium",
++      "Rasa SemiBold", "RaviPrakash", "Rekha", "Saab", "Sahadeva", "Samanata", "Samyak Devanagari",
++      "Samyak Gujarati", "Samyak Malayalam", "Samyak Tamil", "Sree Krushnadevaraya", "Suranna",
++      "Suravaram", "Syamala Ramana", "TenaliRamakrishna", "Timmana", "Vemana2000", "Yrsa",
++      "Yrsa Light", "Yrsa Medium", "Yrsa SemiBold", "aakar", "ori1Uni", "padmaa",
++      "padmaa-Bold.1.1", "padmmaa", "utkal",
++      // noto_core_base -- fonts-noto-core, fonts-noto-mono
++      "Noto Sans", "Noto Sans Display", "Noto Sans Mono", "Noto Serif", "Noto Serif Display",
++      "Noto Mono",
++      // noto_symbols -- fonts-noto-core
++      "Noto Sans Symbols", "Noto Sans Symbols2", "Noto Sans Math", "Noto Music",
++      // noto_scripts -- fonts-noto-core
++      "Noto Sans Arabic", "Noto Naskh Arabic", "Noto Kufi Arabic", "Noto Nastaliq Urdu",
++      "Noto Sans Hebrew", "Noto Rashi Hebrew", "Noto Sans Armenian", "Noto Serif Armenian",
++      "Noto Sans Georgian", "Noto Serif Georgian", "Noto Sans Ethiopic", "Noto Serif Ethiopic",
++      "Noto Sans Devanagari", "Noto Serif Devanagari", "Noto Sans Bengali", "Noto Serif Bengali",
++      "Noto Sans Gujarati", "Noto Serif Gujarati", "Noto Sans Gurmukhi", "Noto Serif Gurmukhi",
++      "Noto Sans Kannada", "Noto Serif Kannada", "Noto Sans Malayalam", "Noto Serif Malayalam",
++      "Noto Sans Oriya", "Noto Sans Tamil", "Noto Serif Tamil", "Noto Sans Tamil Supplement",
++      "Noto Sans Telugu", "Noto Serif Telugu", "Noto Sans Sinhala", "Noto Serif Sinhala",
++      "Noto Sans Thai", "Noto Serif Thai", "Noto Sans Lao", "Noto Serif Lao", "Noto Sans Khmer",
++      "Noto Serif Khmer", "Noto Sans Myanmar", "Noto Serif Myanmar", "Noto Serif Tibetan",
++      "Noto Sans Javanese", "Noto Sans Cherokee", "Noto Sans Canadian Aboriginal",
++      "Noto Sans Mongolian", "Noto Sans Syriac", "Noto Sans Thaana", "Noto Sans NKo",
++      "Noto Sans Adlam", "Noto Sans Vai", "Noto Sans Yi", "Noto Sans Coptic", "Noto Sans Cham",
++      "Noto Sans Tifinagh"
 +    };
 +  }
 +  return {};
@@ -159,29 +303,168 @@
 +    const char* persona_font;
 +    const char* clone;
 +  };
++  // Every clone named here is part of clearcote's own Linux substitution font install
++  // (croscore/crosextra Arimo-Tinos-Cousine-Carlito-Caladea, Selawik, Gelasio, Anton, Oswald,
++  // Lato, Comic Neue, Inconsolata, DejaVu, Liberation, fonts-noto-core, IPA Gothic,
++  // WenQuanYi Zen Hei), so the substitute always resolves. A family with no entry falls
++  // through to the Arimo default below -- present with plausible sans metrics.
 +  static const Sub kSubs[] = {
 +      // --- Windows sans / UI ---
 +      {"Segoe UI", "Selawik"}, {"Segoe UI Semibold", "Selawik"},
 +      {"Segoe UI Semilight", "Selawik"}, {"Segoe UI Light", "Selawik"},
 +      {"Segoe UI Black", "Selawik"}, {"Segoe UI Variable", "Selawik"},
++      {"Segoe UI Variable Display", "Selawik"}, {"Segoe UI Variable Text", "Selawik"},
++      {"Segoe UI Variable Small", "Selawik"},
 +      {"Calibri", "Carlito"}, {"Calibri Light", "Carlito"},
-+      {"Candara", "Carlito"}, {"Corbel", "Carlito"},
-+      {"Arial", "Arimo"}, {"Arial Black", "Arimo"}, {"Arial Narrow", "Arimo"},
-+      {"Trebuchet MS", "Comic Neue"}, {"Verdana", "DejaVu Sans"}, {"Tahoma", "DejaVu Sans Condensed"},
++      {"Candara", "Carlito"}, {"Candara Light", "Carlito"},
++      {"Corbel", "Carlito"}, {"Corbel Light", "Carlito"},
++      {"Arial", "Arimo"}, {"Arial Black", "Arimo"},
++      {"Arial Narrow", "Liberation Sans Narrow"}, {"Arial Rounded MT Bold", "Arimo"},
++      {"Trebuchet MS", "Comic Neue"}, {"Verdana", "DejaVu Sans"},
++      {"Tahoma", "DejaVu Sans Condensed"},
 +      {"Microsoft Sans Serif", "Arimo"}, {"MS Sans Serif", "Arimo"},
-+      {"Franklin Gothic Medium", "Arimo"}, {"Bahnschrift", "Arimo"},
-+      {"Ebrima", "Arimo"}, {"Gadugi", "Arimo"}, {"Leelawadee UI", "Arimo"},
-+      {"Nirmala UI", "Arimo"}, {"Lucida Sans Unicode", "Arimo"},
-+      {"Segoe UI Emoji", "Arimo"}, {"Segoe UI Symbol", "Arimo"},
-+      {"Impact", "Anton"}, {"Comic Sans MS", "Noto Sans"},
++      {"MS Reference Sans Serif", "Arimo"},
++      {"Franklin Gothic", "Arimo"}, {"Franklin Gothic Medium", "Arimo"},
++      {"Franklin Gothic Book", "Arimo"}, {"Franklin Gothic Demi", "Arimo"},
++      {"Franklin Gothic Heavy", "Oswald"},
++      {"Franklin Gothic Demi Cond", "Liberation Sans Narrow"},
++      {"Franklin Gothic Medium Cond", "Liberation Sans Narrow"},
++      {"Bahnschrift", "Arimo"}, {"Bahnschrift Light", "Arimo"},
++      {"Bahnschrift SemiBold", "Arimo"}, {"Bahnschrift SemiLight", "Arimo"},
++      {"Ebrima", "Arimo"}, {"Gadugi", "Arimo"},
++      {"Lucida Sans Unicode", "DejaVu Sans"}, {"Lucida Sans", "DejaVu Sans"},
++      {"Gill Sans MT", "Lato"}, {"Gill Sans MT Condensed", "Liberation Sans Narrow"},
++      {"Gill Sans MT Ext Condensed Bold", "Liberation Sans Narrow"},
++      {"Gill Sans Ultra Bold", "Anton"}, {"Gill Sans Ultra Bold Condensed", "Anton"},
++      {"Tw Cen MT", "Lato"}, {"Tw Cen MT Condensed", "Liberation Sans Narrow"},
++      {"Tw Cen MT Condensed Extra Bold", "Anton"},
++      {"Century Gothic", "Lato"}, {"Agency FB", "Liberation Sans Narrow"},
++      {"Eras Light ITC", "Lato"}, {"Eras Medium ITC", "Lato"},
++      {"Eras Demi ITC", "Lato"}, {"Eras Bold ITC", "Lato"},
++      {"Berlin Sans FB", "Lato"}, {"Bauhaus 93", "Anton"},
++      {"Maiandra GD", "Lato"}, {"Britannic Bold", "Oswald"},
++      {"Haettenschweiler", "Oswald"}, {"Impact", "Anton"},
++      {"Comic Sans MS", "Comic Neue"},
 +      // --- Windows serif ---
 +      {"Cambria", "Caladea"}, {"Cambria Math", "Caladea"}, {"Constantia", "Caladea"},
 +      {"Palatino Linotype", "Caladea"}, {"Book Antiqua", "Caladea"},
 +      {"Georgia", "Gelasio"},
-+      {"Times New Roman", "Tinos"},
++      {"Times New Roman", "Tinos"}, {"Times", "Tinos"},
++      // NOT "Bitstream Charter": on the Linux build host that family exists in fontconfig
++      // only as a Type1 .pfb (/usr/share/fonts/X11/Type1/c0648bt_.pfb), and Chrome's
++      // FreeType build cannot instantiate Type1 -- SkFontMgr_fontconfig returns nullptr, so
++      // the persona font measured ABSENT. MEASURED on the 150 Linux build, windows persona:
++      // all three rendered 888x83, byte-identical to the serif default, which is exactly the
++      // "this family does not exist" signature. The urw-base35 clones (URW Bookman, C059,
++      // P052, Z003) are the same trap -- also Type1. Noto Serif is TrueType, resolves
++      // (measured 1017x98), and is a wide old-style serif like Bookman/Century.
++      {"Bookman Old Style", "Noto Serif"}, {"Century Schoolbook", "Noto Serif"},
++      {"Century", "Noto Serif"}, {"Garamond", "DejaVu Serif"},
++      {"Goudy Old Style", "DejaVu Serif"}, {"Goudy Stout", "Anton"},
++      {"Bell MT", "DejaVu Serif"}, {"Calisto MT", "DejaVu Serif"},
++      {"Baskerville Old Face", "DejaVu Serif"}, {"Californian FB", "DejaVu Serif"},
++      {"Centaur", "DejaVu Serif"}, {"High Tower Text", "DejaVu Serif"},
++      {"Footlight MT Light", "DejaVu Serif"}, {"Modern No. 20", "DejaVu Serif"},
++      {"Perpetua", "DejaVu Serif"}, {"Perpetua Titling MT", "DejaVu Serif"},
++      {"Perpetua Titling MT Light", "DejaVu Serif"}, {"Lucida Bright", "DejaVu Serif"},
++      {"Lucida Fax", "DejaVu Serif"}, {"Bodoni MT", "DejaVu Serif"},
++      {"Bodoni MT Black", "DejaVu Serif"},
++      {"Bodoni MT Condensed", "DejaVu Serif Condensed"},
++      {"Bodoni MT Poster Compressed", "DejaVu Serif Condensed"},
++      {"Rockwell", "DejaVu Serif"}, {"Rockwell Condensed", "DejaVu Serif Condensed"},
++      {"Rockwell Extra Bold", "DejaVu Serif"},
++      {"Cooper Black", "DejaVu Serif"}, {"Elephant", "DejaVu Serif"},
++      {"Engravers MT", "DejaVu Serif"}, {"Castellar", "DejaVu Serif"},
++      {"Colonna MT", "DejaVu Serif"}, {"Felix Titling", "DejaVu Serif"},
++      {"Imprint MT Shadow", "DejaVu Serif"}, {"Copperplate Gothic", "DejaVu Serif"},
++      {"Copperplate Gothic Light", "DejaVu Serif"},
++      {"Bernard MT Condensed", "DejaVu Serif Condensed"},
++      {"Gloucester MT Extra Condensed", "DejaVu Serif Condensed"},
++      {"Old English Text MT", "DejaVu Serif"}, {"Wide Latin", "DejaVu Serif"},
++      {"Broadway", "DejaVu Serif"}, {"Onyx", "DejaVu Serif Condensed"},
++      {"Playbill", "DejaVu Serif Condensed"}, {"Stencil", "DejaVu Serif"},
++      {"Algerian", "DejaVu Serif"}, {"Harrington", "DejaVu Serif"},
++      {"Poor Richard", "DejaVu Serif"}, {"Showcard Gothic", "DejaVu Serif"},
++      {"Snap ITC", "DejaVu Serif"}, {"Ravie", "DejaVu Serif"},
++      {"Magneto", "DejaVu Serif"}, {"Niagara Solid", "DejaVu Serif Condensed"},
++      {"Niagara Engraved", "DejaVu Serif Condensed"},
++      // --- Windows script / handwriting (Comic Neue is the only cursive clone we ship) ---
++      {"Monotype Corsiva", "Comic Neue"}, {"Lucida Handwriting", "Comic Neue"},
++      {"Lucida Calligraphy", "Comic Neue"}, {"Brush Script MT", "Comic Neue"},
++      {"Freestyle Script", "Comic Neue"}, {"French Script MT", "Comic Neue"},
++      {"Kunstler Script", "Comic Neue"}, {"Palace Script MT", "Comic Neue"},
++      {"Edwardian Script ITC", "Comic Neue"}, {"Vladimir Script", "Comic Neue"},
++      {"Script MT Bold", "Comic Neue"}, {"Vivaldi", "Comic Neue"},
++      {"Rage Italic", "Comic Neue"}, {"Pristina", "Comic Neue"},
++      {"Parchment", "Comic Neue"}, {"Mistral", "Comic Neue"},
++      {"Informal Roman", "Comic Neue"}, {"Bradley Hand ITC", "Comic Neue"},
++      {"Viner Hand ITC", "Comic Neue"}, {"Blackadder ITC", "Comic Neue"},
++      {"Matura MT Script Capitals", "Comic Neue"}, {"Harlow Solid Italic", "Comic Neue"},
++      {"Segoe Print", "Comic Neue"}, {"Segoe Script", "Comic Neue"},
++      {"Ink Free", "Comic Neue"}, {"Gabriola", "Comic Neue"},
++      {"Curlz MT", "Comic Neue"}, {"Chiller", "Comic Neue"},
++      {"Jokerman", "Comic Neue"}, {"Juice ITC", "Comic Neue"},
++      {"Kristen ITC", "Comic Neue"}, {"Tempus Sans ITC", "Comic Neue"},
++      {"Forte", "Comic Neue"}, {"Gigi", "Comic Neue"},
++      {"Papyrus", "Comic Neue"}, {"Papyrus Condensed", "Comic Neue"},
 +      // --- Windows monospace ---
-+      {"Courier New", "Cousine"}, {"Consolas", "Inconsolata"}, {"Lucida Console", "Cousine"},
++      {"Courier New", "Cousine"}, {"Courier", "Cousine"},
++      {"Consolas", "Inconsolata"}, {"Lucida Console", "Cousine"},
++      {"Lucida Sans Typewriter", "Cousine"},
 +      {"Cascadia Code", "Cousine"}, {"Cascadia Mono", "Cousine"},
++      {"OCR A Extended", "Cousine"}, {"MS Serif", "Tinos"},
++      // --- Windows symbol / icon: clones with a matching (Latin-free) repertoire, so a width
++      // probe sees them exactly as it does on real Windows instead of seeing Arimo. ---
++      {"Symbol", "Noto Sans Symbols"}, {"Webdings", "Noto Sans Symbols2"},
++      {"Wingdings", "Noto Sans Symbols2"}, {"Wingdings 2", "Noto Sans Symbols2"},
++      {"Wingdings 3", "Noto Sans Symbols2"}, {"Marlett", "Noto Sans Symbols2"},
++      {"Segoe MDL2 Assets", "Noto Sans Symbols2"},
++      {"Segoe Fluent Icons", "Noto Sans Symbols2"},
++      {"HoloLens MDL2 Assets", "Noto Sans Symbols2"},
++      {"MS Reference Specialty", "Noto Sans Symbols2"},
++      {"Bookshelf Symbol 7", "Noto Sans Symbols2"},
++      {"MS Outlook", "Noto Sans Symbols2"}, {"MT Extra", "Noto Sans Math"},
++      {"Segoe UI Symbol", "Noto Sans Symbols"}, {"Segoe UI Emoji", "Noto Color Emoji"},
++      {"Segoe UI Historic", "Noto Sans Symbols2"},
++      // --- Windows CJK: the enumerated family must carry CJK glyphs or the fallback chain
++      // diverges from stock Chrome. WenQuanYi Zen Hei covers SC/TC/Hangul, IPA Gothic JP. ---
++      {"MS Gothic", "IPAGothic"}, {"MS PGothic", "IPAPGothic"},
++      {"MS UI Gothic", "IPAPGothic"}, {"\u30e1\u30a4\u30ea\u30aa", "IPAPGothic"},
++      {"Yu Gothic", "IPAGothic"}, {"Yu Gothic Light", "IPAGothic"},
++      {"Yu Gothic Medium", "IPAGothic"}, {"Yu Gothic UI", "IPAPGothic"},
++      {"Yu Gothic UI Light", "IPAPGothic"}, {"Yu Gothic UI Semibold", "IPAPGothic"},
++      {"Microsoft YaHei", "WenQuanYi Zen Hei"}, {"Microsoft YaHei Light", "WenQuanYi Zen Hei"},
++      {"Microsoft YaHei UI", "WenQuanYi Zen Hei"},
++      {"Microsoft YaHei UI Light", "WenQuanYi Zen Hei"},
++      {"Microsoft JhengHei", "WenQuanYi Zen Hei"},
++      {"Microsoft JhengHei Light", "WenQuanYi Zen Hei"},
++      {"Microsoft JhengHei UI", "WenQuanYi Zen Hei"},
++      {"Microsoft JhengHei UI Light", "WenQuanYi Zen Hei"},
++      {"SimSun", "WenQuanYi Zen Hei"}, {"NSimSun", "WenQuanYi Zen Hei Mono"},
++      {"SimSun-ExtB", "WenQuanYi Zen Hei"}, {"MingLiU-ExtB", "WenQuanYi Zen Hei"},
++      {"MingLiU_HKSCS-ExtB", "WenQuanYi Zen Hei"}, {"PMingLiU-ExtB", "WenQuanYi Zen Hei"},
++      {"Malgun Gothic", "WenQuanYi Zen Hei"},
++      // Localized family names DirectWrite also answers to (measured present under stock
++      // Chrome on a Windows host): SimSun, Microsoft YaHei, MS Gothic, MS PGothic.
++      {"\u5b8b\u4f53", "WenQuanYi Zen Hei"}, {"\u5fae\u8f6f\u96c5\u9ed1", "WenQuanYi Zen Hei"},
++      {"\uff2d\uff33 \u30b4\u30b7\u30c3\u30af", "IPAGothic"},
++      {"\uff2d\uff33 \uff30\u30b4\u30b7\u30c3\u30af", "IPAPGothic"},
++      // --- Windows complex-script UI fonts: these supply the glyph ranges a fallback probe
++      // exercises (U+20B9 rupee comes from the Nirmala UI class), so map by script. ---
++      {"Nirmala UI", "Noto Sans Devanagari"},
++      {"Leelawadee UI", "Noto Sans Thai"}, {"Leelawadee", "Noto Sans Thai"},
++      {"Myanmar Text", "Noto Sans Myanmar"}, {"Javanese Text", "Noto Sans Javanese"},
++      {"Mongolian Baiti", "Noto Sans Mongolian"},
++      {"Microsoft Himalaya", "Noto Serif Tibetan"},
++      {"Microsoft Uighur", "Noto Sans Arabic"},
++      {"Microsoft Tai Le", "Noto Sans Tai Le"},
++      {"Microsoft New Tai Lue", "Noto Sans New Tai Lue"},
++      {"Microsoft PhagsPa", "Noto Sans PhagsPa"},
++      {"Microsoft Yi Baiti", "Noto Sans Yi"},
++      {"MV Boli", "Noto Sans Thaana"}, {"Sylfaen", "Noto Sans Georgian"},
++      {"Sitka Text", "Noto Serif"}, {"Sitka Small", "Noto Serif"},
++      {"Sitka Display", "Noto Serif"}, {"Sitka Subheading", "Noto Serif"},
++      {"Sitka Heading", "Noto Serif"}, {"Sitka Banner", "Noto Serif"},
 +  };
 +  for (const Sub& sub : kSubs) {
 +    if (base::EqualsCaseInsensitiveASCII(sub.persona_font, family))
@@ -195,13 +478,23 @@
  const FontPlatformData* FontCache::GetFontPlatformData(
      const FontDescription& font_description,
      const FontFaceCreationParams& creation_params,
-@@ -141,6 +314,78 @@
+@@ -138,6 +593,93 @@
    }
  #endif
  
 +  const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
 +  // 字体指纹处理逻辑 - 不应用于最后手段字体
-+  if (command_line->HasSwitch(switches::kFingerprint) &&
++  // clearcote: an imported profile carries its donor machine's own font enumeration, and
++  // that is the whole point of importing one -- so --fingerprint-profile engages this path
++  // on its own. Fonts used to be gated on the --fingerprint SEED alone, so the SDK's
++  // flagship profile-only launch (deliberately seedless -- a seed next to a profile is the
++  // combination that fails strict scoring) applied every other profile field while leaving
++  // the host's real font list fully exposed. MEASURED on a Windows host with a profile
++  // claiming 293 fonts: no-persona 115, seed-only 62, profile-only 115 (byte-identical to
++  // host truth), profile+seed 104. A launch with NEITHER switch still takes the untouched
++  // host path below, exactly as before.
++  if ((command_line->HasSwitch(switches::kFingerprint) ||
++       command_line->HasSwitch(switches::kFingerprintProfile)) &&
 +      creation_params.CreationType() == kCreateFontByFamily &&
 +      alternate_font_name != AlternateFontName::kLastResort) {
 +
@@ -220,10 +513,15 @@
 +#endif
 +
 +
-+    std::string spoofed_platform = command_line->GetSwitchValueASCII(switches::kFingerprintPlatform);
-+    if (spoofed_platform.empty()) {
-+      spoofed_platform = current_os;
-+    }
++    // clearcote: ONE case-insensitive parse of --fingerprint-platform via
++    // ungoogled::GetPersonaPlatform(). kUnset (switch absent, empty, or an
++    // unrecognized value) MUST fall back to the HOST os, exactly as the old
++    // .empty() check did -- an unflagged launch must keep host font behaviour.
++    const char* persona_platform_name =
++        ungoogled::PersonaPlatformName(ungoogled::GetPersonaPlatform());
++    std::string spoofed_platform = (persona_platform_name[0] == 0)
++                                       ? std::string(current_os)
++                                       : std::string(persona_platform_name);
 +
 +    std::vector<std::string> platform_fonts = GetPlatformFonts(spoofed_platform);
 +    // clearcote: an imported profile's detected-font list overrides the canonical

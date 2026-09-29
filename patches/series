@@ -9,6 +9,7 @@
 060-canvas.patch
 065-canvas-bridge.patch
 070-webgl-gpu.patch
+071-webgl2-extension-split.patch
 075-webgpu-coherence.patch
 090-timezone.patch
 092-language-locale-coherence.patch
@@ -18,6 +19,7 @@
 130-humanized-input.patch
 140-screen.patch
 141-media-queries.patch
+142-touch-pointer-coherence.patch
 145-storage-quota.patch
 146-perf-memory.patch
 147-media-capabilities.patch
@@ -28,5 +30,8 @@
 180-geolocation.patch
 200-agent-and-humanized-input.patch
 210-tls-network-persona.patch
+220-no-farble-switch.patch
 900-windows-build-fixes.patch
 905-rc-invoked-guard.patch
+951-gfx-quadf-offset.patch
+955-webgl-persona-parity.patch

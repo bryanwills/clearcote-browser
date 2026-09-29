@@ -9,7 +9,7 @@
  
  #include <stddef.h>
  
-@@ -1032,6 +1034,17 @@
+@@ -1033,6 +1035,17 @@
    DCHECK(web_frame);
    EnsureInitialized();
  
@@ -27,7 +27,7 @@
    // Copy the flag from Preference associated with this WebLocalFrame.
    P2PPortAllocator::Config port_config;
    uint16_t min_port = 0;
-@@ -1108,6 +1121,15 @@
+@@ -1109,6 +1122,15 @@
      }
    }
  

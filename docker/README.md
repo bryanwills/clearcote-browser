@@ -29,7 +29,7 @@ headless-mode tells some detectors probe. Set `CC_HEADLESS=1` for the old pure-h
 | `CC_PLATFORM` | `windows` \| `linux` \| `macos` \| `android` | spoofed OS |
 | `CC_FINGERPRINT` | `user-7423` | seed → stable, unlinkable identity |
 | `CC_BRAND` | `Edge` | brand (UA + UA-CH) |
-| `CC_BRAND_VERSION` | `149.0.3650.65` | brand/version (drives TLS via `match-persona`) |
+| `CC_BRAND_VERSION` | `150.0.4078.65` | brand/version (drives TLS via `match-persona`) |
 | `CC_ACCEPT_LANGUAGE` | `de-DE,de` | locale |
 | `CC_TIMEZONE` | `Europe/Berlin` | IANA timezone |
 | `CC_HARDWARE_CONCURRENCY` | `8` | `navigator.hardwareConcurrency` |
@@ -101,8 +101,11 @@ host-local with `-p 127.0.0.1:9222:9222`, or keep it on an internal Docker netwo
 ## Notes
 
 - Each image tag is built from one SDK release: `sdk-<version>` (e.g. `sdk-0.30.0`), `<browser>` (the
-  open binary it bakes in, e.g. `0.1.0-pre.22`) and `latest`. Rebuild + verify this image yourself:
+  open binary it bakes in, e.g. `0.1.0-pre.23`) and `latest`. Rebuild + verify this image yourself:
   `docker build -t clearcote .` — every layer is auditable.
 - `--disable-dev-shm-usage` is set; add `--shm-size=1g` on very heavy pages if needed.
+- The image runs as a **non-root** user (`cc`). If you run the browser in your own container as
+  **root**, add `--cap-add=SYS_NICE` (or run as a normal user): the open build is compiled with
+  DCHECKs, and Chromium's process-priority call aborts it when a root container refuses the call.
 - WebGL/WebGPU render via ANGLE/SwiftShader (no GPU in the container); pair with the
   [canvas bridge](../docs/CANVAS-BRIDGE.md) for real-GPU pixel coherence.
