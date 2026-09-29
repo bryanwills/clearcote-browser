@@ -65,6 +65,7 @@ from ._render import check_render_coherence
 from ._warnings import emit_coherence_warnings
 from ._widevine import apply_widevine_launch, fetch_widevine, seed_widevine
 from ._license import (
+    STALE_TOKEN_REFUSAL,
     ConcurrencyLimitError,
     LicenseError,
     LicenseRevokedError,
@@ -794,6 +795,29 @@ def _prepare_or_release(kwargs, lease):
         raise
 
 
+def _is_stale_token_refusal(exc) -> bool:
+    """The PRO engine refused the run-token as older than one it has already accepted on this machine.
+    Playwright's launch error carries the engine's stderr, which is where that line lands."""
+    return STALE_TOKEN_REFUSAL in str(exc)
+
+
+def _retry_on_stale_run_token(lease, pw_kwargs, launch_token, start):
+    """Run ``start()``; if the engine refuses the run-token as stale, mint a fresh one and launch once more.
+
+    acquire_lease() already replaces a token it can SEE is older than the engine's mark. This covers the
+    race it cannot see: another process (a parallel launch, the hosted-browser gateway, another key)
+    moving the mark between that check and this launch. ``start`` reads ``pw_kwargs`` when called, so
+    re-injecting the new token is all a retry needs; the bound token file follows the lease by itself."""
+    try:
+        return start()
+    except Exception as exc:  # noqa: BLE001
+        refresh = getattr(lease, "refresh_token", None)
+        if refresh is None or not _is_stale_token_refusal(exc) or not refresh():
+            raise
+        inject_run_token(pw_kwargs, lease.token, launch_token[0] if launch_token else None)
+        return start()
+
+
 def _release_lease_on_failure(lease, start):
     """Run ``start()``; if the browser fails to start, release the lease before re-raising. On a
     per-browser plan (the free tier) the slot would otherwise stay taken until the lease TTL."""
@@ -860,9 +884,10 @@ def launch(**kwargs):
     # context option, so it rides on new_page/new_context.
     geom = None if headed else _headless_geometry_kwargs(pw_kwargs, seed, args)
     launch_args = _with_geometry_args(args, geom)
-    browser = _release_lease_on_failure(lease if owns_lease else None, lambda: _win_av_retry(
-        lambda e: _playwright().chromium.launch(executable_path=e, args=launch_args, **pw_kwargs), exe
-    ))
+    browser = _release_lease_on_failure(lease if owns_lease else None, lambda: _retry_on_stale_run_token(
+        lease, pw_kwargs, launch_token, lambda: _win_av_retry(
+            lambda e: _playwright().chromium.launch(executable_path=e, args=launch_args, **pw_kwargs), exe
+        )))
     if lease:  # release the concurrency slot + remove the run-token file when the browser closes
         def _on_disconnect(_b=None, _lease=lease, _lt=launch_token, _own=owns_lease):
             if _own:  # a borrowed slot belongs to the caller: only drop this launch's token file
@@ -910,12 +935,13 @@ def launch_persistent_context(user_data_dir, **kwargs):
     else:  # headless: persona owns screen -> fit the window; no persona -> set the display too
         geom = apply_headless_geometry(pw_kwargs, seed, args)
     launch_args = _with_geometry_args(args, geom)
-    context = _release_lease_on_failure(lease if owns_lease else None, lambda: _win_av_retry(
-        lambda e: _playwright().chromium.launch_persistent_context(
-            user_data_dir, executable_path=e, args=launch_args, **pw_kwargs
-        ),
-        exe,
-    ))
+    context = _release_lease_on_failure(lease if owns_lease else None, lambda: _retry_on_stale_run_token(
+        lease, pw_kwargs, launch_token, lambda: _win_av_retry(
+            lambda e: _playwright().chromium.launch_persistent_context(
+                user_data_dir, executable_path=e, args=launch_args, **pw_kwargs
+            ),
+            exe,
+        )))
     if lease:  # release the concurrency slot + remove the run-token file when the context closes
         def _on_close(_c=None, _lease=lease, _lt=launch_token, _own=owns_lease):
             if _own:  # a borrowed slot belongs to the caller: only drop this launch's token file

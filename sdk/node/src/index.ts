@@ -62,7 +62,7 @@ import { withShaderDialect, type ShaderDialect } from "./shaderdialect.js";
 import {
   applyHeadlessGeometry, fitServedWindow, fitWindowToWorkArea, installWindowFixup, servedGeometry,
 } from "./geometry.js";
-import { acquireLease, resolveLicenseKey, withRunToken, type LicenseOptions, type LeaseSession } from "./license.js";
+import { acquireLease, resolveLicenseKey, withRunToken, STALE_TOKEN_REFUSAL, type LicenseOptions, type LeaseSession } from "./license.js";
 
 export type { FingerprintOptions } from "./fingerprint.js";
 export type { DownloadOptions } from "./download.js";
@@ -709,6 +709,26 @@ export async function releaseLeaseOnFailure<T>(lease: LeaseSession | null, start
   }
 }
 
+/**
+ * Start a browser; if the PRO engine refuses the run-token as older than one it has already accepted on
+ * this machine ("older than the last one accepted"), mint a fresh token and start once more.
+ *
+ * acquireLease() already replaces a token it can SEE is older than the engine's mark. This covers the race
+ * it cannot see: another process (a parallel launch, the hosted-browser gateway, another key) moving the
+ * mark between that check and this launch. `start` must build its env from `lease.token` each time it is
+ * called; the bound token file follows the lease by itself. Playwright's launch error carries the engine's
+ * stderr, which is where the refusal lands. Exported for tests.
+ */
+export async function retryOnStaleRunToken<T>(lease: LeaseSession | null, start: () => Promise<T>): Promise<T> {
+  try {
+    return await start();
+  } catch (e) {
+    const refused = String((e as Error)?.message ?? e).includes(STALE_TOKEN_REFUSAL);
+    if (!lease?.refreshToken || !refused || !(await lease.refreshToken())) throw e;
+    return await start();
+  }
+}
+
 export async function launch(options: LaunchOptions = {}): Promise<Browser> {
   // ephemeralProfile: false restores the pre-0.23 incognito launch. Kept because the persistent
   // path costs a directory create+delete per launch, which a caller spawning hundreds of
@@ -771,7 +791,8 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   // and LANGUAGE at the persona's UI locale (after engineArgs: it reads their --lang).
   const launchEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (pwOptions as PlaywrightLaunchOptions).env, engineArgs));
   const launchToken = lease?.bindLaunch();
-  const runtimeEnv = lease ? withRunToken(lease.token, launchEnv, launchToken?.file) : launchEnv;
+  // A function: a launch retried after a stale-token refusal must carry the lease's fresh token.
+  const runtimeEnv = () => (lease ? withRunToken(lease.token, launchEnv, launchToken?.file) : launchEnv);
   // Headless: screen.* has to be handled alongside the viewport or the window reports a geometry no
   // real browser can (see ./geometry.ts). Probe a copy — viewport is a context option, which
   // chromium.launch() does not take — and carry the result to newPage/newContext. The display
@@ -779,16 +800,19 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   const geom = headed
     ? null
     : applyHeadlessGeometry({ ...(pwOptions as Record<string, unknown>) }, fingerprint.fingerprint, engineArgs, fingerprint);
-  const browser = await releaseLeaseOnFailure(lease, () => winAvRetry((exePath) => chromium.launch({
-    // Drop Playwright's --enable-automation (keeps AutomationControlled off), --enable-unsafe-swiftshader
-    // (see DEFAULT_IGNORED_ARGS; paired with --ignore-gpu-blocklist in assembleArgs) and the headless
-    // --hide-scrollbars. Caller can override via ignoreDefaultArgs.
-    ignoreDefaultArgs: [...DEFAULT_IGNORED_ARGS],
-    ...(pwOptions as PlaywrightLaunchOptions),
-    executablePath: exePath,
-    ...(runtimeEnv ? { env: runtimeEnv } : {}),
-    args: [...engineArgs, ...(geom?.args ?? [])],
-  }), exe));
+  const browser = await releaseLeaseOnFailure(lease, () => retryOnStaleRunToken(lease, () => winAvRetry((exePath) => {
+    const env = runtimeEnv();
+    return chromium.launch({
+      // Drop Playwright's --enable-automation (keeps AutomationControlled off), --enable-unsafe-swiftshader
+      // (see DEFAULT_IGNORED_ARGS; paired with --ignore-gpu-blocklist in assembleArgs) and the headless
+      // --hide-scrollbars. Caller can override via ignoreDefaultArgs.
+      ignoreDefaultArgs: [...DEFAULT_IGNORED_ARGS],
+      ...(pwOptions as PlaywrightLaunchOptions),
+      executablePath: exePath,
+      ...(env ? { env } : {}),
+      args: [...engineArgs, ...(geom?.args ?? [])],
+    });
+  }, exe)));
   // Release the concurrency slot + remove the run-token file when the browser closes.
   if (lease) browser.on("disconnected", () => { void lease.stop(); launchToken?.release(); });
   if (headed) installHeadedViewport(browser); // launch() takes no viewport option -> wrap newPage/newContext
@@ -864,20 +888,24 @@ export async function launchPersistentContext(
     { exe, headed: opts.headless === false, quiet, allowThirdPartyCookies, transparentProxy });
   const ctxEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (opts as PlaywrightLaunchOptions).env, engineArgs));
   const launchToken = lease?.bindLaunch();
-  const runtimeEnv = lease ? withRunToken(lease.token, ctxEnv, launchToken?.file) : ctxEnv;
+  // A function: a launch retried after a stale-token refusal must carry the lease's fresh token.
+  const runtimeEnv = () => (lease ? withRunToken(lease.token, ctxEnv, launchToken?.file) : ctxEnv);
   // headless: the persona owns screen when it is running, so only the window needs fitting; with no
   // persona the SDK sets the headless display itself (see ./geometry.ts). Headed already set
   // viewport: null.
   const geom = opts.headless === false
     ? null
     : applyHeadlessGeometry(opts as unknown as Record<string, unknown>, fingerprint.fingerprint, engineArgs, fingerprint);
-  const context = await releaseLeaseOnFailure(lease, () => winAvRetry((exePath) => chromium.launchPersistentContext(userDataDir, {
-    ...opts,
-    ignoreDefaultArgs,  // keep AutomationControlled off (+ component updater on when widevine)
-    executablePath: exePath,
-    ...(runtimeEnv ? { env: runtimeEnv } : {}),
-    args: [...engineArgs, ...(geom?.args ?? [])],
-  }), exe));
+  const context = await releaseLeaseOnFailure(lease, () => retryOnStaleRunToken(lease, () => winAvRetry((exePath) => {
+    const env = runtimeEnv();
+    return chromium.launchPersistentContext(userDataDir, {
+      ...opts,
+      ignoreDefaultArgs,  // keep AutomationControlled off (+ component updater on when widevine)
+      executablePath: exePath,
+      ...(env ? { env } : {}),
+      args: [...engineArgs, ...(geom?.args ?? [])],
+    });
+  }, exe)));
   if (lease) context.on("close", () => { void lease.stop(); launchToken?.release(); });
   if (geom) await installWindowFixup(context, engineArgs);
   installHumanizeOnContext(context, { humanize, showCursor, seed: fingerprint.fingerprint }); // seed => stable motor persona

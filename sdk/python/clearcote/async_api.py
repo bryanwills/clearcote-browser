@@ -28,7 +28,7 @@ import tempfile
 
 from . import (  # shared sync helpers
     _headed_no_viewport, _headless_geometry_kwargs, _prepare, _acquire_lease_from_kwargs,
-    _is_win_launch_race, _with_geometry_args, _profile_dir_remover,
+    _is_win_launch_race, _is_stale_token_refusal, _with_geometry_args, _profile_dir_remover,
 )
 from ._launchopts import DEFAULT_IGNORED_ARGS
 from ._geometry import apply_headless_geometry, fit_window_to_work_area_async
@@ -211,6 +211,19 @@ async def _win_av_retry_async(do_launch, exe):
     return await do_launch(os.path.join(recover, os.path.basename(exe)))
 
 
+async def _retry_on_stale_run_token_async(lease, pw_kwargs, launch_token, start):
+    """Async twin of the sync ``_retry_on_stale_run_token``: if the engine refuses the run-token as older
+    than one it has accepted on this machine, mint a fresh one (off the event loop) and launch once more."""
+    try:
+        return await start()
+    except Exception as exc:  # noqa: BLE001
+        refresh = getattr(lease, "refresh_token", None)
+        if refresh is None or not _is_stale_token_refusal(exc) or not await asyncio.to_thread(refresh):
+            raise
+        inject_run_token(pw_kwargs, lease.token, launch_token[0] if launch_token else None)
+        return await start()
+
+
 async def launch(**kwargs):
     """Launch Clearcote and return a Playwright **async** ``Browser``. Same kwargs as the sync
     ``clearcote.launch`` (fingerprint, platform, brand, gpu_*, timezone, accept_language, proxy,
@@ -232,8 +245,8 @@ async def launch(**kwargs):
     launch_args = _with_geometry_args(args, geom)
     pw = await _start_driver()
     try:
-        browser = await _win_av_retry_async(
-            lambda e: pw.chromium.launch(executable_path=e, args=launch_args, **pw_kwargs), exe)
+        browser = await _retry_on_stale_run_token_async(lease, pw_kwargs, launch_token, lambda: _win_av_retry_async(
+            lambda e: pw.chromium.launch(executable_path=e, args=launch_args, **pw_kwargs), exe))
     except BaseException:
         if lease:
             lease.stop()
@@ -282,9 +295,9 @@ async def launch_persistent_context(user_data_dir, **kwargs):
     launch_args = _with_geometry_args(args, geom)
     pw = await _start_driver()
     try:
-        context = await _win_av_retry_async(
+        context = await _retry_on_stale_run_token_async(lease, pw_kwargs, launch_token, lambda: _win_av_retry_async(
             lambda e: pw.chromium.launch_persistent_context(
-                user_data_dir, executable_path=e, args=launch_args, **pw_kwargs), exe)
+                user_data_dir, executable_path=e, args=launch_args, **pw_kwargs), exe))
     except BaseException:
         if lease:
             lease.stop()

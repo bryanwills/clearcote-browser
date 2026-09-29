@@ -100,24 +100,26 @@ public static class Clearcote
         // browser once the token stops advancing; passed ALONGSIDE CLEARCOTE_RUN_TOKEN. Inert in free mode.
         var launchToken = lease?.BindLaunch();
         var callerEnv = Languages.ApplyLinuxLanguage(args, options.Env);  // Linux: UI locale from --lang
-        var env = lease is not null ? License.WithRunToken(lease.Token, callerEnv, launchToken?.File) : callerEnv;
-        env = ShaderDialect.Apply(options.ShaderDialect, env);  // opt-in; no-op when unset
+        // Built per attempt: a launch retried after a stale-token refusal must carry the lease's fresh token.
+        var envFor = () => ShaderDialect.Apply(options.ShaderDialect,  // opt-in; no-op when unset
+            lease is not null ? License.WithRunToken(lease.Token, callerEnv, launchToken?.File) : callerEnv);
 
         // Headless: the display is browser-wide, so it applies even here (see the geometry caveat).
         var display = Geometry.ResolveHeadless(options.Headless, options.Fingerprint, args, callerSetGeometry: false);
 
         var pw = await PlaywrightAsync().ConfigureAwait(false);
-        var browser = await License.ReleaseLeaseOnFailureAsync(lease, () => WinLaunch.WinAvRetryAsync(exePath => pw.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
-        {
-            ExecutablePath = exePath,
-            Args = args.Concat(display.Args).ToArray(),
-            Headless = options.Headless,
-            Channel = options.Channel,
-            SlowMo = options.SlowMo,
-            IgnoreDefaultArgs = options.IgnoreDefaultArgs ?? LaunchOpts.DefaultIgnoredArgs.ToArray(),
-            Env = env,
-            Proxy = ToPwProxy(proxy),
-        }), exe)).ConfigureAwait(false);
+        var browser = await License.ReleaseLeaseOnFailureAsync(lease, () => License.RetryOnStaleRunTokenAsync(lease, () =>
+            WinLaunch.WinAvRetryAsync(exePath => pw.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+            {
+                ExecutablePath = exePath,
+                Args = args.Concat(display.Args).ToArray(),
+                Headless = options.Headless,
+                Channel = options.Channel,
+                SlowMo = options.SlowMo,
+                IgnoreDefaultArgs = options.IgnoreDefaultArgs ?? LaunchOpts.DefaultIgnoredArgs.ToArray(),
+                Env = envFor(),
+                Proxy = ToPwProxy(proxy),
+            }), exe))).ConfigureAwait(false);
 
         // Release the concurrency slot + remove the run-token file when the browser closes.
         if (lease is not null) browser.Disconnected += (_, _) => { _ = lease.StopAsync(); launchToken?.Release(); };
@@ -202,15 +204,17 @@ public static class Clearcote
         // CLEARCOTE_RUN_TOKEN. Inert in free mode.
         var launchToken = lease?.BindLaunch();
         var callerEnv = Languages.ApplyLinuxLanguage(args, options.Env);  // Linux: UI locale from --lang
-        var env = lease is not null ? License.WithRunToken(lease.Token, callerEnv, launchToken?.File) : callerEnv;
-        env = ShaderDialect.Apply(options.ShaderDialect, env);  // opt-in; no-op when unset
+        // Built per attempt: a launch retried after a stale-token refusal must carry the lease's fresh token.
+        var envFor = () => ShaderDialect.Apply(options.ShaderDialect,  // opt-in; no-op when unset
+            lease is not null ? License.WithRunToken(lease.Token, callerEnv, launchToken?.File) : callerEnv);
 
         var geometry = Geometry.ResolveHeadless(
             options.Headless, options.Fingerprint, args,
             callerSetGeometry: options.ViewportSize is not null || options.ScreenSize is not null);
 
         var pw = await PlaywrightAsync().ConfigureAwait(false);
-        var context = await License.ReleaseLeaseOnFailureAsync(lease, () => WinLaunch.WinAvRetryAsync(exePath => pw.Chromium.LaunchPersistentContextAsync(userDataDir,
+        var context = await License.ReleaseLeaseOnFailureAsync(lease, () => License.RetryOnStaleRunTokenAsync(lease, () =>
+            WinLaunch.WinAvRetryAsync(exePath => pw.Chromium.LaunchPersistentContextAsync(userDataDir,
             new BrowserTypeLaunchPersistentContextOptions
             {
                 ExecutablePath = exePath,
@@ -220,7 +224,7 @@ public static class Clearcote
                 Channel = options.Channel,
                 SlowMo = options.SlowMo,
                 IgnoreDefaultArgs = options.IgnoreDefaultArgs ?? LaunchOpts.DefaultIgnoredArgs.ToArray(),
-                Env = env,
+                Env = envFor(),
                 Proxy = ToPwProxy(proxy),
                 // Headed with no explicit viewport -> real window size (matches launch()).
                 // Headless -> the persona's display (regime 1) or the SDK's (regime 2), and the window
@@ -230,7 +234,7 @@ public static class Clearcote
                         ? ViewportSize.NoViewport
                         : null),
                 ScreenSize = options.ScreenSize,
-            }), exe)).ConfigureAwait(false);
+            }), exe))).ConfigureAwait(false);
 
         // Release the concurrency slot + remove the run-token file when the context closes.
         if (lease is not null) context.Close += (_, _) => { _ = lease.StopAsync(); launchToken?.Release(); };

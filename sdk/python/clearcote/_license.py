@@ -152,6 +152,40 @@ def token_plan(token: str) -> str | None:
         return None
 
 
+def token_iat(token: str) -> int | None:
+    """When a run-token was minted (its ``iat``, epoch seconds), read from its payload WITHOUT verifying it."""
+    try:
+        body = (token or "").split(".")[0]
+        body += "=" * (-len(body) % 4)
+        iat = json.loads(base64.urlsafe_b64decode(body.encode()).decode("utf-8")).get("iat")
+        return int(iat) if isinstance(iat, (int, float)) and not isinstance(iat, bool) else None
+    except Exception:  # noqa: BLE001 — junk token: unknown
+        return None
+
+
+# What the PRO engine refuses a launch with when its run-token is older than the newest one it has accepted.
+STALE_TOKEN_REFUSAL = "older than the last one accepted"
+
+
+def engine_hwm(env=None) -> int:
+    """The newest run-token ``iat`` the PRO engine has accepted for this OS user (0 if none/unreadable).
+
+    The engine (patch 990, clock-rollback guard) keeps it in ``$LOCALAPPDATA/.clearcote/.cc_hwm``, else
+    ``$HOME/.clearcote/.cc_hwm``, as a decimal number, and refuses any token with a lower ``iat``. It is per
+    OS user, not per licence or process: another SDK process, the hosted-browser gateway or a run with a
+    different key can all move it past a token this process still holds. Looked up exactly as the engine
+    does it, env var by env var."""
+    env = os.environ if env is None else env
+    base_dir = env.get("LOCALAPPDATA") or env.get("HOME")
+    if not base_dir:
+        return 0
+    try:
+        with open(os.path.join(base_dir, ".clearcote", ".cc_hwm"), encoding="ascii") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return 0
+
+
 def new_launch_id() -> str:
     """One id per browser launch: the backend counts every launch_id as its own slot on per-browser plans."""
     return uuid.uuid4().hex
@@ -461,6 +495,47 @@ class _MachineLease:
             except Exception:  # noqa: BLE001 — transient; offline grace until token exp
                 pass
 
+    def refresh_if_behind_engine(self, force: bool = False) -> bool:
+        """Mint a fresh token when the one held is older than the newest the PRO engine has accepted here.
+
+        The engine refuses such a token outright ("older than the last one accepted"), and a token reused
+        from the cache or from memory for its 24 h life can be: the mark is per OS user, so anything else
+        launching with a newer token moves it (another process, the hosted-browser gateway, another key).
+        Returns True when the token was replaced. ``force`` skips the comparison: the engine has just
+        refused this token (a race this check could not see coming)."""
+        with self._lock:
+            if self.scope == "browser" or not self.token:
+                return False
+            if not force:
+                iat, hwm = token_iat(self.token), engine_hwm()
+                if not iat or not hwm or iat >= hwm:
+                    return False
+            return self._fresh_token()
+
+    def _fresh_token(self) -> bool:
+        """Replace the token with a freshly minted one. First by heartbeating the lease this process knows
+        (its own, or the one another process's owner keeps alive): same lease, nothing revoked, so two
+        processes never knock each other's lease out. If there is no lease id, or the lease is gone, check
+        out again, like a cold ensure(). A definitive refusal (limit, revoked) raises."""
+        if self.lease_id:
+            try:
+                status, body = self._send(f"{self._base}/api/v1/lease/heartbeat",
+                                          {"lease_id": self.lease_id, "nonce": str(uuid.uuid4())})
+            except Exception:  # noqa: BLE001 — unreachable: a checkout below says so properly
+                status, body = 0, {}
+            if status == 200 and body.get("token"):
+                self.token = body["token"]
+                self.exp = float(body["exp"])
+                _write_cache(self._key, self.token, self.exp, self.lease_id)
+                return True
+        self._checkout()
+        if self.scope == "browser":
+            return False
+        if not self._owner:  # the slot is this process's now: keep it alive, check it in at exit
+            self._owner = True
+            self._start_heartbeat()
+        return True
+
     def acquire(self):
         """Ensure a live token, bump the refcount, return a per-launch handle.
 
@@ -468,6 +543,7 @@ class _MachineLease:
         its own checked-out lease, released when that browser closes."""
         if self.scope != "browser":
             self.ensure()
+            self.refresh_if_behind_engine()
         with self._lock:
             if self.scope != "browser":
                 self._refs += 1
@@ -540,6 +616,10 @@ class _LeaseHandle:
         Returns ``(file_path, release)``."""
         return self._ml.bind_launch()
 
+    def refresh_token(self) -> bool:
+        """The engine just refused this token as older than one it accepted: mint a fresh one."""
+        return self._ml.refresh_if_behind_engine(force=True)
+
     def stop(self) -> None:
         self._ml.release()
 
@@ -577,6 +657,22 @@ class _BrowserLease:
         """Bind a per-launch run-token file that follows this browser's rotating token. Returns
         ``(file_path, release)``."""
         return self._token_files.bind(self._token)
+
+    def refresh_token(self) -> bool:
+        """The engine just refused this token as older than one it accepted: mint a fresh one by heartbeating
+        this browser's lease, or, if the lease is gone, by re-taking the slot as the SAME launch."""
+        with self._lock:
+            status, body = self._owner._send(f"{self._owner._base}/api/v1/lease/heartbeat",
+                                             {"lease_id": self.lease_id, "nonce": str(uuid.uuid4())})
+            if status == 200 and body.get("token"):
+                self.token = body["token"]
+                return True
+            if status != 409:
+                return False
+            b2 = self._owner.checkout_for(self._launch_id)  # a refusal (another browser holds it) raises
+            self.lease_id = b2["lease_id"]
+            self.token = b2["token"]
+            return True
 
     def _loop(self, interval: int) -> None:
         while not self._stopped.wait(interval):

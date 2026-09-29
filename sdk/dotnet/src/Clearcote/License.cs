@@ -85,15 +85,22 @@ public sealed class LeaseSession
     private readonly Func<string> _token;
     private readonly Func<Task> _stop;
     private readonly Func<LaunchToken> _bindLaunch;
+    private readonly Func<Task<bool>>? _refresh;
     private int _stopped;
 
-    internal LeaseSession(Func<string> token, string leaseId, Func<Task> stop, Func<LaunchToken> bindLaunch)
+    internal LeaseSession(Func<string> token, string leaseId, Func<Task> stop, Func<LaunchToken> bindLaunch,
+        Func<Task<bool>>? refresh = null)
     {
         _token = token;
         LeaseId = leaseId;
         _stop = stop;
         _bindLaunch = bindLaunch;
+        _refresh = refresh;
     }
+
+    /// The engine refused this lease's token as older than one it has already accepted on this machine:
+    /// mint a fresh one. True when <see cref="Token"/> now holds it.
+    public Task<bool> RefreshTokenAsync() => _refresh?.Invoke() ?? Task.FromResult(false);
 
     /// The current (rotating) run-token injected as CLEARCOTE_RUN_TOKEN. Reads the shared
     /// per-machine lease's live token, so a heartbeat rotation is reflected here.
@@ -261,6 +268,44 @@ public static class License
         return null;
     }
 
+    /// When a run-token was minted (its <c>iat</c>, epoch seconds), read from its payload WITHOUT verifying it.
+    public static long? TokenIat(string? token)
+    {
+        try
+        {
+            var body = (token ?? "").Split('.')[0].Replace('-', '+').Replace('_', '/');
+            body = body.PadRight(body.Length + (4 - body.Length % 4) % 4, '=');
+            using var doc = JsonDocument.Parse(Convert.FromBase64String(body));
+            return doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("iat", out var i) && i.ValueKind == JsonValueKind.Number
+                ? (long)i.GetDouble() : null;
+        }
+        catch { return null; }
+    }
+
+    /// What the PRO engine refuses a launch with when its run-token is older than the newest it has accepted.
+    public const string StaleTokenRefusal = "older than the last one accepted";
+
+    /// The newest run-token <c>iat</c> the PRO engine has accepted for this OS user (0 if none/unreadable).
+    ///
+    /// The engine (patch 990, clock-rollback guard) keeps it in <c>$LOCALAPPDATA/.clearcote/.cc_hwm</c>, else
+    /// <c>$HOME/.clearcote/.cc_hwm</c>, as a decimal number, and refuses any token with a lower <c>iat</c>. It is
+    /// per OS user, not per licence or process: another SDK process, the hosted-browser gateway or a run with
+    /// a different key can all move it past a token this process still holds. Looked up exactly as the
+    /// engine does it, env var by env var. <paramref name="env"/> defaults to this process's environment.
+    public static long EngineHwm(IDictionary<string, string?>? env = null)
+    {
+        string? Get(string k) => env is null ? Environment.GetEnvironmentVariable(k) : (env.TryGetValue(k, out var v) ? v : null);
+        var baseDir = Get("LOCALAPPDATA");
+        if (string.IsNullOrEmpty(baseDir)) baseDir = Get("HOME");
+        if (string.IsNullOrEmpty(baseDir)) return 0;
+        try
+        {
+            return long.TryParse(File.ReadAllText(Path.Combine(baseDir, ".clearcote", ".cc_hwm")).Trim(), out var v) ? v : 0;
+        }
+        catch { return 0; }
+    }
+
     // The plan whose tokens are per browser. Only used to keep such tokens out of the shared cache.
     private const string PerBrowserPlan = "free";
 
@@ -354,6 +399,7 @@ public static class License
         private readonly bool _quiet;
         private readonly ProxySpec? _proxy;
         private readonly SemaphoreSlim _gate = new(1, 1);
+        private readonly SemaphoreSlim _refreshGate = new(1, 1);
         private readonly TokenFileSet _tokenFiles = new();
         private volatile string? _token;
         private long _exp;
@@ -437,6 +483,7 @@ public static class License
             if (pending is not null) return StartBrowser(pending, pendingLaunch!);
             if (_scope == "browser") return await AcquireBrowserAsync().ConfigureAwait(false);
 
+            await RefreshIfBehindEngineAsync().ConfigureAwait(false);
             Interlocked.Increment(ref _refs);
             // Per-launch handle: reads the machine's (rotating) token live; StopAsync just decrefs
             // (NO checkin — the shared slot is checked in once at process exit).
@@ -444,7 +491,74 @@ public static class License
             {
                 Interlocked.Decrement(ref _refs);
                 return Task.CompletedTask;
-            }, BindLaunch);
+            }, BindLaunch, () => RefreshIfBehindEngineAsync(force: true));
+        }
+
+        /// Mint a fresh token when the one held is older than the newest the PRO engine has accepted here.
+        ///
+        /// The engine refuses such a token outright ("older than the last one accepted"), and a token reused
+        /// from the cache or from memory for its 24 h life can be: the mark is per OS user, so anything else
+        /// launching with a newer token moves it (another process, the hosted-browser gateway, another key).
+        /// True when the token was replaced. <paramref name="force"/> skips the comparison: the engine has
+        /// just refused this token (a race this check could not see coming).
+        public async Task<bool> RefreshIfBehindEngineAsync(bool force = false)
+        {
+            if (_scope == "browser" || _token is null) return false;
+            await _refreshGate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                if (!force)
+                {
+                    var iat = TokenIat(_token);
+                    var hwm = EngineHwm();
+                    if (iat is null or 0 || hwm == 0 || iat >= hwm) return false;
+                }
+                return await FreshTokenAsync().ConfigureAwait(false);
+            }
+            finally { _refreshGate.Release(); }
+        }
+
+        /// Replace the token with a freshly minted one. First by heartbeating the lease this process knows
+        /// (its own, or the one another process's owner keeps alive): same lease, nothing revoked, so two
+        /// processes never knock each other's lease out. With no lease id, or once the lease is gone, check
+        /// out again like a cold acquire. A definitive refusal (limit, revoked) throws.
+        private async Task<bool> FreshTokenAsync()
+        {
+            if (!string.IsNullOrEmpty(_leaseId))
+            {
+                try
+                {
+                    using var res = await PostJsonAsync($"{_baseUrl}/api/v1/lease/heartbeat", _key,
+                        new { lease_id = _leaseId, nonce = Guid.NewGuid().ToString() }, _proxy).ConfigureAwait(false);
+                    if (res.IsSuccessStatusCode)
+                    {
+                        using var d = JsonDocument.Parse(await res.Content.ReadAsStringAsync().ConfigureAwait(false));
+                        if (d.RootElement.TryGetProperty("token", out var t) && t.ValueKind == JsonValueKind.String)
+                        {
+                            SetToken(t.GetString()!);
+                            if (d.RootElement.TryGetProperty("exp", out var e) && e.TryGetInt64(out var exp)) _exp = exp;
+                            WriteCache(_key, _token!, _exp, _leaseId);
+                            return true;
+                        }
+                    }
+                }
+                catch { /* unreachable: the checkout below says so properly */ }
+            }
+            var browserScoped = await CheckoutAsync(NewLaunchId()).ConfigureAwait(false);
+            if (browserScoped is not null)
+            {
+                // The plan turned per-browser mid-process: that checkout is nobody's, so give it straight back.
+                try { using var _ = await PostAsync("/api/v1/lease/checkin", new { lease_id = browserScoped.LeaseId }).ConfigureAwait(false); }
+                catch { /* the lease TTL reclaims it */ }
+                return false;
+            }
+            if (!_owner)
+            {
+                // The slot is this process's now: keep it alive, check it in at exit.
+                _owner = true;
+                StartHeartbeat();
+            }
+            return true;
         }
 
         /// POST a checkout for one launch. Throws the backend's verdict; network errors propagate.
@@ -618,7 +732,7 @@ public static class License
             _owner = owner;
             _launchId = launchId;
             _token = d.Token;
-            Session = new LeaseSession(() => _token, d.LeaseId, StopAsync, BindLaunch);
+            Session = new LeaseSession(() => _token, d.LeaseId, StopAsync, BindLaunch, RefreshTokenAsync);
             var hbMs = Math.Max(5, d.HeartbeatSec) * 1000;
             var ct = _cts.Token;
             _ = Task.Run(async () =>
@@ -650,6 +764,26 @@ public static class License
                     catch { /* transient; the next beat retries, and the lease TTL is the backstop */ }
                 }
             });
+        }
+
+        /// The engine refused this token as older than one it accepted: mint a fresh one by heartbeating this
+        /// browser's lease or, if the lease is gone, by re-taking the slot as the SAME launch.
+        public async Task<bool> RefreshTokenAsync()
+        {
+            using var res = await _owner.PostAsync("/api/v1/lease/heartbeat",
+                new { lease_id = Session.LeaseId, nonce = Guid.NewGuid().ToString() }).ConfigureAwait(false);
+            if (res.IsSuccessStatusCode)
+            {
+                using var d = JsonDocument.Parse(await res.Content.ReadAsStringAsync().ConfigureAwait(false));
+                if (!d.RootElement.TryGetProperty("token", out var t) || t.ValueKind != JsonValueKind.String) return false;
+                SetToken(t.GetString()!);
+                return true;
+            }
+            if ((int)res.StatusCode != 409) return false;
+            var again = await _owner.CheckoutForAsync(_launchId).ConfigureAwait(false); // a refusal throws
+            Session.LeaseId = again.LeaseId;
+            SetToken(again.Token);
+            return true;
         }
 
         public async Task StopAsync()
@@ -729,6 +863,27 @@ public static class License
         {
             if (lease is not null) { try { await lease.StopAsync().ConfigureAwait(false); } catch { /* the start failure is what matters */ } }
             throw;
+        }
+    }
+
+    /// Start a browser; if the PRO engine refuses the run-token as older than one it has already accepted on
+    /// this machine ("older than the last one accepted"), mint a fresh token and start once more.
+    ///
+    /// AcquireLeaseAsync already replaces a token it can SEE is older than the engine's mark. This covers the
+    /// race it cannot see: another process (a parallel launch, the hosted-browser gateway, another key) moving
+    /// the mark between that check and this launch. <paramref name="start"/> must build its env from
+    /// <c>lease.Token</c> each time it is called; the bound token file follows the lease by itself.
+    /// Playwright's launch error carries the engine's stderr, which is where the refusal lands.
+    public static async Task<T> RetryOnStaleRunTokenAsync<T>(LeaseSession? lease, Func<Task<T>> start)
+    {
+        try
+        {
+            return await start().ConfigureAwait(false);
+        }
+        catch (Exception e) when (lease is not null && e.ToString().Contains(StaleTokenRefusal))
+        {
+            if (!await lease.RefreshTokenAsync().ConfigureAwait(false)) throw;
+            return await start().ConfigureAwait(false);
         }
     }
 

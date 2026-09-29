@@ -160,6 +160,42 @@ export function tokenPlan(token: string): string | undefined {
     return undefined;
   }
 }
+
+/** When a run-token was minted (its `iat`, epoch seconds), read from its payload WITHOUT verifying it. */
+export function tokenIat(token: string): number | undefined {
+  try {
+    const body = token.split(".")[0] ?? "";
+    const json = Buffer.from(body.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+    const iat = (JSON.parse(json) as { iat?: unknown }).iat;
+    return typeof iat === "number" && Number.isFinite(iat) ? Math.trunc(iat) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** What the PRO engine refuses a launch with when its run-token is older than the newest one it has accepted. */
+export const STALE_TOKEN_REFUSAL = "older than the last one accepted";
+
+/**
+ * The newest run-token `iat` the PRO engine has accepted for this OS user (0 if none/unreadable).
+ *
+ * The engine (patch 990, clock-rollback guard) keeps it in `$LOCALAPPDATA/.clearcote/.cc_hwm`, else
+ * `$HOME/.clearcote/.cc_hwm`, as a decimal number, and refuses any token with a lower `iat`. It is per OS
+ * user, not per licence or process: another SDK process, the hosted-browser gateway or a run with a
+ * different key can all move it past a token this process still holds. Looked up exactly as the engine
+ * does it, env var by env var.
+ */
+export function engineHwm(env: Record<string, string | undefined> = process.env): number {
+  const baseDir = env.LOCALAPPDATA || env.HOME;
+  if (!baseDir) return 0;
+  try {
+    const v = Number.parseInt(readFileSync(join(baseDir, ".clearcote", ".cc_hwm"), "ascii").trim(), 10);
+    return Number.isFinite(v) ? v : 0;
+  } catch {
+    return 0;
+  }
+}
+
 function writeCache(licenseKey: string, token: string, exp: number, leaseId?: string): void {
   try {
     const dir = join(homedir(), ".clearcote");
@@ -221,6 +257,11 @@ export interface LeaseSession {
    * stops advancing. Call release() when the browser closes. Older engines ignore the file.
    */
   bindLaunch(): { file: string; release(): void };
+  /**
+   * The engine refused this lease's token as older than one it has already accepted on this machine:
+   * mint a fresh one. Resolves true when `token` now holds it.
+   */
+  refreshToken?(): Promise<boolean>;
 }
 
 // Seconds of headroom kept before a token's exp: reuse it only while still valid
@@ -296,6 +337,7 @@ class MachineLease {
   private timer: NodeJS.Timeout | null = null;
   private refs = 0;
   private ensuring: Promise<void> | null = null;
+  private refreshing: Promise<boolean> | null = null;
   private engineResolved: string | null = null;
 
   constructor(
@@ -443,6 +485,62 @@ class MachineLease {
     (this.timer as unknown as { unref?: () => void }).unref?.();
   }
 
+  /**
+   * Mint a fresh token when the one held is older than the newest the PRO engine has accepted here.
+   *
+   * The engine refuses such a token outright ("older than the last one accepted"), and a token reused
+   * from the cache or from memory for its 24 h life can be: the mark is per OS user, so anything else
+   * launching with a newer token moves it (another process, the hosted-browser gateway, another key).
+   * Resolves true when the token was replaced. `force` skips the comparison: the engine has just refused
+   * this token (a race this check could not see coming). Concurrent callers share one refresh.
+   */
+  refreshIfBehindEngine(force = false): Promise<boolean> {
+    if (this.perBrowser() || !this.token) return Promise.resolve(false);
+    if (!force) {
+      const iat = tokenIat(this.token);
+      const hwm = engineHwm();
+      if (!iat || !hwm || iat >= hwm) return Promise.resolve(false);
+    }
+    if (!this.refreshing) this.refreshing = this.freshToken().finally(() => { this.refreshing = null; });
+    return this.refreshing;
+  }
+
+  /**
+   * Replace the token with a freshly minted one. First by heartbeating the lease this process knows (its
+   * own, or the one another process's owner keeps alive): same lease, nothing revoked, so two processes
+   * never knock each other's lease out. With no lease id, or once the lease is gone, check out again like
+   * a cold ensure(). A definitive refusal (limit, revoked) throws.
+   */
+  private async freshToken(): Promise<boolean> {
+    if (this.leaseId) {
+      try {
+        const res = await postJson(`${this.base}/api/v1/lease/heartbeat`, this.key, {
+          lease_id: this.leaseId,
+          nonce: randomUUID(),
+        }, this.proxy);
+        if (res.ok) {
+          const d = (await res.json()) as { token?: string; exp?: number };
+          if (typeof d.token === "string") {
+            this.token = d.token;
+            if (typeof d.exp === "number") this.exp = d.exp;
+            writeCache(this.key, d.token, this.exp, this.leaseId);
+            return true;
+          }
+        }
+      } catch {
+        /* unreachable: the checkout below says so properly */
+      }
+    }
+    await this.checkout();
+    if (this.perBrowser()) return false;
+    if (!this.owner) {
+      // The slot is this process's now: keep it alive, check it in at exit.
+      this.owner = true;
+      this.startHeartbeat();
+    }
+    return true;
+  }
+
   async acquire(): Promise<LeaseSession> {
     if (this.perBrowser()) return this.acquireBrowser();
     await this.ensure();
@@ -453,6 +551,7 @@ class MachineLease {
       this.pendingBrowser = null;
       return pending ? this.startBrowser(pending.co, pending.launchId) : this.acquireBrowser();
     }
+    await this.refreshIfBehindEngine();
     this.refs++;
     const self = this;
     return {
@@ -468,6 +567,7 @@ class MachineLease {
         self.release();
       },
       bindLaunch: () => self.bindLaunch(),
+      refreshToken: () => self.refreshIfBehindEngine(true),
     } as LeaseSession;
   }
 
@@ -569,6 +669,27 @@ class BrowserLease {
     }
   }
 
+  /**
+   * The engine refused this token as older than one it accepted: mint a fresh one by heartbeating this
+   * browser's lease or, if the lease is gone, by re-taking the slot as the SAME launch.
+   */
+  async refreshToken(): Promise<boolean> {
+    const res = await this.owner.post("/api/v1/lease/heartbeat", { lease_id: this.leaseId, nonce: randomUUID() });
+    if (res.ok) {
+      const d = (await res.json()) as { token?: string };
+      if (typeof d.token === "string") {
+        this.token = d.token;
+        return true;
+      }
+      return false;
+    }
+    if (res.status !== 409) return false;
+    const co = await this.owner.checkoutFor(this.launchId); // a refusal (another browser holds it) throws
+    this.leaseId = co.lease_id;
+    this.token = co.token;
+    return true;
+  }
+
   async stop(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
@@ -596,6 +717,7 @@ class BrowserLease {
       },
       stop: () => self.stop(),
       bindLaunch: () => self.bindLaunch(),
+      refreshToken: () => self.refreshToken(),
     } as LeaseSession;
   }
 }
