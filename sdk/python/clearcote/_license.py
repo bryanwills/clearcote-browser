@@ -166,13 +166,26 @@ def _write_cache(license_key: str, token: str, exp: float, lease_id: str | None 
         pass
 
 
+def _user_agent() -> str:
+    """Names this SDK and its version on every licence call, so the licence server's logs can tell SDK
+    builds apart, and tell clients that are not an SDK from ours. Spelled "User-Agent" by the callers:
+    the proxied path then replaces its own default instead of sending a second header. Resolved per
+    call because this module is imported before the package sets __version__."""
+    try:
+        from . import __version__
+    except ImportError:
+        return "clearcote-sdk-python"
+    return f"clearcote-sdk-python/{__version__}"
+
+
 def _post(url: str, license_key: str, body: dict, timeout: float = 15.0, proxy=None):
     if proxy:
         # license_through_proxy: through the launch proxy (HTTP CONNECT or SOCKS5). The direct path
         # below is unchanged from before the option existed.
         res = proxied_request(url, method="POST", body=json.dumps(body), timeout=30.0, proxy=proxy,
                               headers={"authorization": f"Bearer {license_key}",
-                                       "content-type": "application/json"})
+                                       "content-type": "application/json",
+                                       "User-Agent": _user_agent()})
         try:
             payload = res.json() if res.text().strip() else {}
         except ValueError:
@@ -182,6 +195,7 @@ def _post(url: str, license_key: str, body: dict, timeout: float = 15.0, proxy=N
     req = request.Request(url, data=data, method="POST", headers={
         "authorization": f"Bearer {license_key}",
         "content-type": "application/json",
+        "User-Agent": _user_agent(),
     })
     try:
         with request.urlopen(req, timeout=timeout) as resp:
@@ -698,7 +712,8 @@ def get_session_seats(license_key: str | None = None, api_base: str | None = Non
     try:
         via = to_proxy_spec(proxy) if (license_through_proxy_requested(license_through_proxy) and proxy) else None
         res = proxied_request(f"{_api_base(api_base)}/api/v1/lease/seats", method="GET",
-                              headers={"authorization": f"Bearer {key}"}, timeout=15.0, proxy=via)
+                              headers={"authorization": f"Bearer {key}", "User-Agent": _user_agent()},
+                              timeout=15.0, proxy=via)
         try:
             body = res.json()
         except ValueError:

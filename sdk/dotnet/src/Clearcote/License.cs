@@ -301,6 +301,11 @@ public static class License
         return System.Text.RegularExpressions.Regex.IsMatch(raw, "^(1|true|yes|on)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
     }
 
+    /// Names this SDK and its version on every licence call, so the licence server's logs can tell SDK builds
+    /// apart, and tell clients that are not an SDK from ours. HttpClient sends no User-Agent at all by
+    /// default, which is how every licence call from this SDK looked until now.
+    internal static readonly string LicenseUserAgent = $"clearcote-sdk-dotnet/{Clearcote.Version}";
+
     private static async Task<HttpResponseMessage> PostJsonAsync(string url, string licenseKey, object body, ProxySpec? proxy = null)
     {
         // Through the launch proxy when LicenseThroughProxy is on; otherwise the unchanged direct path.
@@ -311,6 +316,7 @@ public static class License
             Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"),
         };
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", licenseKey);
+        req.Headers.UserAgent.ParseAdd(LicenseUserAgent);
         return await client.SendAsync(req).ConfigureAwait(false);
     }
 
@@ -696,14 +702,19 @@ public static class License
         var ml = _machineLeases.GetOrAdd(mapKey,
             _ => new MachineLease(licenseKey, baseUrl, ResolveInstanceId(), sdkVersion, engineVersion, quiet, viaProxy));
         if (Interlocked.Exchange(ref _exitHooked, 1) == 0)
-        {
-            AppDomain.CurrentDomain.ProcessExit += (_, _) =>
-            {
-                foreach (var m in _machineLeases.Values)
-                    try { m.ShutdownAsync().GetAwaiter().GetResult(); } catch { /* best-effort */ }
-            };
-        }
+            AppDomain.CurrentDomain.ProcessExit += (_, _) => ShutdownAllLeasesAsync().GetAwaiter().GetResult();
         return await ml.AcquireAsync().ConfigureAwait(false);
+    }
+
+    /// Stop every machine lease's heartbeat and check it in (process exit), and forget it. Tests call this so
+    /// a lease's background heartbeat never outlives its test and lands on the next test's handler.
+    internal static async Task ShutdownAllLeasesAsync()
+    {
+        foreach (var (key, m) in _machineLeases.ToArray())
+        {
+            _machineLeases.TryRemove(key, out _);
+            try { await m.ShutdownAsync().ConfigureAwait(false); } catch { /* best-effort */ }
+        }
     }
 
     /// Start a browser; if it fails to start, release the lease before re-throwing. On a per-browser plan
@@ -737,7 +748,7 @@ public static class License
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             using var req = new HttpRequestMessage(HttpMethod.Get, $"{ApiBase(opts)}/api/v1/lease/seats");
             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
-            req.Headers.UserAgent.ParseAdd("clearcote-sdk");
+            req.Headers.UserAgent.ParseAdd(LicenseUserAgent);
             using var res = await client.SendAsync(req, cts.Token).ConfigureAwait(false);
             var status = (int)res.StatusCode;
             int? used = null, limit = null;

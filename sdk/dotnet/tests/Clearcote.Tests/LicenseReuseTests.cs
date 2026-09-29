@@ -147,4 +147,139 @@ public class LicenseReuseTests
         Assert.Equal(0, eps.Count(e => e == "checkout"));
         Assert.Equal("LEGACY", lease!.Token);
     }
+
+    // ── heartbeat 409: reclaimed/expired -> re-checkout ──────────────────────────────────────────────
+    // The backend answers a heartbeat for a lease it no longer holds with 409 (LEASE_NOT_FOUND /
+    // LEASE_EXPIRED) and the SDK must re-checkout to keep its slot. The per-browser (free) loop is covered
+    // in LicensePerBrowserTests; these run the MACHINE (paid) loop for real at its 5 s floor. Every test
+    // ends with ShutdownAllLeasesAsync: a live heartbeat would otherwise keep firing into later tests'
+    // handlers (it did, once, in an ad-hoc probe of exactly this loop).
+
+    private static HttpResponseMessage Resp(int status, string json) =>
+        new((HttpStatusCode)status) { Content = new StringContent(json) };
+
+    private static async Task<bool> Until(Func<bool> pred, int ms)
+    {
+        var end = DateTime.UtcNow.AddMilliseconds(ms);
+        while (DateTime.UtcNow < end) { if (pred()) return true; await Task.Delay(100); }
+        return pred();
+    }
+
+    /// The cold checkout gets L1 with a 5 s heartbeat; after that, heartbeat/checkout answers come from
+    /// `script` in order (a null body throws, as a dropped connection would). Records (endpoint, lease_id).
+    private static FakeHandler Scripted(List<(string Ep, string LeaseId)> hits, Queue<(string Ep, int Status, string? Json)> script)
+    {
+        var checkouts = 0;
+        return new FakeHandler(req =>
+        {
+            var ep = req.RequestUri!.AbsolutePath.Split('/').Last();
+            var body = req.Content is null ? "{}" : req.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+            var leaseId = ep == "heartbeat" ? JsonDocument.Parse(body).RootElement.GetProperty("lease_id").GetString()! : "";
+            lock (hits) hits.Add((ep, leaseId));
+            var exp = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 800;
+            if (ep == "checkout" && Interlocked.Increment(ref checkouts) == 1)
+                return Resp(200, $"{{\"lease_id\":\"L1\",\"token\":\"TOK-1\",\"exp\":{exp},\"heartbeat_interval_sec\":5}}");
+            lock (script)
+            {
+                if (script.Count > 0 && script.Peek().Ep == ep)
+                {
+                    var (_, status, json) = script.Dequeue();
+                    if (json is null) throw new HttpRequestException("connection reset");
+                    return Resp(status, json.Replace("{exp}", exp.ToString()));
+                }
+            }
+            return ep == "heartbeat" ? Resp(200, $"{{\"token\":\"TOK-HB\",\"exp\":{exp}}}") : Resp(200, "{}");
+        });
+    }
+
+    private static (string Ep, string LeaseId)[] Snapshot(List<(string Ep, string LeaseId)> hits)
+    {
+        lock (hits) return hits.ToArray();
+    }
+
+    [Fact]
+    public async Task Machine_lease_409_rechecks_out_and_heartbeats_the_new_lease()
+    {
+        var hits = new List<(string Ep, string LeaseId)>();
+        var script = new Queue<(string Ep, int Status, string? Json)>(new (string, int, string?)[]
+        {
+            ("heartbeat", 409, "{\"code\":\"LEASE_EXPIRED\"}"),
+            ("checkout", 200, "{\"lease_id\":\"L2\",\"token\":\"TOK-2\",\"exp\":{exp}}"),
+            ("heartbeat", 200, "{\"token\":\"TOK-3\",\"exp\":{exp}}"),
+        });
+        using var s = new Sandbox().Env("CLEARCOTE_LICENSE_KEY", UniqueKey("hb409"))
+            .Env("CLEARCOTE_LICENSE_API", "http://test.local").Http(Scripted(hits, script));
+        s.TempHome();
+        try
+        {
+            var h = await License.AcquireLeaseAsync(new LicenseOptions(), "0.17.1", true, () => Engine("150.0.7871.114"));
+            Assert.True(await Until(() => Snapshot(hits).Count(x => x.Ep == "heartbeat") >= 2, 20000));
+            var seq = Snapshot(hits);
+            Assert.Equal(new[] { "checkout", "heartbeat", "checkout", "heartbeat" }, seq.Take(4).Select(x => x.Ep).ToArray());
+            Assert.Equal("L1", seq[1].LeaseId);   // the refused beat
+            Assert.Equal("L2", seq[3].LeaseId);   // the next beat holds the re-checked-out lease
+            Assert.True(await Until(() => h!.Token == "TOK-3", 2000));
+        }
+        finally { await License.ShutdownAllLeasesAsync(); }
+    }
+
+    [Fact]
+    public async Task Machine_lease_409_keeps_retrying_through_a_refused_and_a_failed_recheckout()
+    {
+        var hits = new List<(string Ep, string LeaseId)>();
+        var script = new Queue<(string Ep, int Status, string? Json)>(new (string, int, string?)[]
+        {
+            ("heartbeat", 409, "{\"code\":\"LEASE_EXPIRED\"}"),
+            ("checkout", 429, "{\"code\":\"CONCURRENCY_LIMIT_EXCEEDED\"}"),
+            ("heartbeat", 409, "{\"code\":\"LEASE_EXPIRED\"}"),
+            ("checkout", 0, null),                                                    // connection dropped
+            ("heartbeat", 409, "{\"code\":\"LEASE_NOT_FOUND\"}"),
+            ("checkout", 200, "{\"lease_id\":\"L9\",\"token\":\"TOK-9\",\"exp\":{exp}}"),
+            ("heartbeat", 200, "{\"token\":\"TOK-10\",\"exp\":{exp}}"),
+        });
+        using var s = new Sandbox().Env("CLEARCOTE_LICENSE_KEY", UniqueKey("hb409retry"))
+            .Env("CLEARCOTE_LICENSE_API", "http://test.local").Http(Scripted(hits, script));
+        s.TempHome();
+        try
+        {
+            var h = await License.AcquireLeaseAsync(new LicenseOptions(), "0.17.1", true, () => Engine("150.0.7871.114"));
+            Assert.True(await Until(() => Snapshot(hits).Count(x => x.Ep == "heartbeat") >= 4, 35000));
+            var seq = Snapshot(hits).Take(8).ToArray();
+            Assert.Equal(new[] { "checkout", "heartbeat", "checkout", "heartbeat", "checkout", "heartbeat", "checkout", "heartbeat" },
+                seq.Select(x => x.Ep).ToArray());
+            Assert.Equal(new[] { "L1", "L1", "L1", "L9" }, seq.Where(x => x.Ep == "heartbeat").Select(x => x.LeaseId).ToArray());
+            Assert.True(await Until(() => h!.Token == "TOK-10", 2000));
+        }
+        finally { await License.ShutdownAllLeasesAsync(); }
+    }
+
+    // ── User-Agent: every licence call names the SDK and its version ─────────────────────────────────
+    // So the licence server's logs can tell SDK builds apart (2026-09-29: the only clients stuck on 409s
+    // sent no User-Agent at all, and HttpClient sends none by default).
+    [Fact]
+    public async Task Licence_calls_send_one_user_agent_naming_the_sdk_version()
+    {
+        var seen = new List<(string Ep, string Uas)>();
+        var handler = new FakeHandler(req =>
+        {
+            var ep = req.RequestUri!.AbsolutePath.Split('/').Last();
+            var uas = req.Headers.TryGetValues("User-Agent", out var v) ? string.Join(" | ", v) : "<none>";
+            lock (seen) seen.Add((ep, uas));
+            var exp = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 800;
+            return ep == "checkout"
+                ? Resp(200, $"{{\"lease_id\":\"L1\",\"token\":\"TOK\",\"exp\":{exp},\"heartbeat_interval_sec\":3600}}")
+                : Resp(200, "{\"used\":1,\"limit\":5}");
+        });
+        using var s = new Sandbox().Env("CLEARCOTE_LICENSE_KEY", UniqueKey("ua"))
+            .Env("CLEARCOTE_LICENSE_API", "http://test.local").Http(handler);
+        s.TempHome();
+        try
+        {
+            await License.AcquireLeaseAsync(new LicenseOptions(), "0.17.1", true, () => Engine("150.0.7871.114"));
+            Assert.Equal(SeatsState.Ok, (await License.GetSessionSeatsAsync(new LicenseOptions())).State);
+            var want = $"clearcote-sdk-dotnet/{Clearcote.Version}";
+            Assert.Equal(new[] { ("checkout", want), ("seats", want) }, seen.ToArray());
+        }
+        finally { await License.ShutdownAllLeasesAsync(); }
+    }
 }

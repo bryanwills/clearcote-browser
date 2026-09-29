@@ -19,6 +19,19 @@ import { proxiedRequest, toProxySpec, type ProxySpec, type SimpleResponse } from
 const DEFAULT_API_BASE = "https://www.clearcotelabs.com";
 const RUN_TOKEN_ENV = "CLEARCOTE_RUN_TOKEN";
 
+/**
+ * Names this SDK and its version on every licence call (fetch alone says just "node"), so the licence
+ * server's logs can tell SDK builds apart, and tell clients that are not an SDK from ours. Spelled
+ * "User-Agent": the proxied path then replaces its own default instead of sending a second header.
+ */
+const LICENSE_USER_AGENT = `clearcote-sdk-node/${(() => {
+  try {
+    return JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
+  } catch {
+    return "unknown";
+  }
+})()}`;
+
 export interface LicenseOptions {
   /** License key (`cc_lic_...`). Resolved from this > CLEARCOTE_LICENSE_KEY env >
    * ~/.clearcote/license.key. When absent, licensing is fully inert (free mode). */
@@ -179,7 +192,7 @@ export function newLaunchId(): string {
 async function postJson(url: string, licenseKey: string, body: unknown, proxy?: ProxySpec | null): Promise<Response | SimpleResponse> {
   const init = {
     method: "POST",
-    headers: { authorization: `Bearer ${licenseKey}`, "content-type": "application/json" },
+    headers: { authorization: `Bearer ${licenseKey}`, "content-type": "application/json", "User-Agent": LICENSE_USER_AGENT },
     body: JSON.stringify(body),
   };
   // Through the launch proxy when licenseThroughProxy is on; otherwise the plain fetch path, which
@@ -678,7 +691,7 @@ export async function getSessionSeats(opts: LicenseOptions & { proxy?: string | 
   try {
     const res = await proxiedRequest(`${apiBase(opts)}/api/v1/lease/seats`, {
       method: "GET",
-      headers: { authorization: `Bearer ${key}` },
+      headers: { authorization: `Bearer ${key}`, "User-Agent": LICENSE_USER_AGENT },
       proxy: via,
       timeoutMs: 15_000,
     });
